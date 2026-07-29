@@ -52,6 +52,14 @@ export const documentHandlers = [
     return HttpResponse.json(null, { status: 204 })
   }),
 
+  http.post(`${base}/documents/:id/reprocess`, ({ params }) => {
+    const doc = mockDocuments.find((d) => d.id === params.id)
+    if (!doc) return HttpResponse.json({ message: '未找到' }, { status: 404 })
+    doc.status = 'PENDING'
+    doc.updated_at = new Date().toISOString()
+    return HttpResponse.json(null, { status: 202 })
+  }),
+
   http.get(`${base}/documents/:id/preview`, ({ params }) => {
     const doc = mockDocuments.find((d) => d.id === params.id)
     if (!doc) return HttpResponse.json({ message: '未找到' }, { status: 404 })
