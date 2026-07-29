@@ -34,3 +34,15 @@ async def search_test(body: SearchIn, u=Depends(get_current_user)):
     hits = await searcher.hybrid(body.kb_ids, body.query, body.top_k, body.filters, rerank=False)
     return {"k": body.top_k, "results": [{"text": h.get("text"), "score": h.get("score"),
             "document_title": h.get("document_title"), "chunk_index": h.get("chunk_index")} for h in hits]}
+
+
+class ChatIn(BaseModel):
+    query: str
+    kb_ids: list[str]
+    top_k: int = 5
+
+
+@router.post("/chat")
+async def chat(body: ChatIn, u=Depends(get_current_user), s: AsyncSession = Depends(get_session)):
+    from app.services.chat import answer
+    return await answer(body.query, body.kb_ids, body.top_k, s)
