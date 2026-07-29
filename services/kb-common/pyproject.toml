@@ -22,3 +22,8 @@ dependencies = [
   "passlib[bcrypt]>=1.7",
   "bcrypt<4",  # passlib 1.7.4 incompatible with bcrypt>=4 (detect_wrap_bug); pin until passlib 1.8
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
