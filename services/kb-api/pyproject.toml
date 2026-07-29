@@ -1,0 +1,7 @@
+[project]
+name = "kb-api"
+version = "0.1.0"
+requires-python = ">=3.11,<3.12"
+dependencies = ["kb-common", "uvicorn[standard]>=0.29"]
+[tool.uv.sources]
+kb-common = { path = "../kb-common", editable = true }
