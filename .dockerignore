@@ -1,0 +1,25 @@
+# Frontend (built separately, not needed in python images)
+web/
+# Reference code (large, not a runtime dependency)
+dify/
+# Docs / specs / style refs
+docs/
+.superpowers/
+风格参考/
+# VCS
+.git/
+.gitignore
+# Python caches / venvs
+**/__pycache__/
+**/*.pyc
+**/*.egg-info/
+services/**/.venv/
+# Local dev env (compose injects .env.docker at runtime via env_file)
+.env
+.env.docker
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+# Logs
+*.log
