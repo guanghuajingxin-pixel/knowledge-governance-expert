@@ -1,5 +1,6 @@
 import { http, HttpResponse } from 'msw'
 import { mockKnowledgeBases, mockDirectories } from '../data/knowledge-bases'
+import { mockFaqKb } from '../data/faq-entries'
 import type { KnowledgeBase, KbCreateRequest } from '@/types/knowledge-base'
 
 const base = '/api/v1'
@@ -8,6 +9,10 @@ export const kbHandlers = [
   http.get(`${base}/knowledge-bases`, ({ request }) => {
     const url = new URL(request.url)
     const kbType = url.searchParams.get('kb_type')
+    // Ensure a FAQ KB exists for the FAQ list page (brief Step 9 expects "产品使用 FAQ")
+    if (kbType === 'FAQ' && !mockKnowledgeBases.some((k) => k.kb_type === 'FAQ')) {
+      mockKnowledgeBases.push(mockFaqKb as unknown as KnowledgeBase)
+    }
     let items = mockKnowledgeBases
     if (kbType) items = items.filter((k) => k.kb_type === kbType)
     return HttpResponse.json({ items, total: items.length, page: 1, size: items.length })
