@@ -1,0 +1,7 @@
+[project]
+name = "faq-service"
+version = "0.1.0"
+requires-python = ">=3.11,<3.12"
+dependencies = ["kb-common", "uvicorn[standard]>=0.29", "openpyxl>=3.1"]
+[tool.uv.sources]
+kb-common = { path = "../kb-common", editable = true }
