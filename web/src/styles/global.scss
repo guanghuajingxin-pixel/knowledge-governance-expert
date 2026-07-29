@@ -13,3 +13,21 @@ body {
 * {
   box-sizing: border-box;
 }
+
+/*
+ * Element Plus 2.x 主题变量覆盖（CSS 自定义属性）
+ *
+ * Task 1 在 styles/variables.scss 中以 SCSS 变量 ($--color-primary 等) 形式声明了
+ * 主题色，但 Element Plus 2.x 已改用 CSS 自定义属性 (--el-color-primary 等)，
+ * SCSS 变量无法覆盖 EP 运行时主题。此处显式声明 CSS 变量以使参考截图配色生效。
+ * 对照 CLAUDE.md「Color Palette」与「Layout Pattern」中的取值。
+ */
+:root {
+  --el-color-primary: #409EFF;
+  --el-color-primary-light-9: #ecf5ff;
+  --el-color-success: #67c23a;
+  --el-color-warning: #e6a23c;
+  --el-color-danger: #f56c6c;
+  --el-color-info: #909399;
+  --el-menu-dark-bg-color: #263445;
+}
