@@ -1,0 +1,17 @@
+# Python
+services/**/.venv
+**/__pycache__/
+*.pyc
+
+# Env
+.env
+
+# Frontend
+web/node_modules/
+web/dist/
+
+# OS
+.DS_Store
+
+# SDD workspace
+.superpowers/sdd/

@@ -1,0 +1,20 @@
+name: kb-app
+services:
+  kb-api:
+    build: ./services/kb-api
+    ports: ["8000:8000"]
+    env_file: .env
+    networks: [dev-network]
+  faq-service:
+    build: ./services/faq-service
+    ports: ["8004:8004"]
+    env_file: .env
+    networks: [dev-network]
+  kb-worker:
+    build: ./services/kb-api
+    command: celery -A app.worker worker -Q ingestion --concurrency=2 -l info
+    env_file: .env
+    networks: [dev-network]
+networks:
+  dev-network:
+    external: true
