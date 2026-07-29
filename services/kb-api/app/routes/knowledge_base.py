@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from kb_common.database import get_session
@@ -23,9 +23,20 @@ async def create_kb(body: KbIn, u=Depends(get_current_user), s: AsyncSession = D
     return kb
 
 
-@router.get("", response_model=list[KbOut])
-async def list_kb(u=Depends(get_current_user), s: AsyncSession = Depends(get_session)):
-    return (await s.execute(select(KnowledgeBase).order_by(KnowledgeBase.created_at.desc()))).scalars().all()
+@router.get("")
+async def list_kb(kb_type: str | None = Query(None),
+                  u=Depends(get_current_user), s: AsyncSession = Depends(get_session)):
+    q = select(KnowledgeBase)
+    if kb_type:
+        q = q.where(KnowledgeBase.kb_type == kb_type)
+    rows = (await s.execute(q.order_by(KnowledgeBase.created_at.desc()))).scalars().all()
+    items = [{"id": str(r.id), "name": r.name, "description": r.description,
+              "kb_type": r.kb_type, "owner_id": str(r.owner_id),
+              "chunk_strategy": r.chunk_strategy, "chunk_size": r.chunk_size,
+              "chunk_overlap": r.chunk_overlap, "embedding_model": r.embedding_model,
+              "es_index_name": r.es_index_name,
+              "created_at": r.created_at.isoformat() if r.created_at else None} for r in rows]
+    return {"items": items, "total": len(items), "page": 1, "size": len(items)}
 
 
 @router.get("/{kb_id}", response_model=KbOut)

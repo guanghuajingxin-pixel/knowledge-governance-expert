@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+import time
 from kb_common.database import get_session
 from kb_common.models import Document
 from kb_common.rag import searcher, tracer
@@ -20,12 +21,14 @@ class SearchIn(BaseModel):
 
 @router.post("")
 async def search(body: SearchIn, u=Depends(get_current_user), s: AsyncSession = Depends(get_session)):
+    t0 = time.perf_counter()
     hits = await searcher.hybrid(body.kb_ids, body.query, body.top_k, body.filters, rerank=True)
     doc_ids = {h.get("document_id") for h in hits if h.get("document_id")}
     docs = (await s.execute(select(Document).where(Document.id.in_(doc_ids)))).scalars().all()
     dmap = {str(d.id): (d.original_filename, d.storage_path, d.file_type) for d in docs}
     results = [tracer.trace(h, dmap) for h in hits]
-    return {"results": results, "total": len(results)}
+    took_ms = int((time.perf_counter() - t0) * 1000)
+    return {"results": results, "total": len(results), "took_ms": took_ms}
 
 
 @router.post("/test")
