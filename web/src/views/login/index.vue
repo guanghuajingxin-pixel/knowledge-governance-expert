@@ -64,7 +64,7 @@ async function handleLogin() {
           </el-button>
         </el-form-item>
       </el-form>
-      <div class="login-tip">Mock 模式：用户名 admin / editor，密码任意</div>
+      <div class="login-tip">默认管理员：admin / admin123</div>
     </div>
   </div>
 </template>

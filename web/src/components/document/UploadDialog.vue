@@ -44,7 +44,7 @@ watch(() => props.modelValue, (val) => {
     <el-upload
       v-model:file-list="fileList"
       drag
-      :auto-upload="true"
+      :auto-upload="false"
       :show-file-list="true"
       :on-change="handleChange"
       accept=".pdf,.docx,.pptx,.xlsx,.md,.txt,.html"

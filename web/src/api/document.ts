@@ -13,9 +13,10 @@ export function getDocument(id: string) {
 export function uploadDocument(file: File, kbId: string, directoryId?: string) {
   const formData = new FormData()
   formData.append('file', file)
-  formData.append('kb_id', kbId)
-  if (directoryId) formData.append('directory_id', directoryId)
+  const params: Record<string, string> = { kb_id: kbId }
+  if (directoryId) params.directory_id = directoryId
   return request.post<unknown, { document_id: string; job_id: string; status: string }>('/documents/upload', formData, {
+    params,
     headers: { 'Content-Type': 'multipart/form-data' },
   })
 }

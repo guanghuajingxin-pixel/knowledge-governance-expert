@@ -56,6 +56,18 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '统一检索', icon: 'Search' },
       },
       {
+        path: 'chat',
+        name: 'Chat',
+        component: () => import('@/views/chat/index.vue'),
+        meta: { title: 'RAG 问答', icon: 'ChatLineRound' },
+      },
+      {
+        path: 'settings',
+        name: 'Settings',
+        component: () => import('@/views/settings/index.vue'),
+        meta: { title: '模型配置', icon: 'Setting', roles: ['super_admin', 'admin'] },
+      },
+      {
         path: 'admin/users',
         name: 'AdminUsers',
         component: () => import('@/views/admin/users.vue'),
