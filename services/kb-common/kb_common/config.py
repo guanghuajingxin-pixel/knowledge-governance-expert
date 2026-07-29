@@ -2,8 +2,9 @@ from functools import lru_cache
 from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# 仓库根目录（kb_common/config.py 上两级）下的 .env；无论从哪个服务目录运行都能找到
-_REPO_ROOT = Path(__file__).resolve().parents[2]
+# 仓库根目录（config.py 在 services/kb-common/kb_common/config.py，上三级为仓库根）下的 .env
+# 无论从哪个服务目录运行都能找到
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 _ENV_FILE = _REPO_ROOT / ".env"
 
 class Settings(BaseSettings):
