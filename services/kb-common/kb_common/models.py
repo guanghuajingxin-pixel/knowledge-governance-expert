@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from sqlalchemy import String, Text, Integer, BigInteger, Boolean, DateTime, ForeignKey, func
 from sqlalchemy.dialects.postgresql import UUID, ARRAY
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 class Base(DeclarativeBase): pass
 
