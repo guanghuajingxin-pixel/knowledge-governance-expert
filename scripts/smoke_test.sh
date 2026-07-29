@@ -67,20 +67,20 @@ if [ -z "${EXTERNAL_SERVICES:-}" ]; then
   echo "[0/9] 启动本地服务 (logs: $LOG_DIR)"
   if ! wait_health "$KB_API" kb-api 1; then
     echo "  -> starting kb-api..."
-    (cd "$KB_API_DIR" && uv run uvicorn app.main:app --host 0.0.0.0 --port 8000) \
+    (cd "$KB_API_DIR" && exec uv run uvicorn app.main:app --host 0.0.0.0 --port 8000) \
       >"$LOG_DIR/kb-api.log" 2>&1 &
     PIDS+=($!)
   fi
   if ! wait_health "$FAQ_API" faq-service 1; then
     echo "  -> starting faq-service..."
-    (cd "$FAQ_DIR" && uv run uvicorn app.main:app --host 0.0.0.0 --port 8004) \
+    (cd "$FAQ_DIR" && exec uv run uvicorn app.main:app --host 0.0.0.0 --port 8004) \
       >"$LOG_DIR/faq-service.log" 2>&1 &
     PIDS+=($!)
   fi
   # kb-worker (celery) - no health endpoint, just start it
   if ! pgrep -f "celery.*app.worker" >/dev/null 2>&1; then
     echo "  -> starting kb-worker (celery)..."
-    (cd "$KB_API_DIR" && uv run celery -A app.worker worker -Q ingestion --concurrency=2 -l info) \
+    (cd "$KB_API_DIR" && exec uv run celery -A app.worker worker -Q ingestion --concurrency=2 -l info) \
       >"$LOG_DIR/kb-worker.log" 2>&1 &
     PIDS+=($!)
   fi
@@ -112,8 +112,9 @@ echo "  -> KB id=$KB"
 # --- 3. Upload doc ----------------------------------------------------------
 echo "[3/9] 上传文档"
 echo "hello RAG smoke test. RAG retrieves relevant chunks." > /tmp/s.txt
-curl -s -X POST "$KB_API/api/v1/documents/upload?kb_id=$KB" -H "$H" -F 'file=@/tmp/s.txt' \
-  | python3 -m json.tool | sed 's/^/  /'
+UPLOAD=$(curl -s -X POST "$KB_API/api/v1/documents/upload?kb_id=$KB" -H "$H" -F 'file=@/tmp/s.txt')
+echo "$UPLOAD" | python3 -m json.tool | sed 's/^/  /'
+echo "$UPLOAD" | python3 -c "import sys,json;d=json.load(sys.stdin);assert 'document_id' in d, f'upload failed: {d}'; print('  -> document_id OK')"
 
 # --- 4. Wait for processing -------------------------------------------------
 echo "[4/9] 等待处理 (BGE 首次加载较慢)"
