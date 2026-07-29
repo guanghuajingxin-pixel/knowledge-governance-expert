@@ -1,8 +1,13 @@
 from functools import lru_cache
+from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# 仓库根目录（kb_common/config.py 上两级）下的 .env；无论从哪个服务目录运行都能找到
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_ENV_FILE = _REPO_ROOT / ".env"
+
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=str(_ENV_FILE), extra="ignore")
 
     # 基础设施
     database_url: str = "postgresql+asyncpg://dev:dev123456@127.0.0.1:5432/dev_db"
