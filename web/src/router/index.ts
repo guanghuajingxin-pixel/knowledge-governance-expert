@@ -65,7 +65,7 @@ const routes: RouteRecordRaw[] = [
         path: 'admin/api-keys',
         name: 'AdminApiKeys',
         component: () => import('@/views/admin/api-keys.vue'),
-        meta: { title: 'API Key 管理', icon: 'Key' },
+        meta: { title: 'API Key 管理', icon: 'Key', roles: ['super_admin', 'admin'] },
       },
     ],
   },
