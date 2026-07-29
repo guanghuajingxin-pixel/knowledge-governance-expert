@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routes import auth, users, internal
+from app.routes import auth, users, internal, knowledge_base, directory, document
 
 app = FastAPI(title="KB API")
 app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173"],
@@ -8,6 +8,9 @@ app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173"],
 app.include_router(auth.router)
 app.include_router(users.router)
 app.include_router(internal.router)
+app.include_router(knowledge_base.router)
+app.include_router(directory.router)
+app.include_router(document.router)
 
 @app.get("/health")
 def health(): return {"status": "ok"}
