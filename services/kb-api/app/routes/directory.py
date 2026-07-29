@@ -20,9 +20,26 @@ async def create_dir(kb_id: uuid.UUID, body: DirIn, u=Depends(get_current_user),
 
 @router.get("/knowledge-bases/{kb_id}/directories")
 async def tree(kb_id: uuid.UUID, u=Depends(get_current_user), s: AsyncSession = Depends(get_session)):
-    rows = (await s.execute(select(Directory).where(Directory.kb_id == kb_id))).scalars().all()
-    return [{"id": str(r.id), "parent_id": str(r.parent_id) if r.parent_id else None,
-             "name": r.name, "sort_order": r.sort_order} for r in rows]
+    """Return nested tree (parent -> children) for el-tree.
+    Frontend DirectoryTree.vue uses :props="{label:'name', children:'children'}"
+    and expects top-level nodes (parent_id=null) with nested `children`."""
+    rows = (await s.execute(select(Directory).where(Directory.kb_id == kb_id)
+                            .order_by(Directory.sort_order, Directory.created_at))).scalars().all()
+    nodes: dict[str, dict] = {}
+    for r in rows:
+        nodes[str(r.id)] = {"id": str(r.id), "kb_id": str(r.kb_id),
+                            "parent_id": str(r.parent_id) if r.parent_id else None,
+                            "name": r.name, "sort_order": r.sort_order,
+                            "created_at": r.created_at.isoformat() if r.created_at else None,
+                            "children": []}
+    roots: list[dict] = []
+    for r in rows:
+        nid, pid = str(r.id), (str(r.parent_id) if r.parent_id else None)
+        if pid and pid in nodes:
+            nodes[pid]["children"].append(nodes[nid])
+        else:
+            roots.append(nodes[nid])
+    return roots
 
 
 @router.delete("/directories/{dir_id}")

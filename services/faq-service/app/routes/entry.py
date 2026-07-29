@@ -1,5 +1,5 @@
-from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, Query
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from kb_common.database import get_session
 from kb_common.models import FaqEntry, KnowledgeBase
@@ -28,14 +28,24 @@ async def create(kb_id: uuid.UUID, body: EntryIn, u=Depends(get_current_user),
     return {"id": str(e.id), "status": "INDEXED"}
 
 @router.get("/knowledge-bases/{kb_id}/entries")
-async def list_(kb_id: uuid.UUID, keyword: str = "", u=Depends(get_current_user),
-                s: AsyncSession = Depends(get_session)):
+async def list_(kb_id: uuid.UUID, keyword: str = "", status: str | None = None,
+                page: int = Query(1, ge=1), size: int = Query(20, ge=1, le=200),
+                u=Depends(get_current_user), s: AsyncSession = Depends(get_session)):
+    """PageResult shape: {items, total, page, size} - aligns with frontend listFaqEntries."""
     q = select(FaqEntry).where(FaqEntry.kb_id == kb_id)
     if keyword:
         q = q.where(FaqEntry.question.ilike(f"%{keyword}%"))
-    rows = (await s.execute(q.order_by(FaqEntry.created_at.desc()))).scalars().all()
-    return [{"id": str(r.id), "question": r.question, "answer": r.answer,
-             "keywords": r.keywords, "status": r.status} for r in rows]
+    if status:
+        q = q.where(FaqEntry.status == status)
+    total = (await s.execute(select(func.count()).select_from(q.subquery()))).scalar_one()
+    rows = (await s.execute(q.order_by(FaqEntry.created_at.desc())
+                            .offset((page - 1) * size).limit(size))).scalars().all()
+    items = [{"id": str(r.id), "kb_id": str(r.kb_id),
+              "directory_id": str(r.directory_id) if r.directory_id else None,
+              "question": r.question, "answer": r.answer,
+              "keywords": r.keywords, "status": r.status,
+              "created_at": r.created_at.isoformat() if r.created_at else None} for r in rows]
+    return {"items": items, "total": total, "page": page, "size": size}
 
 @router.delete("/entries/{entry_id}")
 async def delete(entry_id: uuid.UUID, u=Depends(get_current_user), s: AsyncSession = Depends(get_session)):

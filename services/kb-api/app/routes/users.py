@@ -12,7 +12,10 @@ router = APIRouter(prefix="/api/v1", tags=["users"])
 
 @router.get("/users/me")
 async def me(u: User = Depends(get_current_user)):
-    return {"id": str(u.id), "username": u.username, "role": u.role}
+    """Return full UserInfo - aligns with frontend type {id,username,email,role,is_active,created_at}."""
+    return {"id": str(u.id), "username": u.username, "email": u.email or "",
+            "role": u.role, "is_active": u.is_active,
+            "created_at": u.created_at.isoformat() if u.created_at else None}
 
 class ApiKeyIn(BaseModel):
     name: str
@@ -23,11 +26,20 @@ async def create_key(body: ApiKeyIn, u: User = Depends(get_current_user),
     raw = "kb_" + secrets.token_hex(24)
     k = ApiKey(user_id=u.id, name=body.name, key_hash=hashlib.sha256(raw.encode()).hexdigest(),
                key_prefix=raw[:10])
-    s.add(k); await s.commit()
-    return {"id": str(k.id), "key": raw, "name": body.name}  # raw 仅此一次返回
+    s.add(k); await s.commit(); await s.refresh(k)
+    # raw_key 仅此一次返回 - aligns with frontend ApiKeyCreated.raw_key
+    return {"id": str(k.id), "name": k.name, "key_prefix": k.key_prefix,
+            "raw_key": raw, "is_active": k.is_active,
+            "last_used_at": k.last_used_at.isoformat() if k.last_used_at else None,
+            "created_at": k.created_at.isoformat() if k.created_at else None}
 
 @router.get("/auth/api-keys")
 async def list_keys(u: User = Depends(get_current_user), s: AsyncSession = Depends(get_session)):
     from sqlalchemy import select
-    rows = (await s.execute(select(ApiKey).where(ApiKey.user_id == u.id))).scalars().all()
-    return [{"id": str(r.id), "name": r.name, "prefix": r.key_prefix, "is_active": r.is_active} for r in rows]
+    rows = (await s.execute(select(ApiKey).where(ApiKey.user_id == u.id)
+                            .order_by(ApiKey.created_at.desc()))).scalars().all()
+    # key_prefix (not prefix) - aligns with frontend ApiKey type
+    return [{"id": str(r.id), "name": r.name, "key_prefix": r.key_prefix,
+             "is_active": r.is_active,
+             "last_used_at": r.last_used_at.isoformat() if r.last_used_at else None,
+             "created_at": r.created_at.isoformat() if r.created_at else None} for r in rows]
