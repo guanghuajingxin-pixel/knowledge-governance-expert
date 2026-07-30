@@ -98,7 +98,7 @@ JWT_SECRET=kb-mvp-dev-secret
 LLM_BASE_URL=https://open.bigmodel.cn/api/paas/v4
 LLM_API_KEY=
 LLM_MODEL=glm-4-flash
-# MinerU（可选 - 留空则用本地 txt/md/csv 兜底解析）
+# MinerU（可选 - 云解析暂未实现，MVP 仅本地解析 txt/md/csv；配置 key 不会启用 PDF/DOCX）
 MINERU_API_KEY=
 ```
 
