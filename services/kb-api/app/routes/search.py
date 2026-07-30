@@ -6,7 +6,7 @@ import time
 from kb_common.database import get_session
 from kb_common.models import Document
 from kb_common.rag import searcher, tracer
-from app.deps import get_current_user
+from app.deps import get_current_user, get_principal
 
 router = APIRouter(prefix="/api/v1/search", tags=["search"])
 
@@ -20,7 +20,7 @@ class SearchIn(BaseModel):
 
 
 @router.post("")
-async def search(body: SearchIn, u=Depends(get_current_user), s: AsyncSession = Depends(get_session)):
+async def search(body: SearchIn, u=Depends(get_principal), s: AsyncSession = Depends(get_session)):
     t0 = time.perf_counter()
     hits = await _dispatch(body, rerank=True)
     doc_ids = {h.get("document_id") for h in hits if h.get("document_id")}
@@ -56,6 +56,6 @@ class ChatIn(BaseModel):
 
 
 @router.post("/chat")
-async def chat(body: ChatIn, u=Depends(get_current_user), s: AsyncSession = Depends(get_session)):
+async def chat(body: ChatIn, u=Depends(get_principal), s: AsyncSession = Depends(get_session)):
     from app.services.chat import answer
     return await answer(body.query, body.kb_ids, body.top_k, s)

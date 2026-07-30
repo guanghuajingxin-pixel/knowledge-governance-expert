@@ -1,8 +1,8 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, status
 from kb_common.models import User, ApiKey
 from kb_common.security import hash_password
 from kb_common.config import get_settings
-import secrets, hashlib
+import secrets, hashlib, uuid
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from kb_common.database import get_session
@@ -43,3 +43,14 @@ async def list_keys(u: User = Depends(get_current_user), s: AsyncSession = Depen
              "is_active": r.is_active,
              "last_used_at": r.last_used_at.isoformat() if r.last_used_at else None,
              "created_at": r.created_at.isoformat() if r.created_at else None} for r in rows]
+
+@router.delete("/auth/api-keys/{key_id}")
+async def delete_key(key_id: uuid.UUID, u: User = Depends(get_current_user),
+                     s: AsyncSession = Depends(get_session)):
+    k = await s.get(ApiKey, key_id)
+    if not k:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Key 不存在")
+    if k.user_id != u.id and u.role not in ("super_admin", "admin"):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "无权删除他人 Key")
+    await s.delete(k); await s.commit()
+    return {"ok": True}
