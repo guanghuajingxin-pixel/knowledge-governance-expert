@@ -40,7 +40,16 @@ class KnowledgeBase(Base):
     delimiter: Mapped[str | None] = mapped_column(String(50))  # Delimiter 策略分隔符
     embedding_model: Mapped[str] = mapped_column(String(100), default="bge-m3")
     es_index_name: Mapped[str] = mapped_column(String(100), unique=True)
+    status: Mapped[str] = mapped_column(String(20), default="FULLY_PUBLISHED")  # PUBLISHING|FULLY_PUBLISHED|PARTIALLY_FAILED
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class KbFavorite(Base):
+    __tablename__ = "kb_favorites"
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    kb_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("knowledge_bases.id", ondelete="CASCADE"), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
 
 class Directory(Base):
     __tablename__ = "directories"
@@ -66,6 +75,8 @@ class Document(Base):
     # PENDING->PARSING->CHUNKING->EMBEDDING->INDEXING->COMPLETED|FAILED
     chunk_count: Mapped[int] = mapped_column(Integer, default=0)
     error_message: Mapped[str | None] = mapped_column(Text)
+    is_deleted: Mapped[bool] = mapped_column(Boolean, default=False)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
