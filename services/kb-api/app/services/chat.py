@@ -4,6 +4,9 @@ from kb_common.config import get_settings
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from kb_common.models import Document, Setting
+import logging
+
+logger = logging.getLogger(__name__)
 
 SYS_PROMPT = "你是一个严谨的知识库问答助手。只根据下方【参考资料】回答问题。"
 TMPL = """【参考资料】
@@ -40,5 +43,7 @@ async def answer(query: str, kb_ids: list[str], top_k: int, s: AsyncSession) -> 
     try:
         ans = await llm_client.chat(messages, model=model, base_url=base_url, api_key=api_key)
     except Exception as e:
-        ans = f"（LLM 调用失败：{e}。请在 设置 页配置 LLM API Key。）"
+        # 服务端记录原始异常（含上游状态/响应体），对客户端返回固定友好提示避免信息泄漏
+        logger.warning("LLM chat failed: %s", e)
+        ans = "（LLM 问答暂不可用，请在 设置 页检查 LLM API Key 配置。）"
     return {"answer": ans, "citations": cited}

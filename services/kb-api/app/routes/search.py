@@ -22,7 +22,7 @@ class SearchIn(BaseModel):
 @router.post("")
 async def search(body: SearchIn, u=Depends(get_current_user), s: AsyncSession = Depends(get_session)):
     t0 = time.perf_counter()
-    hits = await searcher.hybrid(body.kb_ids, body.query, body.top_k, body.filters, rerank=True)
+    hits = await _dispatch(body, rerank=True)
     doc_ids = {h.get("document_id") for h in hits if h.get("document_id")}
     docs = (await s.execute(select(Document).where(Document.id.in_(doc_ids)))).scalars().all()
     dmap = {str(d.id): (d.original_filename, d.storage_path, d.file_type) for d in docs}
@@ -34,9 +34,19 @@ async def search(body: SearchIn, u=Depends(get_current_user), s: AsyncSession = 
 @router.post("/test")
 async def search_test(body: SearchIn, u=Depends(get_current_user)):
     """检索测试：返回召回内容、K 值、Score，便于调参。"""
-    hits = await searcher.hybrid(body.kb_ids, body.query, body.top_k, body.filters, rerank=False)
+    hits = await _dispatch(body, rerank=False)
     return {"k": body.top_k, "results": [{"text": h.get("text"), "score": h.get("score"),
             "document_title": h.get("document_title"), "chunk_index": h.get("chunk_index")} for h in hits]}
+
+
+async def _dispatch(body: SearchIn, rerank: bool) -> list[dict]:
+    """按 search_type 分发到 semantic/keyword/hybrid；faq 与未知值回退 hybrid。"""
+    st = (body.search_type or "hybrid").lower()
+    if st == "semantic":
+        return await searcher.semantic(body.kb_ids, body.query, body.top_k, body.filters, rerank=rerank)
+    if st == "keyword":
+        return await searcher.keyword(body.kb_ids, body.query, body.top_k, body.filters)
+    return await searcher.hybrid(body.kb_ids, body.query, body.top_k, body.filters, rerank=rerank)
 
 
 class ChatIn(BaseModel):

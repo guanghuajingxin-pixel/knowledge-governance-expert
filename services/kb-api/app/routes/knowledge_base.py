@@ -5,7 +5,7 @@ from kb_common.database import get_session
 from kb_common.models import KnowledgeBase
 from kb_common.clients import es_client
 from app.schemas import KbIn, KbOut
-from app.deps import get_current_user
+from app.deps import get_current_user, require_role
 import uuid as _uuid
 
 router = APIRouter(prefix="/api/v1/knowledge-bases", tags=["kb"])
@@ -48,7 +48,8 @@ async def get_kb(kb_id: _uuid.UUID, u=Depends(get_current_user), s: AsyncSession
 
 
 @router.delete("/{kb_id}")
-async def delete_kb(kb_id: _uuid.UUID, u=Depends(get_current_user), s: AsyncSession = Depends(get_session)):
+async def delete_kb(kb_id: _uuid.UUID, u=Depends(require_role("super_admin", "admin")),
+                    s: AsyncSession = Depends(get_session)):
     kb = await s.get(KnowledgeBase, kb_id)
     if kb:
         if await es_client.es.indices.exists(index=kb.es_index_name):

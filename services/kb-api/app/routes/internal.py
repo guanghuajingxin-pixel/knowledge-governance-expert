@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
+from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from kb_common.database import get_session
 from kb_common.rag import embedder, reranker
@@ -27,7 +28,7 @@ def rerank_(body: RerankIn):
 
 @router.post("/index")
 async def index_doc(document_id: str, s: AsyncSession = Depends(get_session)):
-    from kb_common.models import Document, KnowledgeBase
+    from kb_common.models import Document, KnowledgeBase, Segment
     from kb_common.rag.indexer import index_document
     from kb_common.clients import minio_client
     doc = await s.get(Document, document_id)
@@ -42,6 +43,8 @@ async def index_doc(document_id: str, s: AsyncSession = Depends(get_session)):
         resp.close()
         resp.release_conn()
     markdown = data.decode("utf-8", errors="ignore")
+    # 重索引前清除旧 segments，避免 PG 重复累积（ES 幂等覆盖）
+    await s.execute(delete(Segment).where(Segment.document_id == document_id))
     n = await index_document(s, kb, doc, markdown)
     doc.chunk_count = n; await s.commit()
     return {"chunk_count": n}

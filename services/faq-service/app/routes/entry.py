@@ -3,7 +3,7 @@ from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from kb_common.database import get_session
 from kb_common.models import FaqEntry, KnowledgeBase
-from app.deps import get_current_user
+from app.deps import get_current_user, require_role
 from app.services import faq_index, faq_import
 import uuid
 from pydantic import BaseModel
@@ -16,6 +16,13 @@ class EntryIn(BaseModel):
     keywords: list[str] = []
     directory_id: uuid.UUID | None = None
 
+class EntryUpdate(BaseModel):
+    """部分更新：仅提供的字段会被写入。"""
+    question: str | None = None
+    answer: str | None = None
+    keywords: list[str] | None = None
+    directory_id: uuid.UUID | None = None
+
 @router.post("/knowledge-bases/{kb_id}/entries")
 async def create(kb_id: uuid.UUID, body: EntryIn, u=Depends(get_current_user),
                  s: AsyncSession = Depends(get_session)):
@@ -26,6 +33,31 @@ async def create(kb_id: uuid.UUID, body: EntryIn, u=Depends(get_current_user),
     await faq_index.index_entry(kb, e)
     e.status = "INDEXED"; await s.commit()
     return {"id": str(e.id), "status": "INDEXED"}
+
+@router.put("/entries/{entry_id}")
+async def update(entry_id: uuid.UUID, body: EntryUpdate, u=Depends(get_current_user),
+                 s: AsyncSession = Depends(get_session)):
+    e = await s.get(FaqEntry, entry_id)
+    if not e:
+        raise HTTPException(404, "FAQ 条目不存在")
+    if body.question is not None:
+        e.question = body.question
+    if body.answer is not None:
+        e.answer = body.answer
+    if body.keywords is not None:
+        e.keywords = body.keywords
+    if body.directory_id is not None:
+        e.directory_id = body.directory_id
+    await s.commit()
+    kb = await s.get(KnowledgeBase, e.kb_id)
+    e.status = "DRAFT"; await s.commit()
+    try:
+        await faq_index.index_entry(kb, e)
+        e.status = "INDEXED"
+    except Exception:
+        e.status = "FAILED"
+    await s.commit()
+    return {"id": str(e.id), "status": e.status}
 
 @router.get("/knowledge-bases/{kb_id}/entries")
 async def list_(kb_id: uuid.UUID, keyword: str = "", status: str | None = None,
@@ -48,7 +80,8 @@ async def list_(kb_id: uuid.UUID, keyword: str = "", status: str | None = None,
     return {"items": items, "total": total, "page": page, "size": size}
 
 @router.delete("/entries/{entry_id}")
-async def delete(entry_id: uuid.UUID, u=Depends(get_current_user), s: AsyncSession = Depends(get_session)):
+async def delete(entry_id: uuid.UUID, u=Depends(require_role("super_admin", "admin")),
+                 s: AsyncSession = Depends(get_session)):
     e = await s.get(FaqEntry, entry_id)
     if e:
         await faq_index.delete_entry(str(e.kb_id), str(e.id))

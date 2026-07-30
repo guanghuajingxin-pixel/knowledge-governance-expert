@@ -61,3 +61,40 @@ async def hybrid(kb_ids: list[str], query: str, top_k: int = 10,
         docs = reranker.rerank(query, docs, top_n=top_k)
         # rerank 后补回原始 score
     return docs[:top_k]
+
+
+async def semantic(kb_ids: list[str], query: str, top_k: int = 10,
+                   filters: dict | None = None, rerank: bool = True) -> list[dict]:
+    """仅向量检索（kNN）+ 可选 rerank。返回与 hybrid 同形的 hit dict 列表。"""
+    filters = filters or {}
+    qvec = embedder.embed([query])[0]
+    es = es_client.es
+    flat: list[tuple] = []
+    for kb_id in kb_ids:
+        index = f"kb_{kb_id.replace('-', '')}"
+        if not await es.indices.exists(index=index):
+            continue
+        flat.extend(await _knn(es, index, qvec, top_k, filters))
+    # 单路无需 RRF；按 ES score 排序，rerank 时多取候选
+    flat.sort(key=lambda x: x[1], reverse=True)
+    cand = flat[: top_k * 5 if rerank else top_k]
+    docs = [{"id": hid, "score": sc, **src} for hid, sc, src in cand]
+    if rerank and docs:
+        docs = reranker.rerank(query, docs, top_n=top_k)
+    return docs[:top_k]
+
+
+async def keyword(kb_ids: list[str], query: str, top_k: int = 10,
+                  filters: dict | None = None, rerank: bool = False) -> list[dict]:
+    """仅关键字检索（BM25），不做 rerank。返回与 hybrid 同形的 hit dict 列表。"""
+    filters = filters or {}
+    es = es_client.es
+    flat: list[tuple] = []
+    for kb_id in kb_ids:
+        index = f"kb_{kb_id.replace('-', '')}"
+        if not await es.indices.exists(index=index):
+            continue
+        flat.extend(await _bm25(es, index, query, top_k, filters))
+    flat.sort(key=lambda x: x[1], reverse=True)
+    docs = [{"id": hid, "score": sc, **src} for hid, sc, src in flat[:top_k]]
+    return docs

@@ -4,7 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from kb_common.database import get_session
 from kb_common.models import Directory
 from app.schemas import DirIn
-from app.deps import get_current_user
+from app.deps import get_current_user, require_role
 import uuid
 
 router = APIRouter(prefix="/api/v1", tags=["dir"])
@@ -43,7 +43,8 @@ async def tree(kb_id: uuid.UUID, u=Depends(get_current_user), s: AsyncSession = 
 
 
 @router.delete("/directories/{dir_id}")
-async def del_dir(dir_id: uuid.UUID, u=Depends(get_current_user), s: AsyncSession = Depends(get_session)):
+async def del_dir(dir_id: uuid.UUID, u=Depends(require_role("super_admin", "admin")),
+                  s: AsyncSession = Depends(get_session)):
     d = await s.get(Directory, dir_id)
     if d:
         await s.delete(d); await s.commit()

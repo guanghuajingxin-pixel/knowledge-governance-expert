@@ -18,11 +18,11 @@ import asyncio
 from io import BytesIO
 
 from celery import Celery
-from sqlalchemy import select
+from sqlalchemy import select, delete
 
 from kb_common.config import get_settings
 from kb_common.database import SessionLocal
-from kb_common.models import Document, KnowledgeBase, Setting
+from kb_common.models import Document, KnowledgeBase, Setting, Segment
 from kb_common.clients import minio_client, mineru_client
 from kb_common.rag.indexer import index_document
 
@@ -84,6 +84,9 @@ async def _run(doc_id: str):
             # 2-4. CHUNKING/EMBEDDING/INDEXING：index_document 内完成（含 embed）
             doc.status = "INDEXING"
             await s.commit()
+            # 重处理时先清除旧 segments，避免 PG 重复累积
+            # （ES 由 {doc.id}_{chunk_index} 幂等覆盖，PG segments 每次生成新 UUID 非幂等）
+            await s.execute(delete(Segment).where(Segment.document_id == doc.id))
             n = await index_document(s, kb, doc, markdown)
 
             doc.chunk_count = n

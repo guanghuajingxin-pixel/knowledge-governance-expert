@@ -6,7 +6,7 @@ from kb_common.models import Document, Segment, KnowledgeBase
 from kb_common.clients import es_client, minio_client
 from kb_common.config import get_settings
 from app.services.ingestion import upload_document
-from app.deps import get_current_user
+from app.deps import get_current_user, require_role
 from app.worker import process_document
 import uuid, urllib.parse, base64
 
@@ -84,7 +84,8 @@ async def preview(doc_id: uuid.UUID, u=Depends(get_current_user), s: AsyncSessio
 
 
 @router.delete("/documents/{doc_id}")
-async def del_doc(doc_id: uuid.UUID, u=Depends(get_current_user), s: AsyncSession = Depends(get_session)):
+async def del_doc(doc_id: uuid.UUID, u=Depends(require_role("super_admin", "admin")),
+                  s: AsyncSession = Depends(get_session)):
     d = await s.get(Document, doc_id)
     if d:
         kb = await s.get(KnowledgeBase, d.kb_id)
@@ -94,6 +95,6 @@ async def del_doc(doc_id: uuid.UUID, u=Depends(get_current_user), s: AsyncSessio
 
 
 @router.post("/documents/{doc_id}/reprocess")
-async def reprocess(doc_id: uuid.UUID, u=Depends(get_current_user)):
+async def reprocess(doc_id: uuid.UUID, u=Depends(require_role("super_admin", "admin"))):
     process_document.delay(str(doc_id))
     return {"ok": True}
