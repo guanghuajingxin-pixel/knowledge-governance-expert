@@ -98,7 +98,7 @@ JWT_SECRET=kb-mvp-dev-secret
 LLM_BASE_URL=https://open.bigmodel.cn/api/paas/v4
 LLM_API_KEY=
 LLM_MODEL=glm-4-flash
-# MinerU（可选 - 云解析暂未实现，MVP 仅本地解析 txt/md/csv；配置 key 不会启用 PDF/DOCX）
+# MinerU（可选 - 配置 Key 后支持 PDF/DOCX/PPTX/XLSX/HTML 云解析；未配置仅本地解析 txt/md/csv）
 MINERU_API_KEY=
 ```
 
@@ -116,7 +116,7 @@ KB_API_INTERNAL_URL=http://kb-api:8000
 
 **LLM_API_KEY / MINERU_API_KEY 可选**：
 - `LLM_API_KEY` 留空 → 问答接口返回「LLM 调用失败：... 请在 设置 页配置 LLM API Key」，文档检索/溯源照常工作。
-- `MINERU_API_KEY` 留空 → txt/md/csv 走本地解析兜底，PDF/DOCX 等格式需配 MinerU 云 API key（可在「平台管理 → 模型设置」页运行时配置，密钥落地 settings 表，GET 接口掩码 `value=""` + `is_set=true`）。
+- `MINERU_API_KEY` 配置后 -> PDF/DOCX/PPTX/XLSX/HTML 走 MinerU 云解析；留空 -> 仅 txt/md/csv 本地解析兜底，二进制格式会抛「解析 {ext} 需配置 MINERU_API_KEY」（可在「平台管理 -> 模型设置」页运行时配置，密钥落地 settings 表，GET 接口掩码 `value=""` + `is_set=true`）。
 
 ## 冒烟测试
 
@@ -148,7 +148,7 @@ KB_API_INTERNAL_URL=http://kb-api:8000
 | BGE 首次 embed 很慢 | FlagEmbedding 首次下载 ~2GB 模型；后续从 `~/.cache/huggingface` 加载，秒级 |
 | Docker 全量模式 OOM | colima ≥ 8GB：`colima stop && colima start --cpu 4 --memory 8` |
 | 问答返回 LLM 调用失败 | `.env` 配 `LLM_API_KEY`，或在「平台管理 → 模型设置」页配置 |
-| PDF/DOCX 解析失败 | `MINERU_API_KEY` 留空时仅支持 txt/md/csv；其他格式需配 MinerU key |
+| PDF/DOCX 解析失败 | 配置 `MINERU_API_KEY` 后支持 PDF/DOCX/PPTX/XLSX/HTML 云解析；留空则仅 txt/md/csv 本地解析，二进制格式抛「需配置 MINERU_API_KEY」 |
 | `uv sync` 报 `kb-common` 找不到 | 在 `services/kb-common` 先 `uv sync`；Docker 构建已通过 repo-root context 解决 |
 | 端口 8000/8004 被占用 | `lsof -i :8000` 找到进程；或改 uvicorn `--port` |
 | dev-network 不存在 | 先启 dev-services compose：`docker compose ls` 找配置文件 |

@@ -80,7 +80,7 @@ function pick(p: { label: string; url: string; model: string }) {
           <el-input v-model="form.mineru_api_key.value" show-password placeholder="未设置" />
           <el-button type="primary" :loading="saving === 'mineru_api_key'" @click="save('mineru_api_key')">保存</el-button>
         </div>
-        <div class="field-hint">暂未启用，仅 txt/md/csv 可解析；配置 Key 不会启用 PDF/DOCX 解析。</div>
+        <div class="field-hint">配置 Key 后支持 PDF/Word/Excel/HTML 云解析；留空则仅 txt/md/csv。</div>
       </el-form-item>
       <el-alert type="info" :closable="false" title="向量模型 BGE-M3 与重排模型 BGE-reranker 本地部署，无需配置。" style="margin-top: 12px;" />
     </el-form>
