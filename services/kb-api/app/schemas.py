@@ -18,6 +18,11 @@ class KbOut(KbIn):
     owner_id: uuid.UUID
     created_at: datetime
     es_index_name: str
+    status: str = "FULLY_PUBLISHED"
+    document_count: int = 0
+    owner_name: str = ""
+    is_favorite: bool = False
+    updated_at: datetime | None = None
 
     class Config:
         from_attributes = True
