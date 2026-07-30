@@ -37,6 +37,8 @@ export const kbHandlers = [
       chunk_overlap: body.chunk_overlap ?? 150,
       embedding_model: 'bge-m3',
       es_index_name: 'kb_kb-' + Date.now(),
+      status: 'active',
+      is_favorite: false,
       document_count: 0,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),

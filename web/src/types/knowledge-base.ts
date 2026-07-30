@@ -12,6 +12,9 @@ export interface KnowledgeBase {
   chunk_overlap: number
   embedding_model: string
   es_index_name: string
+  status: string
+  is_favorite: boolean
+  owner_name?: string
   document_count?: number
   created_at: string
   updated_at: string
