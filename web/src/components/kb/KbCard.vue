@@ -1,11 +1,14 @@
 <script setup lang="ts">
-import { Document, ChatDotRound, FolderOpened } from '@element-plus/icons-vue'
+import { Document, ChatDotRound, StarFilled, Star, Delete, FolderOpened, MoreFilled } from '@element-plus/icons-vue'
 import { useRouter } from 'vue-router'
 import type { KnowledgeBase } from '@/types/knowledge-base'
 import { formatDate } from '@/utils/format'
 
 const props = defineProps<{ kb: KnowledgeBase }>()
-const emit = defineEmits<{ (e: 'delete', id: string): void }>()
+const emit = defineEmits<{
+  (e: 'delete', id: string): void
+  (e: 'toggle-favorite', event: Event): void
+}>()
 const router = useRouter()
 
 function open() {
@@ -24,20 +27,31 @@ function open() {
         <ChatDotRound v-if="kb.kb_type === 'FAQ'" />
         <Document v-else />
       </el-icon>
-      <el-dropdown trigger="click" @click.stop>
-        <el-icon class="more-btn"><MoreFilled /></el-icon>
-        <template #dropdown>
-          <el-dropdown-menu>
-            <el-dropdown-item @click="open">
-              <el-icon><FolderOpened /></el-icon> 进入
-            </el-dropdown-item>
-            <el-dropdown-item divided @click="emit('delete', kb.id)">
-              <el-icon color="#f56c6c"><Delete /></el-icon>
-              <span style="color:#f56c6c">删除</span>
-            </el-dropdown-item>
-          </el-dropdown-menu>
-        </template>
-      </el-dropdown>
+      <div class="header-actions">
+        <el-icon
+          class="star-btn"
+          :class="{ 'is-favorite': kb.is_favorite }"
+          :color="kb.is_favorite ? '#e6a23c' : '#909399'"
+          @click.stop="emit('toggle-favorite', $event)"
+        >
+          <StarFilled v-if="kb.is_favorite" />
+          <Star v-else />
+        </el-icon>
+        <el-dropdown trigger="click" @click.stop>
+          <el-icon class="more-btn"><MoreFilled /></el-icon>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item @click="open">
+                <el-icon><FolderOpened /></el-icon> 进入
+              </el-dropdown-item>
+              <el-dropdown-item divided @click="emit('delete', kb.id)">
+                <el-icon color="#f56c6c"><Delete /></el-icon>
+                <span style="color:#f56c6c">删除</span>
+              </el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
+      </div>
     </div>
     <div class="kb-name">{{ kb.name }}</div>
     <div class="kb-desc">{{ kb.description || '暂无描述' }}</div>
@@ -68,6 +82,20 @@ function open() {
   cursor: pointer;
   color: #909399;
   font-size: 18px;
+}
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.star-btn {
+  cursor: pointer;
+  font-size: 18px;
+  transition: color 0.2s;
+}
+.star-btn:hover {
+  color: #e6a23c !important;
 }
 .kb-name {
   font-size: 16px;
