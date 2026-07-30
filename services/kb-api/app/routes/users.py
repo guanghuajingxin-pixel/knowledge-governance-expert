@@ -4,18 +4,106 @@ from kb_common.security import hash_password
 from kb_common.config import get_settings
 import secrets, hashlib, uuid
 from pydantic import BaseModel
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from kb_common.database import get_session
 from app.deps import get_current_user, require_role
 
 router = APIRouter(prefix="/api/v1", tags=["users"])
 
-@router.get("/users/me")
-async def me(u: User = Depends(get_current_user)):
-    """Return full UserInfo - aligns with frontend type {id,username,email,role,is_active,created_at}."""
+
+def _user_dict(u: User) -> dict:
     return {"id": str(u.id), "username": u.username, "email": u.email or "",
             "role": u.role, "is_active": u.is_active,
             "created_at": u.created_at.isoformat() if u.created_at else None}
+
+
+@router.get("/users/me")
+async def me(u: User = Depends(get_current_user)):
+    """Return full UserInfo - aligns with frontend type {id,username,email,role,is_active,created_at}."""
+    return _user_dict(u)
+
+
+class UserCreate(BaseModel):
+    username: str
+    password: str
+    email: str | None = None
+    role: str = "viewer"   # 校验在 handler
+
+
+class UserUpdate(BaseModel):
+    email: str | None = None
+    role: str | None = None
+    is_active: bool | None = None
+    password: str | None = None   # 非空则重置
+
+
+VALID_ROLES = {"super_admin", "admin", "editor", "viewer"}
+
+
+@router.get("/users")
+async def list_users(u: User = Depends(require_role("super_admin", "admin")),
+                     s: AsyncSession = Depends(get_session), page: int = 1, size: int = 20):
+    page = max(1, page); size = max(1, min(100, size))
+    total = (await s.execute(select(func.count(User.id)))).scalar_one()
+    rows = (await s.execute(select(User).order_by(User.created_at.desc())
+                            .offset((page - 1) * size).limit(size))).scalars().all()
+    return {"items": [_user_dict(r) for r in rows], "total": total, "page": page, "size": size}
+
+
+@router.post("/users", status_code=status.HTTP_201_CREATED)
+async def create_user(body: UserCreate, u: User = Depends(require_role("super_admin", "admin")),
+                      s: AsyncSession = Depends(get_session)):
+    if body.role not in VALID_ROLES:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"非法角色: {body.role}")
+    if (await s.execute(select(User).where(User.username == body.username))).scalar_one_or_none():
+        raise HTTPException(status.HTTP_409_CONFLICT, "用户名已存在")
+    nu = User(username=body.username, password_hash=hash_password(body.password),
+              email=body.email, role=body.role)
+    s.add(nu); await s.commit(); await s.refresh(nu)
+    return _user_dict(nu)
+
+
+@router.put("/users/{user_id}")
+async def update_user(user_id: uuid.UUID, body: UserUpdate,
+                      u: User = Depends(require_role("super_admin", "admin")),
+                      s: AsyncSession = Depends(get_session)):
+    tu = await s.get(User, user_id)
+    if not tu:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "用户不存在")
+    # 不允许把最后一个 super_admin 降级或禁用
+    if tu.role == "super_admin" and ((body.role is not None and body.role != "super_admin")
+                                     or (body.is_active is False)):
+        cnt = (await s.execute(select(func.count(User.id))
+                .where(User.role == "super_admin", User.is_active == True))).scalar_one()
+        if cnt <= 1:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "至少保留一个启用的超级管理员")
+    if body.email is not None: tu.email = body.email
+    if body.role is not None:
+        if body.role not in VALID_ROLES:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"非法角色: {body.role}")
+        tu.role = body.role
+    if body.is_active is not None: tu.is_active = body.is_active
+    if body.password: tu.password_hash = hash_password(body.password)
+    await s.commit(); await s.refresh(tu)
+    return _user_dict(tu)
+
+
+@router.delete("/users/{user_id}")
+async def delete_user(user_id: uuid.UUID, u: User = Depends(require_role("super_admin", "admin")),
+                      s: AsyncSession = Depends(get_session)):
+    if user_id == u.id:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "不能删除自己")
+    tu = await s.get(User, user_id)
+    if not tu:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "用户不存在")
+    if tu.role == "super_admin":
+        cnt = (await s.execute(select(func.count(User.id))
+                .where(User.role == "super_admin", User.is_active == True))).scalar_one()
+        if cnt <= 1:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "至少保留一个超级管理员")
+    await s.delete(tu); await s.commit()
+    return {"ok": True}
 
 class ApiKeyIn(BaseModel):
     name: str
