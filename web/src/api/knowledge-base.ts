@@ -2,7 +2,17 @@ import request from './request'
 import type { KnowledgeBase, KbCreateRequest, Directory, KbType } from '@/types/knowledge-base'
 import type { PageQuery, PageResult } from '@/types/api'
 
-export function listKnowledgeBases(params?: PageQuery & { kb_type?: KbType }) {
+export interface KbListParams extends PageQuery {
+  kb_type?: KbType
+  search?: string
+  owner_id?: string
+  status?: string
+  is_favorite?: boolean
+  sort_by?: string
+  sort_order?: 'asc' | 'desc'
+}
+
+export function listKnowledgeBases(params?: KbListParams) {
   return request.get<unknown, PageResult<KnowledgeBase>>('/knowledge-bases', { params })
 }
 
@@ -20,6 +30,14 @@ export function updateKnowledgeBase(id: string, data: Partial<KbCreateRequest>) 
 
 export function deleteKnowledgeBase(id: string) {
   return request.delete<unknown, void>(`/knowledge-bases/${id}`)
+}
+
+export function favoriteKnowledgeBase(id: string) {
+  return request.post<unknown, { ok: boolean }>(`/knowledge-bases/${id}/favorite`)
+}
+
+export function unfavoriteKnowledgeBase(id: string) {
+  return request.delete<unknown, { ok: boolean }>(`/knowledge-bases/${id}/favorite`)
 }
 
 export function getDirectoryTree(kbId: string) {
