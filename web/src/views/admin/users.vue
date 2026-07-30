@@ -21,6 +21,9 @@ onMounted(() => {
 
 <template>
   <PageContainer title="用户管理">
+    <el-alert type="info" :closable="false" style="margin-bottom: 16px;">
+      用户管理接口暂未实现，以下为示例数据。
+    </el-alert>
     <el-table :data="users" style="width: 100%">
       <el-table-column prop="username" label="用户名" width="150" />
       <el-table-column prop="email" label="邮箱" width="200" />

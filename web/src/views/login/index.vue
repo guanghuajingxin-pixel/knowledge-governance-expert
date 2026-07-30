@@ -29,8 +29,10 @@ async function handleLogin() {
       await userStore.login(form)
       ElMessage.success('登录成功')
       router.push('/dashboard')
-    } catch {
-      // 拦截器已处理错误提示
+    } catch (e) {
+      // 登录接口 401 由 request.ts 放行至此；展示后端 detail 或默认提示
+      const err = e as { response?: { data?: { detail?: string } } }
+      ElMessage.error(err?.response?.data?.detail || '用户名或密码错误')
     } finally {
       loading.value = false
     }

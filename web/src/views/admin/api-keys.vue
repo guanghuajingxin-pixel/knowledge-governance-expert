@@ -54,6 +54,9 @@ onMounted(fetchData)
     <template #actions>
       <el-button type="primary" :icon="Plus" @click="createVisible = true">创建 API Key</el-button>
     </template>
+    <el-alert type="warning" :closable="false" style="margin-bottom: 16px;">
+      API Key 校验功能暂未启用，当前创建的 Key 仅用于记录。
+    </el-alert>
     <el-table :data="apiKeys" v-loading="loading" style="width: 100%">
       <el-table-column prop="name" label="名称" width="180" />
       <el-table-column prop="key_prefix" label="Key 前缀" width="150" />

@@ -1,0 +1,13 @@
+$ vite
+
+  VITE v5.4.21  ready in 163 ms
+
+  ➜  Local:   http://localhost:3000/
+  ➜  Network: http://10.100.26.75:3000/
+  ➜  Network: http://198.18.0.1:3000/
+DEPRECATION WARNING [legacy-js-api]: The legacy JS API is deprecated and will be removed in Dart Sass 2.0.0.
+
+More info: https://sass-lang.com/d/legacy-js-api
+
+13:19:24 [vite] ✨ new dependencies optimized: element-plus/es/components/select/style/css, element-plus/es/components/alert/style/css, element-plus/es/components/empty/style/css, element-plus/es/components/input-number/style/css, element-plus/es/components/option/style/css, element-plus/es/components/radio-group/style/css, element-plus/es/components/radio/style/css
+13:19:24 [vite] ✨ optimized dependencies changed. reloading

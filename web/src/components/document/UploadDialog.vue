@@ -47,12 +47,12 @@ watch(() => props.modelValue, (val) => {
       :auto-upload="false"
       :show-file-list="true"
       :on-change="handleChange"
-      accept=".pdf,.docx,.pptx,.xlsx,.md,.txt,.html"
+      accept=".pdf,.doc,.docx,.txt,.md,.csv,.xlsx,.xls"
     >
       <el-icon class="el-icon--upload"><UploadFilled /></el-icon>
       <div class="el-upload__text">将文件拖到此处，或<em>点击上传</em></div>
       <template #tip>
-        <div class="el-upload__tip">支持 PDF / Word / PPT / Excel / Markdown / TXT / HTML</div>
+        <div class="el-upload__tip">支持 PDF / Word / Excel / Markdown / TXT / CSV（PDF/Word/Excel 需 MinerU 云解析，暂未启用）</div>
       </template>
     </el-upload>
   </el-dialog>

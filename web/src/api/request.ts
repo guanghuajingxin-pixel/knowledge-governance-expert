@@ -23,6 +23,11 @@ service.interceptors.response.use(
   (error) => {
     const message = error.response?.data?.message || error.message || '请求失败'
     if (error.response?.status === 401) {
+      // 登录接口 401（用户名/密码错误）：不登出/不重载，交由登录页 catch 提示
+      const reqUrl = error.config?.url || ''
+      if (reqUrl.includes('/auth/login')) {
+        return Promise.reject(error)
+      }
       const userStore = useUserStore()
       userStore.logout()
       window.location.href = '/login'

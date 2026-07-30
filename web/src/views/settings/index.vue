@@ -80,6 +80,7 @@ function pick(p: { label: string; url: string; model: string }) {
           <el-input v-model="form.mineru_api_key.value" show-password placeholder="未设置" />
           <el-button type="primary" :loading="saving === 'mineru_api_key'" @click="save('mineru_api_key')">保存</el-button>
         </div>
+        <div class="field-hint">暂未启用，仅 txt/md/csv 可解析；配置 Key 不会启用 PDF/DOCX 解析。</div>
       </el-form-item>
       <el-alert type="info" :closable="false" title="向量模型 BGE-M3 与重排模型 BGE-reranker 本地部署，无需配置。" style="margin-top: 12px;" />
     </el-form>
@@ -89,4 +90,5 @@ function pick(p: { label: string; url: string; model: string }) {
 <style scoped>
 .field-row { display: flex; gap: 8px; width: 100%; }
 .field-row .el-input { flex: 1; }
+.field-hint { font-size: 12px; color: #909399; margin-top: 4px; }
 </style>
