@@ -20,7 +20,6 @@
 - 迁移文件命名: `0003_<slug>.py`，`down_revision='0002'`
 
 ---
-```
 
 ### Task 1: DB Migration — 新增 kb_favorites 表 + knowledge_bases.status 字段
 

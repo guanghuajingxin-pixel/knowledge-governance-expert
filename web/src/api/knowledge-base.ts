@@ -2,7 +2,14 @@ import request from './request'
 import type { KnowledgeBase, KbCreateRequest, Directory, KbType } from '@/types/knowledge-base'
 import type { PageQuery, PageResult } from '@/types/api'
 
-export function listKnowledgeBases(params?: PageQuery & { kb_type?: KbType }) {
+export interface KbListParams extends PageQuery {
+  kb_type?: KbType
+  search?: string
+  sort_by?: string
+  sort_order?: 'asc' | 'desc'
+}
+
+export function listKnowledgeBases(params?: KbListParams) {
   return request.get<unknown, PageResult<KnowledgeBase>>('/knowledge-bases', { params })
 }
 
