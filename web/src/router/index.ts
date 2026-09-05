@@ -17,7 +17,7 @@ const routes: RouteRecordRaw[] = [
         path: 'dashboard',
         name: 'Dashboard',
         component: () => import('@/views/dashboard/index.vue'),
-        meta: { title: '工作台', icon: 'Odometer' },
+        meta: { title: '工作台', icon: 'Odometer', hidden: true },
       },
       {
         path: 'knowledge-bases',
@@ -78,6 +78,12 @@ const routes: RouteRecordRaw[] = [
         name: 'AdminApiKeys',
         component: () => import('@/views/admin/api-keys.vue'),
         meta: { title: 'API Key 管理', icon: 'Key', roles: ['super_admin', 'admin'] },
+      },
+      {
+        path: 'knowledge-center',
+        name: 'KnowledgeCenter',
+        component: () => import('@/views/knowledge-center/index.vue'),
+        meta: { title: '知识中心', icon: 'Reading', bottomSidebar: true },
       },
     ],
   },

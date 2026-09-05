@@ -7,14 +7,16 @@ export interface KnowledgeBase {
   description: string
   kb_type: KbType
   owner_id: string
+  owner_name?: string
   chunk_strategy: ChunkStrategy
   chunk_size: number
   chunk_overlap: number
   embedding_model: string
   es_index_name: string
   document_count?: number
+  status?: string
   created_at: string
-  updated_at: string
+  updated_at?: string
 }
 
 export interface KbCreateRequest {

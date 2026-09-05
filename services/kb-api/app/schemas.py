@@ -18,6 +18,10 @@ class KbOut(KbIn):
     owner_id: uuid.UUID
     created_at: datetime
     es_index_name: str
+    document_count: int = 0
+    owner_name: str = ""
+    status: str = "正常"
+    updated_at: datetime | None = None
 
     class Config:
         from_attributes = True
@@ -26,6 +30,55 @@ class KbOut(KbIn):
 class DirIn(BaseModel):
     name: str
     parent_id: uuid.UUID | None = None
+
+
+class DirOut(BaseModel):
+    id: uuid.UUID
+    kb_id: uuid.UUID
+    parent_id: uuid.UUID | None = None
+    name: str
+    sort_order: int = 0
+    document_count: int = 0
+    children: list["DirOut"] = []
+
+    class Config:
+        from_attributes = True
+
+
+class KcDocumentOut(BaseModel):
+    id: uuid.UUID
+    kb_id: uuid.UUID
+    kb_name: str = ""
+    kb_type: str = ""
+    directory_id: uuid.UUID | None = None
+    directory_name: str | None = None
+    original_filename: str
+    file_type: str
+    file_size: int = 0
+    status: str
+    chunk_count: int = 0
+    created_at: datetime
+    updated_at: datetime | None = None
+
+    class Config:
+        from_attributes = True
+
+
+class TrashItemOut(BaseModel):
+    id: uuid.UUID
+    original_filename: str
+    directory_name: str | None = None
+    kb_name: str = ""
+    operator_name: str = ""
+    deleted_at: datetime | None = None
+    remaining_days: int = 0
+
+
+class TaskStatsOut(BaseModel):
+    total: int = 0
+    executing: int = 0
+    completed: int = 0
+    failed: int = 0
 
 
 class SegmentOut(BaseModel):

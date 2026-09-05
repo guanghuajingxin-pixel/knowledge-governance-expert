@@ -38,8 +38,8 @@ BGE-M3 + bge-reranker-v2-m3 仅在 kb-api 进程加载一次（~2-3GB RSS），f
 应用进程跑在 Mac 原生内存（BGE 模型直接用 Mac RAM），基础设施跑在 Docker。**开发期推荐**，迭代快，无需 colima 加内存。
 
 ```bash
-# 1. 启动 Docker 基础设施（dev-services compose，一次性）
-docker compose -f /path/to/dev-services/docker-compose.yml up -d
+# 1. 启动 Docker 基础设施（dev-services compose，一次性；路径按实际调整）
+docker compose -f ~/Documents/03_Resource/开发环境/docker-compose.yml up -d
 
 # 2. 配置 .env（仓库根目录，参考下方 .env 配置）
 
@@ -64,9 +64,12 @@ cd web && pnpm install && pnpm dev   # http://localhost:3000
 
 登录：`admin` / `admin123` (super_admin)。
 
-### 模式 2：Docker 全量模式（一键）
+### 模式 2：Docker 全量模式（需基础设施已启动）
+
+**前提**：基础设施（dev-services compose）必须已启动，参考模式 1 步骤 1。
 
 ```bash
+# 启动应用服务（kb-api / faq-service / kb-worker）
 docker compose -f docker-compose.app.yml up -d --build
 ```
 
@@ -76,7 +79,7 @@ docker compose -f docker-compose.app.yml up -d --build
 > ```
 > 首次启动较慢（BGE 模型下载 ~2GB，容器内首次 embed 约 30-60s）。MVP 不推荐此模式做开发，仅用于验证镜像可部署。
 
-清理：
+清理应用容器（不清理基础设施）：
 ```bash
 docker compose -f docker-compose.app.yml down
 ```

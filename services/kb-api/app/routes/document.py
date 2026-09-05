@@ -37,7 +37,7 @@ async def list_docs(kb_id: uuid.UUID = Query(...),
                     directory_id: uuid.UUID | None = Query(None),
                     page: int = Query(1, ge=1), size: int = Query(10, ge=1),
                     u=Depends(get_current_user), s: AsyncSession = Depends(get_session)):
-    q = select(Document).where(Document.kb_id == kb_id)
+    q = select(Document).where(Document.kb_id == kb_id, Document.is_deleted == False)
     if directory_id:
         q = q.where(Document.directory_id == directory_id)
     total = (await s.execute(
@@ -86,11 +86,13 @@ async def preview(doc_id: uuid.UUID, u=Depends(get_current_user), s: AsyncSessio
 @router.delete("/documents/{doc_id}")
 async def del_doc(doc_id: uuid.UUID, u=Depends(require_role("super_admin", "admin")),
                   s: AsyncSession = Depends(get_session)):
+    """软删除文档（移入回收站，20天后自动清理）"""
     d = await s.get(Document, doc_id)
     if d:
-        kb = await s.get(KnowledgeBase, d.kb_id)
-        await es_client.delete_by_doc(kb.es_index_name, str(d.id))
-        await s.delete(d); await s.commit()
+        from datetime import datetime as _dt
+        d.is_deleted = True
+        d.deleted_at = _dt.utcnow()
+        await s.commit()
     return {"ok": True}
 
 

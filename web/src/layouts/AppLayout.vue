@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import Sidebar from '@/components/layout/Sidebar.vue'
 import Header from '@/components/layout/Header.vue'
+import TabBar from '@/components/layout/TabBar.vue'
 </script>
 
 <template>
@@ -8,6 +9,7 @@ import Header from '@/components/layout/Header.vue'
     <Sidebar />
     <div class="main-section">
       <Header />
+      <TabBar />
       <div class="content-area">
         <router-view />
       </div>
