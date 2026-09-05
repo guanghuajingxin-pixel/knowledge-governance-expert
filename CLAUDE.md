@@ -193,21 +193,8 @@ See README for the full `.env` template. Key optional vars:
 - `LLM_BASE_URL` — OpenAI-compatible endpoint (default: GLM)
 - `JWT_SECRET` — dev: `kb-mvp-dev-secret`
 
-Runtime overrides: LLM/MinerU keys can also be set in the UI (平台管理 → 模型配置), stored in `settings` table, taking precedence over `.env`. GET returns `value=""` with `is_set=true` to mask secrets.
-
-## Project Structure
-
-```
-knowledge-base/
-├── docker-compose.app.yml       # App containers (kb-api/faq-service/kb-worker)
-├── alembic.ini                  # DB migrations config (uses kb-common)
-├── scripts/
-│   ├── smoke_test.sh            # E2E smoke: RAG + FAQ + API Key + settings
-│   └── seed_admin.py            # Seed admin user
-├── services/
-│   ├── kb-common/               # Shared: models, RAG engine, clients, auth, config
-│   ├── kb-api/                  # Main API + Celery worker (document KB, search, chat, auth, users, settings)
-│   └── faq-service/             # FAQ API (FAQ KB, entries, FAQ search, import)
-├── web/                         # Vue 3 + Element Plus frontend
-└── docs/                        # Design specs
-```
+- **Design spec**: `docs/superpowers/specs/2026-07-28-knowledge-governance-expert-design.md` — authoritative
+- **Style reference**: `风格参考/` — 5 screenshots of target UI appearance
+- **Dify source** (for code reference): `dify/api/core/rag/` — splitter, extractor, embedding, retrieval, rerank patterns
+- **Dify models**: `dify/api/models/dataset.py` — data model reference
+- **Dify tasks**: `dify/api/tasks/` — Celery task patterns

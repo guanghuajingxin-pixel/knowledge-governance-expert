@@ -1,4 +1,4 @@
-# Knowledge Base System — Technical Design
+# Knowledge Governance Expert — Technical Design
 
 > **Date:** 2026-07-28
 > **Status:** Draft

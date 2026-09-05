@@ -1,4 +1,4 @@
-# Knowledge Base MVP
+# Knowledge Governance Expert（知识治理专家）
 
 RAG 知识库 MVP：文档采集 / 切片 / 向量检索 / LLM 问答 + FAQ 精准匹配，3 进程微服务 + Docker 基础设施。
 
@@ -159,7 +159,7 @@ KB_API_INTERNAL_URL=http://kb-api:8000
 ## 项目结构
 
 ```
-knowledge-base/
+knowledge-governance-expert/
 ├── docker-compose.app.yml       # 应用容器（kb-api/faq-service/kb-worker）
 ├── .env.docker                  # Docker 全量模式 env
 ├── scripts/

@@ -1,4 +1,4 @@
-name: kb-app
+name: knowledge-governance-expert
 
 # App services only. Infrastructure (postgres/redis/elasticsearch/minio/
 # kkfileview) runs in the separate `dev-services` compose and joins the
