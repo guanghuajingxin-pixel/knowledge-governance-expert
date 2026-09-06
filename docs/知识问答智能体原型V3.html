@@ -1,0 +1,972 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>知识问答智能体 · 知识治理插件 原型 V3</title>
+<style>
+:root{
+  --bg:#f5f7fa; --card:#fff; --border:#e5e8ee; --text:#1f2937; --muted:#6b7280; --faint:#9ca3af;
+  --primary:#2b6bff; --primary-weak:#eef3ff;
+  --prod:#0ea5e9; --process:#8b5cf6; --apply:#10b981; --operate:#f59e0b; --govern:#ef4444;
+  --ok:#16a34a; --warn:#d97706; --bad:#dc2626;
+  --radius:12px; --shadow:0 1px 3px rgba(16,24,40,.06);
+}
+*{margin:0;padding:0;box-sizing:border-box;}
+body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--text);font-size:14px;}
+.layout{display:flex;min-height:100vh;}
+/* ===== 侧边栏（仿参考图窄栏） ===== */
+.sidebar{width:200px;background:#fff;border-right:1px solid var(--border);flex-shrink:0;display:flex;flex-direction:column;position:sticky;top:0;height:100vh;}
+.brand{display:flex;align-items:center;gap:9px;padding:15px 14px;border-bottom:1px solid #f1f3f7;}
+.brand .bic{width:34px;height:34px;border-radius:10px;background:linear-gradient(135deg,#2b6bff,#6d28d9);color:#fff;display:flex;align-items:center;justify-content:center;font-size:16px;}
+.brand b{font-size:14px;display:block;}
+.brand span{font-size:10.5px;color:var(--faint);display:block;}
+.nav{flex:1;padding:8px 8px;overflow-y:auto;}
+.nav .grp{font-size:10.5px;color:var(--faint);padding:10px 10px 4px;letter-spacing:1px;}
+.nav a{display:flex;align-items:center;gap:9px;padding:8px 10px;margin:1px 0;border-radius:9px;color:#374151;text-decoration:none;font-size:13px;cursor:pointer;}
+.nav a:hover{background:#f4f6fa;}
+.nav a.active{background:var(--primary-weak);color:var(--primary);font-weight:600;}
+.nav a .ic{width:20px;text-align:center;font-size:15px;flex-shrink:0;}
+.nav .sub{padding-left:37px;font-size:12.5px;color:var(--muted);}
+.side-foot{padding:11px 14px;border-top:1px solid #f1f3f7;font-size:10.5px;color:var(--faint);line-height:1.9;}
+.side-foot b{color:#64748b;}
+/* ===== 主区 ===== */
+.main{flex:1;min-width:0;display:flex;flex-direction:column;}
+.topbar{background:#fff;border-bottom:1px solid var(--border);padding:9px 22px;display:flex;align-items:center;gap:12px;position:sticky;top:0;z-index:50;min-height:48px;}
+.topbar .title{font-weight:600;font-size:14.5px;}
+.conn{display:flex;gap:10px;font-size:11.5px;color:var(--muted);}
+.conn .c{display:flex;align-items:center;gap:4px;}
+.conn .led{width:6px;height:6px;border-radius:50%;background:var(--ok);}
+.north{margin-left:auto;display:flex;align-items:center;gap:10px;font-size:12px;color:var(--muted);}
+.north b{color:var(--primary);font-size:16px;}
+.pulse{display:flex;align-items:center;background:#fff;border:1px solid var(--border);border-radius:999px;padding:3px 5px;cursor:pointer;}
+.pulse .step{padding:2px 10px;font-size:11.5px;border-radius:999px;white-space:nowrap;}
+.pulse .step b{font-size:12.5px;}
+.pulse .arr{color:var(--faint);font-size:10px;}
+.p1{color:#0369a1;background:#e0f2fe;} .p5{color:#b91c1c;background:#fee2e2;}
+.p2{color:#6d28d9;background:#ede9fe;} .p3{color:#047857;background:#d1fae5;}
+.avatar{width:28px;height:28px;border-radius:50%;background:var(--primary);color:#fff;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;}
+/* ===== 页面 ===== */
+.page{display:none;flex:1;padding:20px 24px 48px;max-width:1320px;margin:0 auto;width:100%;}
+.page.active{display:block;}
+h2.pg{font-size:19px;margin-bottom:4px;}
+.pg-sub{color:var(--muted);font-size:13px;margin-bottom:16px;line-height:1.8;}
+.chain{display:flex;align-items:center;gap:8px;flex-wrap:wrap;background:#fff;border:1px dashed #c7d7fe;background:var(--primary-weak);border-radius:10px;padding:8px 14px;font-size:12.5px;color:#1e40af;margin-bottom:16px;}
+.chain b{color:var(--primary);}
+.chain .arr{color:#93b4f5;}
+.card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow);margin-bottom:16px;overflow:hidden;}
+.card-h{padding:13px 18px;border-bottom:1px solid #f1f3f7;display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
+.card-h h3{font-size:14.5px;display:flex;align-items:center;gap:8px;}
+.card-b{padding:16px 18px;}
+.src{margin-left:auto;display:flex;align-items:center;gap:6px;}
+.src .srcinfo{font-size:11px;color:var(--faint);margin-right:2px;}
+.src .srcinfo b{color:#64748b;font-weight:500;}
+.card.refreshing .card-b{opacity:.45;transition:opacity .2s;}
+.grid{display:grid;gap:14px;}
+.g2{grid-template-columns:1fr 1fr;} .g3{grid-template-columns:repeat(3,1fr);} .g4{grid-template-columns:repeat(4,1fr);}
+.kpi{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:14px 16px;box-shadow:var(--shadow);}
+.kpi .l{font-size:12px;color:var(--muted);margin-bottom:6px;}
+.kpi .v{font-size:24px;font-weight:700;}
+.kpi .d{font-size:11.5px;margin-top:4px;}
+.up{color:var(--ok);} .down{color:var(--bad);} .flat{color:var(--muted);}
+.badge{display:inline-block;font-size:11px;padding:2px 9px;border-radius:999px;line-height:1.6;white-space:nowrap;}
+.b-gray{background:#f3f4f6;color:#4b5563;} .b-blue{background:#dbeafe;color:#1d4ed8;}
+.b-green{background:#d1fae5;color:#047857;} .b-orange{background:#fef3c7;color:#b45309;}
+.b-red{background:#fee2e2;color:#b91c1c;} .b-purple{background:#ede9fe;color:#6d28d9;}
+.b-cyan{background:#cffafe;color:#0e7490;}
+.b-ai{background:linear-gradient(90deg,#ede9fe,#dbeafe);color:#6d28d9;font-weight:600;}
+table{width:100%;border-collapse:collapse;font-size:13px;}
+th{text-align:left;font-size:12px;color:var(--muted);font-weight:500;padding:8px 10px;border-bottom:1px solid var(--border);background:#fafbfc;white-space:nowrap;}
+td{padding:9px 10px;border-bottom:1px solid #f1f3f7;vertical-align:top;}
+tr:last-child td{border-bottom:none;}
+tr.rowlink{cursor:pointer;} tr.rowlink:hover td{background:#f8faff;}
+.mono{font-family:ui-monospace,Menlo,monospace;font-size:12px;color:#334155;}
+.tabs{display:flex;gap:4px;border-bottom:1px solid var(--border);margin-bottom:16px;flex-wrap:wrap;}
+.tabs .t{padding:8px 14px;font-size:13px;color:var(--muted);cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px;}
+.tabs .t.active{color:var(--primary);border-color:var(--primary);font-weight:600;}
+.tabpane{display:none;} .tabpane.active{display:block;}
+.hl{border:1px solid #fde68a;background:#fffbeb;border-radius:8px;padding:10px 14px;font-size:12.5px;color:#92400e;margin-bottom:14px;display:flex;gap:8px;align-items:flex-start;line-height:1.7;}
+.hl.blue{background:var(--primary-weak);border-color:#c7d7fe;color:#1e40af;}
+.hl.green{background:#f0fdf4;border-color:#bbf7d0;color:#065f46;}
+.dotlist{list-style:none;} .dotlist li{padding:7px 0;border-bottom:1px dashed #eef1f5;font-size:13px;display:flex;justify-content:space-between;gap:10px;align-items:center;}
+.dotlist li:last-child{border:none;}
+.small{font-size:12px;color:var(--muted);line-height:1.7;}
+.btn{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--border);background:#fff;border-radius:8px;padding:5px 12px;font-size:12.5px;cursor:pointer;color:var(--text);white-space:nowrap;}
+.btn:hover{border-color:var(--primary);color:var(--primary);}
+.btn.pri{background:var(--primary);border-color:var(--primary);color:#fff;}
+.btn.pri:hover{background:#1d54e0;color:#fff;}
+.btn.sm{padding:3px 10px;font-size:12px;border-radius:6px;}
+.btn.ghost{border:none;background:none;color:var(--muted);}
+.btn.ghost:hover{color:var(--primary);}
+/* ===== 首页问答（仿参考图） ===== */
+#pg-home{display:none;flex-direction:column;align-items:center;justify-content:flex-start;background:linear-gradient(180deg,#eef4ff 0%,#f8faff 40%,var(--bg) 100%);max-width:none;padding:0;}
+#pg-home.active{display:flex;}
+.home-wrap{width:100%;max-width:860px;margin:0 auto;padding:56px 24px 48px;flex:1;display:flex;flex-direction:column;}
+.greet{font-size:28px;font-weight:700;margin-bottom:8px;}
+.greet .u{position:relative;display:inline-block;}
+.greet .u::after{content:"";position:absolute;left:0;right:0;bottom:2px;height:8px;background:linear-gradient(90deg,#bfd4ff66,#8fb6ff55);border-radius:4px;z-index:-1;}
+.greet-sub{color:var(--muted);font-size:13.5px;margin-bottom:22px;}
+/* 输入卡 */
+.ask{background:#fff;border:1px solid var(--border);border-radius:18px;box-shadow:0 8px 30px rgba(43,107,255,.08);padding:14px 16px 10px;}
+.ask textarea{width:100%;border:none;outline:none;resize:none;font-size:14px;font-family:inherit;line-height:1.7;min-height:52px;background:transparent;}
+.ask textarea::placeholder{color:var(--faint);}
+.ask-ctrl{display:flex;align-items:center;gap:8px;margin-top:8px;flex-wrap:wrap;}
+.msel{display:flex;align-items:center;gap:4px;font-size:12px;color:var(--muted);border:1px solid var(--border);border-radius:8px;padding:4px 8px;background:#fff;cursor:pointer;}
+.msel select{border:none;outline:none;font-size:12px;color:var(--text);background:transparent;cursor:pointer;}
+.tgl{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--muted);border:1px solid var(--border);border-radius:8px;padding:4px 10px;background:#fff;cursor:pointer;user-select:none;}
+.tgl.on{color:var(--primary);border-color:#b9cdff;background:var(--primary-weak);}
+.ask-right{margin-left:auto;display:flex;align-items:center;gap:8px;}
+.iconbtn{width:30px;height:30px;border:1px solid var(--border);border-radius:8px;background:#fff;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--muted);font-size:14px;}
+.iconbtn:hover{color:var(--primary);border-color:var(--primary);}
+.send{width:32px;height:32px;border-radius:50%;background:var(--primary);color:#fff;border:none;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:14px;}
+.send:hover{background:#1d54e0;}
+.send:disabled{background:#c3cdf5;cursor:not-allowed;}
+/* 建议词条 */
+.sugg{display:flex;gap:10px;flex-wrap:wrap;margin-top:16px;}
+.sugg .s{background:#fff;border:1px solid var(--border);border-radius:999px;padding:6px 14px;font-size:12.5px;color:#475569;cursor:pointer;display:flex;align-items:center;gap:6px;}
+.sugg .s:hover{border-color:var(--primary);color:var(--primary);}
+.north-strip{margin-top:26px;font-size:12px;color:var(--muted);text-align:center;line-height:2;}
+.north-strip b{color:var(--primary);}
+/* 对话区 */
+.chat{display:none;flex-direction:column;gap:16px;margin-top:26px;}
+.chat.show{display:flex;}
+.msg-u{display:flex;gap:10px;justify-content:flex-end;}
+.msg-u .bub{background:var(--primary);color:#fff;border-radius:14px 14px 4px 14px;padding:10px 14px;font-size:13.5px;max-width:78%;line-height:1.7;}
+.msg-a{display:flex;gap:10px;}
+.msg-a .av{width:32px;height:32px;border-radius:10px;background:linear-gradient(135deg,#2b6bff,#6d28d9);color:#fff;display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0;}
+.msg-a .body{flex:1;min-width:0;}
+.msg-a .meta{font-size:11px;color:var(--faint);margin-bottom:6px;display:flex;gap:10px;flex-wrap:wrap;}
+.msg-a .ab{background:#fff;border:1px solid var(--border);border-radius:14px;padding:14px 16px;font-size:13.5px;line-height:1.9;box-shadow:var(--shadow);}
+.cite{display:inline-block;background:var(--primary-weak);color:var(--primary);border-radius:4px;padding:0 5px;font-size:11px;margin:0 2px;cursor:pointer;}
+.refs{margin-top:10px;padding-top:10px;border-top:1px dashed var(--border);font-size:12px;color:var(--muted);line-height:2;}
+.refs .ref{display:flex;align-items:center;gap:6px;flex-wrap:wrap;}
+.feedbackbar{display:flex;gap:8px;margin-top:10px;padding-top:10px;border-top:1px dashed var(--border);align-items:center;flex-wrap:wrap;}
+.typing{display:inline-flex;gap:4px;padding:4px 2px;}
+.typing i{width:6px;height:6px;border-radius:50%;background:#b6c4f2;animation:bl 1s infinite;}
+.typing i:nth-child(2){animation-delay:.2s;} .typing i:nth-child(3){animation-delay:.4s;}
+@keyframes bl{0%,100%{opacity:.3;transform:translateY(0);}50%{opacity:1;transform:translateY(-3px);}}
+/* modal / toast */
+.mask{display:none;position:fixed;inset:0;background:rgba(15,23,42,.45);z-index:100;align-items:flex-start;justify-content:center;overflow-y:auto;padding:40px 16px;}
+.mask.show{display:flex;}
+.modal{background:#fff;border-radius:14px;max-width:780px;width:100%;padding:22px 24px;}
+.modal h3{font-size:16px;margin-bottom:4px;}
+.modal .sub{color:var(--muted);font-size:12.5px;margin-bottom:16px;}
+.m-close{float:right;cursor:pointer;color:var(--faint);font-size:18px;border:none;background:none;}
+.promptbox{background:#0f172a;color:#dbeafe;border-radius:10px;padding:14px 16px;font-family:ui-monospace,Menlo,monospace;font-size:12px;line-height:1.8;white-space:pre-wrap;max-height:340px;overflow-y:auto;}
+.formrow{display:flex;gap:12px;margin-bottom:12px;flex-wrap:wrap;}
+.formrow label{font-size:12px;color:var(--muted);display:block;margin-bottom:4px;}
+.formrow input,.formrow select{border:1px solid var(--border);border-radius:8px;padding:7px 10px;font-size:13px;width:100%;font-family:inherit;}
+.f1{flex:1;min-width:200px;}
+#toast{position:fixed;top:60px;right:24px;z-index:200;display:flex;flex-direction:column;gap:8px;}
+.toast{background:#111827;color:#fff;border-radius:10px;padding:10px 16px;font-size:13px;box-shadow:0 4px 14px rgba(0,0,0,.2);animation:tin .25s;max-width:380px;line-height:1.6;}
+.toast.ok::before{content:"✓ ";color:#4ade80;}
+@keyframes tin{from{opacity:0;transform:translateY(-8px);}to{opacity:1;transform:none;}}
+/* 上传预检 */
+.drop{border:2px dashed #c3d3f5;border-radius:14px;background:#f8faff;padding:34px 20px;text-align:center;cursor:pointer;transition:.2s;}
+.drop:hover{border-color:var(--primary);background:var(--primary-weak);}
+.drop .di{font-size:30px;margin-bottom:8px;}
+.drop .dt{font-size:14px;font-weight:600;}
+.drop .dd{font-size:12px;color:var(--muted);margin-top:6px;line-height:1.8;}
+.ai-check{border:1px solid var(--border);border-radius:12px;margin-top:14px;overflow:hidden;display:none;}
+.ai-check.show{display:block;}
+.ai-check .ach{background:linear-gradient(90deg,#eef3ff,#f5f0ff);padding:11px 16px;display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;color:#4c3d99;}
+.ckitem{padding:13px 16px;border-bottom:1px solid #f1f3f7;}
+.ckitem:last-child{border:none;}
+.ckitem .ckh{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;margin-bottom:6px;}
+.ckitem .ckb{font-size:12.5px;color:#475569;line-height:1.8;background:#f8fafc;border-radius:8px;padding:9px 12px;margin-bottom:8px;}
+.ckitem .ckbtns{display:flex;gap:8px;flex-wrap:wrap;}
+@media (max-width:960px){ .g4,.g3{grid-template-columns:1fr 1fr;} .sidebar{width:60px;} .sidebar .txt,.brand div,.side-foot,.nav .grp{display:none;} }
+</style>
+</head>
+<body>
+<div class="layout">
+  <!-- ============ 侧边栏 ============ -->
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="bic">🤖</div>
+      <div><b>知识治理智能体</b><span>知识治理 · V3 原型</span></div>
+    </div>
+    <nav class="nav">
+      <a data-page="home" class="active"><span class="ic">💬</span><span class="txt">智能问答</span></a>
+      <a data-page="collect"><span class="ic">📥</span><span class="txt">知识采集</span></a>
+      <a class="sub" data-page="collect" data-tab="c-pre"><span class="txt">上传前 AI 预检</span></a>
+      <a class="sub" data-page="collect" data-tab="c-src"><span class="txt">同步源状态</span></a>
+      <a class="sub" data-page="collect" data-tab="c-gap"><span class="txt">缺口与征集</span></a>
+      <a data-page="process"><span class="ic">⚙️</span><span class="txt">知识加工</span></a>
+      <a class="sub" data-page="process" data-tab="p-ov"><span class="txt">加工总览</span></a>
+      <a class="sub" data-page="process" data-tab="p-eng"><span class="txt">加工引擎配置</span></a>
+      <a class="sub" data-page="process" data-tab="p-tool"><span class="txt">工具与跳转配置</span></a>
+      <a data-page="apply"><span class="ic">🔗</span><span class="txt">知识应用</span></a>
+      <a data-page="operate"><span class="ic">📊</span><span class="txt">运营看板</span></a>
+      <a data-page="govern"><span class="ic">🛡️</span><span class="txt">知识治理</span></a>
+      <a class="sub" data-page="govern" data-tab="g-tri"><span class="txt">工单智能分诊</span></a>
+      <a class="sub" data-page="govern" data-tab="g-gate"><span class="txt">质检台账</span></a>
+      <a class="sub" data-page="govern" data-tab="g-life"><span class="txt">生命周期巡检</span></a>
+      <a class="sub" data-page="govern" data-tab="g-std"><span class="txt">治理标准</span></a>
+      <div class="grp">平台配置</div>
+      <a data-page="model"><span class="ic">🧠</span><span class="txt">AI 模型配置</span></a>
+    </nav>
+  
+  </aside>
+
+  <div class="main">
+    <!-- ============ 顶栏 ============ -->
+    <div class="topbar">
+      <div class="title" id="pgTitle">智能问答</div>
+      <div class="conn">
+        <span class="c"><span class="led"></span>钉钉</span>
+        <span class="c"><span class="led"></span>Dify</span>
+        <span class="c"><span class="led"></span>模型网关</span>
+      </div>
+      <div class="north" id="northStrip">
+        问答准确率 <b>87.6%</b> <span style="color:var(--faint)">/ 目标 95%</span>
+      </div>
+      <div class="pulse" onclick="go('govern','g-tri')" title="反馈→治理闭环">
+        <span class="step p1">今日反馈 <b>23</b></span><span class="arr">▶</span>
+        <span class="step p5">AI 分诊 <b>18</b></span><span class="arr">▶</span>
+        <span class="step p2">回流加工 <b>7</b></span><span class="arr">▶</span>
+        <span class="step p3">已验证 <b>5</b></span>
+      </div>
+      <div class="avatar">黄</div>
+    </div>
+
+    <!-- ============ 首页：智能问答 ============ -->
+    <section class="page active" id="pg-home">
+      <div class="home-wrap">
+        <div id="homeIntro">
+          <div class="greet"><span id="greetTime">上午好</span>，我是<span class="u">杰克百晓生</span>，有什么可以帮你~</div>
+        </div>
+
+        <div class="ask">
+          <textarea id="askInput" placeholder="请输入您的问题，Shift+Enter 换行；可 @ 指定智能体应用对话"></textarea>
+          <div class="ask-ctrl">
+            <div class="msel">🪙
+              <select id="modelSel">
+                <option>千问-Max（收费）</option>
+                <option>GLM-4（自部署·网关）</option>
+                <option>DeepSeek-V3（API）</option>
+              </select>
+            </div>
+            <div class="tgl" id="tglThink" onclick="this.classList.toggle('on')">✿ 深度思考</div>
+            <div class="tgl on" id="tglKB" onclick="this.classList.toggle('on')">📚 知识库检索</div>
+            <div class="ask-right">
+              <div class="iconbtn" title="上传附件（先过采集预检）" onclick="go('collect','c-pre');toast('附件将先经过「上传前 AI 预检」再入库')">＋</div>
+              <button class="send" id="sendBtn" onclick="sendQ()">➤</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="sugg" id="sugg">
+          <div class="s" onclick="askSugg('JK-8669D 的针距允许偏差是多少？')">🔧 JK-8669D 的针距允许偏差是多少？</div>
+          <div class="s" onclick="askSugg('大客户的 VIP 折扣怎么算？')">💰 大客户的 VIP 折扣怎么算？</div>
+          <div class="s" onclick="askSugg('新员工试用期考核标准是什么？')">📋 新员工试用期考核标准是什么？</div>
+        </div>
+
+       
+
+        <div class="chat" id="chat"></div>
+      </div>
+    </section>
+
+    <!-- ============ 知识采集 ============ -->
+    <section class="page" id="pg-collect">
+      <h2 class="pg">知识采集</h2>
+      <div class="pg-sub">采集的数据是加工的基础。上传前由 AI 完成检查与建议（命名校验、元数据推荐、重复检测、图注草稿），<b>人只做判断</b>：采纳 / 修改 / 驳回。</div>
+      <div class="chain">📥 采集（AI 预检 + 人确认） <span class="arr">▶</span> ⚙️ 加工（引擎自动） <span class="arr">▶</span> 🔗 应用（问答+反馈） <span class="arr">▶</span> 🛡️ 治理（AI 分诊 + 人裁决） <span class="arr">⟲</span> 反哺采集</div>
+
+      <div class="tabs">
+        <div class="t active" data-tab="c-pre">上传前 AI 预检</div>
+        <div class="t" data-tab="c-src">同步源状态</div>
+        <div class="t" data-tab="c-gap">缺口与征集</div>
+      </div>
+
+      <div class="tabpane active" id="c-pre">
+        <div class="hl blue">💡 <span>所有上传文档先过 AI 预检（判定类模型 temperature=0，配置见 AI 模型配置页）。预检不拦截文件本身，只生成建议项，人确认后放行进入同步与加工。</span></div>
+        <div class="grid g2" style="align-items:start;">
+          <div>
+            <div class="drop" onclick="simUpload()">
+              <div class="di">📄</div>
+              <div class="dt">拖拽 / 点击上传文档</div>
+              <div class="dd">支持 docx / pdf / pptx / xlsx / md / 音视频<br>上传即触发 AI 预检：命名规则 → 元数据 → 重复 → 图片</div>
+            </div>
+            <div class="ai-check" id="aiCheck">
+              <div class="ach">🤖 AI 预检报告 ·《高速绷缝机检验规程V3.docx》 <span class="badge b-gray" style="margin-left:auto">用时 3.2s</span></div>
+              <div class="ckitem">
+                <div class="ckh">🏷️ 命名规则校验 <span class="badge b-orange">不通过</span></div>
+                <div class="ckb">检测到命名不符合规范《机型_文档类型_主题_版本》——缺少机型前缀。<br>AI 建议：改为 <b>《JK-8669D_检验规程_金加工过程_V3》</b></div>
+                <div class="ckbtns"><button class="btn sm pri" onclick="judge(this,'已采纳 AI 改名')">✓ 采纳建议改名</button><button class="btn sm" onclick="judge(this,'已人工修改命名')">✎ 修改后采用</button><button class="btn sm" onclick="judge(this,'已驳回（豁免命名）')">✕ 驳回</button></div>
+              </div>
+              <div class="ckitem">
+                <div class="ckh">🧾 元数据推荐 <span class="badge b-green">已生成</span></div>
+                <div class="ckb">AI 推荐元数据：密级=<b>内部</b> · 分类=<b>品质检验</b> · 适用机型=<b>JK-8669D</b> · 标签=<b>金加工 / 绷缝机系列</b> · 有效期建议=<b>2027-09-05</b>（依据同类规程惯例）</div>
+                <div class="ckbtns"><button class="btn sm pri" onclick="judge(this,'已采纳元数据推荐')">✓ 采纳全部</button><button class="btn sm" onclick="judge(this,'已进入元数据编辑')">✎ 逐项调整</button></div>
+              </div>
+              <div class="ckitem">
+                <div class="ckh">🔁 重复/冲突检测 <span class="badge b-orange">发现相似</span></div>
+                <div class="ckb">与库内《高速绷缝机检验规程V2》相似度 <b>92.4%</b>。AI 判断为版本迭代而非重复文档，建议声明「V3 取代 V2」，V2 分段将在加工时自动下线。</div>
+                <div class="ckbtns"><button class="btn sm pri" onclick="judge(this,'已声明 V3 取代 V2')">✓ 确认取代关系</button><button class="btn sm" onclick="judge(this,'已转人工裁决')">⚑ 转人工裁决</button></div>
+              </div>
+              <div class="ckitem">
+                <div class="ckh">🖼️ 图片预检 <span class="badge b-purple">AI 已起草 3 条图注</span></div>
+                <div class="ckb">检测到 3 张图片无文字描述（无图注将无法被自然语言召回）。AI 已生成图注草稿，例如图2：<i>“压脚压力表示意图，量程 0-8kg/cm²，用于工序3.4 压脚压力校验”</i></div>
+                <div class="ckbtns"><button class="btn sm pri" onclick="judge(this,'已采纳 AI 图注草稿')">✓ 采纳图注草稿</button><button class="btn sm" onclick="judge(this,'已打开图注编辑')">✎ 逐张编辑</button></div>
+              </div>
+              <div style="padding:12px 16px;background:#f8fafc;display:flex;align-items:center;gap:10px;">
+                <span class="small" style="flex:1;">判定汇总：命名 0/1 · 元数据 0/1 · 取代关系 0/1 · 图注 0/1 —— <b id="ckCount">尚有 4 项待判断</b></span>
+                <button class="btn pri" onclick="toast('已放行：进入同步后台 → Dify 加工（原型演示）','ok')">确认放行，进入加工</button>
+              </div>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-h"><h3>预检规则（AI 执行 · 规则维护在钉钉）</h3>
+              <div class="src"><span class="srcinfo">源：<b>钉钉文档《知识治理标准》</b></span>
+              <button class="btn sm" onclick="doRefresh(this,'预检规则')">🔄</button>
+              <button class="btn sm" onclick="doMaintain('知识治理标准 V1.0','钉钉文档','知识治理 / 02-标准制度')">↗ 去维护</button></div>
+            </div>
+            <div class="card-b" style="padding-top:6px;">
+              <ul class="dotlist">
+                <li><span>命名规则：机型_文档类型_主题_版本</span><span class="badge b-ai">AI 校验</span></li>
+                <li><span>元数据必填：密级/Owner/适用范围/有效期</span><span class="badge b-ai">AI 推荐</span></li>
+                <li><span>重复检测：相似度 &gt;92% 提示取代/裁决</span><span class="badge b-ai">AI 判定</span></li>
+                <li><span>图片必须有描述，缺图注 AI 起草</span><span class="badge b-ai">AI 起草</span></li>
+                <li><span>密级映射权限过滤规则</span><span class="badge b-ai">AI 建议</span></li>
+              </ul>
+              <div class="small" style="margin-top:8px;">人只做判断：每项建议三选一（采纳/修改/驳回），AI 不替人拍板、不自动放行。</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="tabpane" id="c-src">
+        <div class="card">
+          <div class="card-h"><h3>同步源状态 <span class="badge b-gray">搬运工具：同步后台（已上线）</span></h3>
+            <div class="src"><span class="srcinfo">源：<b>同步后台 API</b></span>
+            <button class="btn sm" onclick="doRefresh(this,'同步源状态')">🔄 刷新</button>
+            <button class="btn sm" onclick="window.open('https://6da29zbc.qwenwork.host/','_blank')">↗ 去同步后台维护</button></div>
+          </div>
+          <div class="card-b" style="padding-top:4px;">
+            <table>
+              <tr><th>同步源</th><th>钉钉位置</th><th>目标库</th><th>文档</th><th>上次同步</th><th>本次结果</th><th>状态</th></tr>
+              <tr><td>产品手册</td><td class="small">产品中心/产品手册</td><td>Dify·产品手册</td><td>328</td><td class="mono">今日 02:00</td><td class="small">新 3 · 更 11 · 败 0</td><td><span class="badge b-green">正常</span></td></tr>
+              <tr><td>营销-SR方案库</td><td class="small">营销中心/SR方案</td><td>Dify·SR方案库</td><td>96</td><td class="mono">今日 08:00</td><td class="small">更 4 · 败 1</td><td><span class="badge b-orange">失败 1</span></td></tr>
+              <tr><td>售后知识库</td><td class="small">售后服务/知识中心</td><td>Dify·售后知识</td><td>41</td><td class="mono">—</td><td class="small">—</td><td><span class="badge b-gray">停用</span></td></tr>
+              <tr><td>研发视频资料</td><td class="small">研发中心/K7视频</td><td>Dify·K7视频</td><td>7</td><td class="mono">今日 02:00</td><td class="small">更 1 · 败 2</td><td><span class="badge b-red">失败 2</span></td></tr>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div class="tabpane" id="c-gap">
+        <div class="card">
+          <div class="card-h"><h3>知识缺口看板 <span class="tag">聚合自「无结果」问答，AI 判定缺口类型</span></h3>
+            <div class="src"><span class="srcinfo">源：<b>多维表《缺口与征集》</b></span>
+            <button class="btn sm" onclick="doRefresh(this,'缺口与征集')">🔄 刷新</button>
+            <button class="btn sm" onclick="doMaintain('缺口与征集','多维表','知识治理 / 00-治理台账')">↗ 去维护</button></div>
+          </div>
+          <div class="card-b" style="padding-top:4px;">
+            <table>
+              <tr><th>缺口问题</th><th>近30天</th><th>AI 判定</th><th>人裁决</th><th>状态</th></tr>
+              <tr><td>大客户的 VIP 折扣怎么算</td><td>41 次</td><td><span class="badge b-purple">知识缺口 → 建议征集</span></td><td>已确认 → 销售运营</td><td><span class="badge b-orange">征集中 1/3</span></td></tr>
+              <tr><td>JK-8669D 包缝参数对照</td><td>32 次</td><td><span class="badge b-orange">版本冲突 → 建议治理</span></td><td>待裁决</td><td><span class="badge b-blue">待确认</span></td></tr>
+              <tr><td>出口 CE 认证流程</td><td>27 次</td><td><span class="badge b-purple">知识缺口 → 建议征集</span></td><td>已确认 → 体系办</td><td><span class="badge b-gray">待启动</span></td></tr>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 知识加工 ============ -->
+    <section class="page" id="pg-process">
+      <h2 class="pg">知识加工</h2>
+      <div class="pg-sub">加工是应用的基础。Dify 只是加工工具之一——本页维护加工引擎（按知识类型路由策略）与工具注册表（含各工具管理入口跳转配置），加工动作由引擎自动执行。</div>
+
+      <div class="tabs">
+        <div class="t active" data-tab="p-ov">加工总览</div>
+        <div class="t" data-tab="p-eng">加工引擎配置</div>
+        <div class="t" data-tab="p-tool">工具与跳转配置</div>
+      </div>
+
+      <div class="tabpane active" id="p-ov">
+        <div class="grid g4">
+          <div class="kpi"><div class="l">今日加工文档</div><div class="v">80</div><div class="d flat">AI 增强 76 · 待人确认 9</div></div>
+          <div class="kpi"><div class="l">生成分段</div><div class="v">1,412</div><div class="d flat">低质自动打回 38</div></div>
+          <div class="kpi"><div class="l">AI 图注/摘要/打标</div><div class="v">236</div><div class="d flat">人确认采纳率 94%</div></div>
+          <div class="kpi"><div class="l">评测通过率</div><div class="v">91.2%</div><div class="d up">加工变更后自动回归</div></div>
+        </div>
+        <div class="card">
+          <div class="card-h"><h3>加工流水线（AI 节点 + 人工确认点）</h3></div>
+          <div class="card-b" style="overflow-x:auto;">
+            <table>
+              <tr><th>环节</th><th>执行方</th><th>动作</th><th>质量信号</th></tr>
+              <tr><td>1 · 解析</td><td><span class="badge b-cyan">工具：minerU/OCR/ASR</span></td><td class="small">图文版面解析、音视频转写</td><td class="small">失败 2（K7视频，已告警）</td></tr>
+              <tr><td>2 · 分段</td><td><span class="badge b-green">引擎：Dify</span></td><td class="small">按知识类型路由策略（父子/页级/FAQ）</td><td class="small">低质分段 38 自动打回</td></tr>
+              <tr><td>3 · AI 增强</td><td><span class="badge b-ai">AI</span></td><td class="small">文档/章节摘要、假设性问题、术语扩展</td><td class="small">76 篇完成</td></tr>
+              <tr><td>4 · AI 打标</td><td><span class="badge b-ai">AI</span> <span class="badge b-gray">人确认</span></td><td class="small">系统标签 + 自定义标签建议</td><td class="small">9 篇待人工确认</td></tr>
+              <tr><td>5 · 索引</td><td><span class="badge b-green">引擎：Dify</span></td><td class="small">小/大 chunk 向量、FAQ、全文倒排</td><td class="small">全部完成</td></tr>
+              <tr><td>6 · 回归评测</td><td><span class="badge b-ai">AI</span></td><td class="small">评测集自动回归，不达标回滚</td><td class="small">486+62 题通过</td></tr>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div class="tabpane" id="p-eng">
+        <div class="card">
+          <div class="card-h"><h3>加工引擎策略路由 <span class="badge b-blue">按知识类型自动路由，可维护</span></h3>
+            <button class="btn sm pri" style="margin-left:auto;" onclick="toast('新增策略路由（原型演示）')">＋ 新增路由</button></div>
+          <div class="card-b" style="padding-top:4px;">
+            <table>
+              <tr><th>知识类型</th><th>加工引擎</th><th>分段策略</th><th>索引结构</th><th>挂载工具</th><th>状态</th><th>操作</th></tr>
+              <tr><td>制度流程类</td><td><span class="badge b-green">Dify</span></td><td class="small">层级摘要（HiQA）</td><td class="small">章节摘要向量 + 全文</td><td>摘要 AI</td><td><span class="badge b-green">启用</span></td><td><button class="btn sm ghost" onclick="editRoute('制度流程类')">编辑</button></td></tr>
+              <tr><td>产品手册类</td><td><span class="badge b-green">Dify</span></td><td class="small">父子分段 + 图片描述</td><td class="small">小/大 chunk 多索引</td><td>OCR · 图注 AI</td><td><span class="badge b-green">启用</span></td><td><button class="btn sm ghost" onclick="editRoute('产品手册类')">编辑</button></td></tr>
+              <tr><td>FAQ/参数类</td><td><span class="badge b-green">Dify</span></td><td class="small">FAQ 问答对抽取</td><td class="small">结构化倒排 + 向量</td><td>FAQ 抽取 AI</td><td><span class="badge b-green">启用</span></td><td><button class="btn sm ghost" onclick="editRoute('FAQ/参数类')">编辑</button></td></tr>
+              <tr><td>视频类</td><td><span class="badge b-green">Dify</span></td><td class="small">ASR 转写后按语义分段</td><td class="small">向量</td><td>ASR(ffmpeg)</td><td><span class="badge b-orange">2 转写失败</span></td><td><button class="btn sm ghost" onclick="editRoute('视频类')">编辑</button></td></tr>
+            </table>
+            <div class="small" style="margin-top:8px;">策略约定源出钉钉文档《知识治理标准》，本页将标准实例化为引擎可执行的路由配置；编辑后自动触发回归评测。</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="tabpane" id="p-tool">
+        <div class="hl green">🧰 <span>工具注册表：Dify、同步后台、解析/转写/重排等工具统一登记，每个工具维护「管理入口 URL」——页面上所有「去维护/去配置」按钮都按此配置跳转，工具更换只需改这里。</span></div>
+        <div class="card">
+          <div class="card-h"><h3>工具与跳转配置</h3>
+            <button class="btn sm pri" style="margin-left:auto;" onclick="openTool()">＋ 注册新工具</button></div>
+          <div class="card-b" style="padding-top:4px;">
+            <table>
+              <tr><th>工具</th><th>类型</th><th>承载方</th><th>用途</th><th>管理入口 URL</th><th>状态</th><th>操作</th></tr>
+              <tr><td><b>Dify 知识库</b></td><td>加工引擎</td><td>Dify 平台</td><td class="small">分段/索引/检索策略</td><td class="mono">http://10.10.166.81/</td><td><span class="badge b-green">在线</span></td><td><button class="btn sm" onclick="window.open('http://10.10.166.81/','_blank')">↗ 跳转</button> <button class="btn sm ghost" onclick="openTool('Dify 知识库')">编辑</button></td></tr>
+              <tr><td><b>知识同步后台</b></td><td>搬运</td><td>自研（已上线）</td><td class="small">钉钉→Dify 增量同步</td><td class="mono">https://6da29zbc.qwenwork.host/</td><td><span class="badge b-green">在线</span></td><td><button class="btn sm" onclick="window.open('https://6da29zbc.qwenwork.host/','_blank')">↗ 跳转</button> <button class="btn sm ghost" onclick="openTool('知识同步后台')">编辑</button></td></tr>
+              <tr><td>minerU 解析</td><td>解析</td><td>自部署服务</td><td class="small">PDF/图文版面解析</td><td class="mono">http://10.10.169.30:8010/</td><td><span class="badge b-green">在线</span></td><td><button class="btn sm" onclick="toast('按配置 URL 跳转（原型演示）')">↗ 跳转</button> <button class="btn sm ghost" onclick="openTool('minerU 解析')">编辑</button></td></tr>
+              <tr><td>OCR 服务</td><td>解析</td><td>自部署服务</td><td class="small">图片文字识别</td><td class="mono">http://10.10.169.30:8020/</td><td><span class="badge b-green">在线</span></td><td><button class="btn sm" onclick="toast('按配置 URL 跳转（原型演示）')">↗ 跳转</button> <button class="btn sm ghost" onclick="openTool('OCR 服务')">编辑</button></td></tr>
+              <tr><td>ASR 转写</td><td>解析</td><td>ffmpeg + 模型</td><td class="small">音视频转文字</td><td class="mono">—（命令行工具）</td><td><span class="badge b-orange">2 任务失败</span></td><td><button class="btn sm ghost" onclick="openTool('ASR 转写')">编辑</button></td></tr>
+              <tr><td>Rerank 服务</td><td>检索</td><td>Dify 内置</td><td class="small">语义重排</td><td class="mono">随 Dify 配置</td><td><span class="badge b-green">在线</span></td><td><button class="btn sm ghost" onclick="openTool('Rerank 服务')">编辑</button></td></tr>
+              <tr><td>模型网关</td><td>模型接入</td><td>LiteLLM</td><td class="small">统一模型出口/限流</td><td class="mono">http://10.10.169.34:18080/</td><td><span class="badge b-green">在线</span></td><td><button class="btn sm" onclick="toast('按配置 URL 跳转（原型演示）')">↗ 跳转</button> <button class="btn sm ghost" onclick="openTool('模型网关')">编辑</button></td></tr>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 知识应用 ============ -->
+    <section class="page" id="pg-apply">
+      <h2 class="pg">知识应用</h2>
+      <div class="pg-sub">应用是治理的基础。三端共用统一检索服务（Dify 承载），每次问答都带引用、可反馈——问答日志是治理最重要的数据来源。</div>
+      <div class="grid g3">
+        <div class="card">
+          <div class="card-h"><h3>🤖 Dify 智能体</h3><div class="src"><button class="btn sm" onclick="doRefresh(this,'Dify智能体')">🔄</button><button class="btn sm" onclick="window.open('http://10.10.166.81/','_blank')">↗ 维护</button></div></div>
+          <div class="card-b"><ul class="dotlist">
+            <li><span>设备智能体 / 新员工导师 / 制度助手 等 5 个</span><span class="badge b-green">在线</span></li>
+            <li><span>路由：先选库，再决定 rerank/多跳（审计留痕）</span><span class="badge b-blue">已配置</span></li>
+            <li><span>问答日志 → 回流治理（命中率/无结果/反馈）</span><span class="badge b-green">开启</span></li>
+          </ul></div>
+        </div>
+        <div class="card">
+          <div class="card-h"><h3>✨ 千问办公</h3><div class="src"><button class="btn sm" onclick="doRefresh(this,'千问办公')">🔄</button></div></div>
+          <div class="card-b"><ul class="dotlist">
+            <li><span>已注册知识域：品质检验 / 制度标准 / 商品方案</span><span class="badge b-green">3 个</span></li>
+            <li><span>仅注册质检达标库（健康度&lt;60 不注册）</span><span class="badge b-blue">门禁联动</span></li>
+            <li><span>「无结果」事件 → 写入缺口看板</span><span class="badge b-green">开启</span></li>
+          </ul></div>
+        </div>
+        <div class="card">
+          <div class="card-h"><h3>👤 人类门户</h3><div class="src"><button class="btn sm" onclick="doRefresh(this,'人类门户')">🔄</button></div></div>
+          <div class="card-b"><ul class="dotlist">
+            <li><span>语义检索 + 权限内预览</span><span class="badge b-green">开启</span></li>
+            <li><span>一键跳转钉钉原文阅读/编辑</span><span class="badge b-green">开启</span></li>
+            <li><span>纠错入口与智能体反馈同轨</span><span class="badge b-green">开启</span></li>
+          </ul></div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-h"><h3>问答日志与溯源 <span class="badge b-gray">治理数据源 · 今日 603 次</span></h3>
+          <div class="src"><span class="srcinfo">源：<b>Dify 问答日志</b></span>
+          <button class="btn sm" onclick="doRefresh(this,'问答日志')">🔄 刷新</button>
+          <button class="btn sm" onclick="window.open('http://10.10.166.81/','_blank')">↗ 去 Dify 查看</button></div>
+        </div>
+        <div class="card-b" style="padding-top:4px;">
+          <table>
+            <tr><th>时间</th><th>应用方</th><th>问题</th><th>命中库</th><th>结果</th></tr>
+            <tr class="rowlink"><td class="mono">10:21</td><td>本插件·智能问答</td><td class="small">JK-8669D 针距偏差？</td><td>产品手册</td><td><span class="badge b-green">已引用作答</span></td></tr>
+            <tr class="rowlink"><td class="mono">10:05</td><td>千问办公</td><td class="small">大客户 VIP 折扣怎么算</td><td>路由 → 渠道政策</td><td><span class="badge b-red">无结果 → AI 判定缺口</span></td></tr>
+            <tr class="rowlink"><td class="mono">09:47</td><td>人类门户</td><td class="small">CE 认证流程</td><td>制度标准</td><td><span class="badge b-orange">仅外网资料</span></td></tr>
+            <tr class="rowlink"><td class="mono">09:12</td><td>Dify·新员工导师</td><td class="small">试用期考核标准</td><td>制度标准</td><td><span class="badge b-green">已引用作答</span></td></tr>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 运营看板 ============ -->
+    <section class="page" id="pg-operate">
+      <h2 class="pg">运营看板</h2>
+      <div class="pg-sub">指标由平台计算，底稿全部在钉钉（多维表/数据表），需要修正点击「去维护」到钉钉改。</div>
+      <div class="grid g4">
+        <div class="kpi"><div class="l">问答准确率（北极星）</div><div class="v">87.6%</div><div class="d up">目标 95% · 较上周 +3.2pt</div></div>
+        <div class="kpi"><div class="l">活跃知识占比</div><div class="v">71%</div><div class="d flat">1,052 份中 747 份活跃</div></div>
+        <div class="kpi"><div class="l">评测集通过率</div><div class="v">91.2%</div><div class="d up">486+62 题</div></div>
+        <div class="kpi"><div class="l">Owner 响应及时率</div><div class="v">86%</div><div class="d down">SLA 3 天</div></div>
+      </div>
+      <div class="grid g2">
+        <div class="card">
+          <div class="card-h"><h3>知识健康度分布</h3>
+            <div class="src"><span class="srcinfo">源：<b>多维表《健康度台账》</b></span>
+            <button class="btn sm" onclick="doRefresh(this,'健康度台账')">🔄 刷新</button>
+            <button class="btn sm" onclick="doMaintain('健康度台账','多维表','知识治理 / 00-治理台账')">↗ 去维护</button></div>
+          </div>
+          <div class="card-b" style="padding-top:4px;">
+            <table>
+              <tr><th>健康度</th><th>分数段</th><th>文档数</th><th>运营动作</th></tr>
+              <tr><td><span class="badge b-green">优秀</span></td><td>≥90</td><td>265</td><td class="small">保持 · 标杆知识</td></tr>
+              <tr><td><span class="badge b-blue">良好</span></td><td>80~89</td><td>489</td><td class="small">正常运营</td></tr>
+              <tr><td><span class="badge b-orange">待改进</span></td><td>60~79</td><td>255</td><td class="small">AI 生成整改建议 → Owner 确认</td></tr>
+              <tr><td><span class="badge b-red">风险</span></td><td>&lt;60</td><td>43</td><td class="small">暂停注册新应用 · 限期 14 天</td></tr>
+            </table>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-h"><h3>Owner 贡献榜（本月）</h3>
+            <div class="src"><span class="srcinfo">源：<b>多维表《Owner贡献台账》</b></span>
+            <button class="btn sm" onclick="doRefresh(this,'Owner贡献台账')">🔄 刷新</button>
+            <button class="btn sm" onclick="doMaintain('Owner贡献台账','多维表','知识治理 / 00-治理台账')">↗ 去维护</button></div>
+          </div>
+          <div class="card-b" style="padding-top:4px;">
+            <table>
+              <tr><th>Owner</th><th>贡献</th><th>被引用</th><th>纠错修复</th><th>积分</th></tr>
+              <tr><td>王品控</td><td>23 篇</td><td>1,204</td><td>9</td><td><b>318</b></td></tr>
+              <tr><td>张工</td><td>18 篇</td><td>967</td><td>6</td><td><b>256</b></td></tr>
+              <tr><td>李售前</td><td>12 篇</td><td>1,530</td><td>3</td><td><b>231</b></td></tr>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 知识治理 ============ -->
+    <section class="page" id="pg-govern">
+      <h2 class="pg">知识治理</h2>
+      <div class="pg-sub">治理的「账」记在钉钉（多维表/文档），本页是只读工作视图。反馈工单由 AI 自动分诊（分类/定级/指派建议），<b>人只做确认与裁决</b>。</div>
+
+      <div class="tabs">
+        <div class="t active" data-tab="g-tri">工单智能分诊</div>
+        <div class="t" data-tab="g-gate">质检台账</div>
+        <div class="t" data-tab="g-life">生命周期巡检</div>
+        <div class="t" data-tab="g-std">治理标准</div>
+      </div>
+
+      <div class="tabpane active" id="g-tri">
+        <div class="hl">🤖 <span><b>AI 分诊 · 人裁决：</b>应用端反馈进来后，AI 判定根因（知识缺口/版本冲突/分段劣化/权限/模型错误）、建议严重级与 Owner，并给出处置动作；置信度 &lt;0.7 自动转人工。人在下表逐单确认或改派。</span></div>
+        <div class="card">
+          <div class="card-h"><h3>待人工确认（AI 已分诊）</h3>
+            <div class="src"><span class="srcinfo">源：<b>多维表《知识纠错工单》</b></span>
+            <button class="btn sm" onclick="doRefresh(this,'知识纠错工单')">🔄 刷新</button>
+            <button class="btn sm" onclick="doMaintain('知识纠错工单','多维表','知识治理 / 00-治理台账')">↗ 去维护</button></div>
+          </div>
+          <div class="card-b" style="padding-top:4px;">
+            <table>
+              <tr><th>反馈</th><th>AI 根因判定</th><th>AI 建议处置</th><th>置信度</th><th>人裁决</th></tr>
+              <tr><td class="small">针距参数答错（答成 JK-5890 规格）</td><td><span class="badge b-orange">版本冲突</span></td><td class="small">下线 V2 残留分段 → 重加工 · Owner：王品控</td><td><span class="badge b-green">0.94</span></td><td><button class="btn sm pri" onclick="tri(this)">✓ 确认执行</button> <button class="btn sm ghost" onclick="tri(this,'改派')">改派</button></td></tr>
+              <tr><td class="small">阶梯返利政策检索不到</td><td><span class="badge b-purple">知识缺口</span></td><td class="small">发起征集 → 销售运营 · 生成缺口记录</td><td><span class="badge b-green">0.91</span></td><td><button class="btn sm pri" onclick="tri(this)">✓ 确认执行</button> <button class="btn sm ghost" onclick="tri(this,'改派')">改派</button></td></tr>
+              <tr><td class="small">规程截图匹配差</td><td><span class="badge b-cyan">分段劣化</span></td><td class="small">补图注 → 回流 Dify 重索引 · Owner：王品控</td><td><span class="badge b-green">0.88</span></td><td><button class="btn sm pri" onclick="tri(this)">✓ 确认执行</button> <button class="btn sm ghost" onclick="tri(this,'改派')">改派</button></td></tr>
+              <tr><td class="small">引用了已废止的 2024 版制度</td><td><span class="badge b-gray">不确定</span></td><td class="small">建议：版本治理 · 需人核实版本关系</td><td><span class="badge b-orange">0.62</span></td><td><button class="btn sm pri" onclick="tri(this,'人工核实后执行')">⚑ 人工核实</button></td></tr>
+            </table>
+            <div class="small" style="margin-top:8px;">确认执行的工单自动进入处置流（钉钉待办通知 Owner），完成后 AI 自动跑回归评测，通过则关单并回复提问场景。</div>
+          </div>
+        </div>
+        <div class="grid g3">
+          <div class="kpi"><div class="l">今日 AI 分诊 / 人确认</div><div class="v">18/15</div><div class="d flat">采纳率 83% · 3 单改派</div></div>
+          <div class="kpi"><div class="l">本周回流加工</div><div class="v">7 项</div><div class="d flat">重分段 3 · 重索引 2 · 转写重跑 2</div></div>
+          <div class="kpi"><div class="l">验证关单率</div><div class="v">78%</div><div class="d up">回归评测通过才关单</div></div>
+        </div>
+      </div>
+
+      <div class="tabpane" id="g-gate">
+        <div class="card">
+          <div class="card-h"><h3>入库质检台账 <span class="tag">AI 预检结果留痕 · 拦截≠删除</span></h3>
+            <div class="src"><span class="srcinfo">源：<b>多维表《入库质检台账》</b></span>
+            <button class="btn sm" onclick="doRefresh(this,'入库质检台账')">🔄 刷新</button>
+            <button class="btn sm" onclick="doMaintain('入库质检台账','多维表','知识治理 / 00-治理台账')">↗ 去维护</button></div>
+          </div>
+          <div class="card-b" style="padding-top:4px;">
+            <table>
+              <tr><th>文档</th><th>命中规则</th><th>AI 建议</th><th>Owner</th><th>状态</th><th>操作</th></tr>
+              <tr><td>《高速绷缝机检验规程V3.docx》</td><td><span class="badge b-orange">命名不规范</span></td><td class="small">改名 JK-8669D_检验规程_金加工过程_V3</td><td>王品控</td><td><span class="badge b-blue">待人判断</span></td><td><button class="btn sm ghost" onclick="doMaintain('高速绷缝机检验规程V3','钉钉文档','品质流程IT部 / 检验规程')">↗ 去维护</button></td></tr>
+              <tr><td>《AI 智能体活动照片集.pptx》</td><td><span class="badge b-orange">3 张图片无描述</span></td><td class="small">AI 已起草图注，待采纳</td><td>黄景新</td><td><span class="badge b-blue">待采纳</span></td><td><button class="btn sm ghost" onclick="doMaintain('AI 智能体活动照片集','钉钉文档','集团公共库 / 活动资料')">↗ 去维护</button></td></tr>
+              <tr><td>《2026 渠道政策(草稿).docx》</td><td><span class="badge b-red">密级未定级</span></td><td class="small">AI 建议：内部（含商务条款）</td><td>销售运营</td><td><span class="badge b-blue">待定密级</span></td><td><button class="btn sm ghost" onclick="doMaintain('2026 渠道政策(草稿)','钉钉文档','营销中心 / 渠道政策')">↗ 去维护</button></td></tr>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div class="tabpane" id="g-life">
+        <div class="card">
+          <div class="card-h"><h3>自动巡检（每日）<span class="tag">AI 汇总异常 + 生成建议，人确认后推送钉钉待办</span></h3>
+            <div class="src"><span class="srcinfo">源：<b>多维表《巡检结果》</b></span>
+            <button class="btn sm" onclick="doRefresh(this,'巡检结果')">🔄 刷新</button>
+            <button class="btn sm" onclick="doMaintain('巡检结果','多维表','知识治理 / 00-治理台账')">↗ 去维护</button></div>
+          </div>
+          <div class="card-b" style="padding-top:4px;">
+            <table>
+              <tr><th>巡检项</th><th>今日发现</th><th>AI 建议</th><th>动作（钉钉侧）</th></tr>
+              <tr><td>有效期到期（30天内）</td><td>64 份</td><td class="small">按 Owner 聚合，一键生成待办</td><td class="small">Owner 更新原文档有效期</td></tr>
+              <tr><td>90 天零引用</td><td>12 份</td><td class="small">AI 评估：7 份建议归档，5 份建议保留</td><td class="small">Owner 确认归档/保留</td></tr>
+              <tr><td>Owner 调岗/离职</td><td>5 份</td><td class="small">推荐继任 Owner（按部门与历史引用）</td><td class="small">重新认领（钉钉待办）</td></tr>
+              <tr><td>版本冲突</td><td>3 组</td><td class="small">AI 比对差异，建议取代关系</td><td class="small">Owner 确认 → 通知同步换版</td></tr>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div class="tabpane" id="g-std">
+        <div class="card">
+          <div class="card-h"><h3>知识治理标准 <span class="badge b-cyan">钉钉文档 · 单一维护入口</span></h3>
+            <div class="src"><span class="srcinfo">源：<b>钉钉文档《知识治理标准 V1.0》</b></span>
+            <button class="btn sm" onclick="doRefresh(this,'知识治理标准')">🔄 刷新</button>
+            <button class="btn sm" onclick="doMaintain('知识治理标准 V1.0','钉钉文档','知识治理 / 02-标准制度')">↗ 去维护</button></div>
+          </div>
+          <div class="card-b" style="padding-top:4px;">
+            <table>
+              <tr><th>标准章节</th><th>要点</th></tr>
+              <tr><td>命名与元数据规范</td><td class="small">机型_文档类型_主题_版本；必填密级/Owner/适用范围/有效期</td></tr>
+              <tr><td>加工策略路由</td><td class="small">制度类→HiQA；手册类→父子分段；FAQ→问答对（实例化于加工引擎配置页）</td></tr>
+              <tr><td>健康度权重</td><td class="small">引用活跃 40% · 时效 25% · 质检 20% · 纠错 15%</td></tr>
+              <tr><td>注册门禁</td><td class="small">健康度&lt;60 不注册新应用；无引用回答占比红线 3%</td></tr>
+              <tr><td>权限原则</td><td class="small">以钉钉原生权限为唯一来源，检索端同步映射</td></tr>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ AI 模型配置 ============ -->
+    <section class="page" id="pg-model">
+      <h2 class="pg">AI 模型配置</h2>
+      <div class="pg-sub">智能体的大脑与全链路 AI 节点的模型管理：问答模型可选可换，判定类节点（分诊/质检/命名校验/打标）绑定低温度模型并开启结构化输出。</div>
+
+      <div class="grid g2">
+        <div class="card">
+          <div class="card-h"><h3>模型接入</h3>
+            <button class="btn sm pri" style="margin-left:auto;" onclick="toast('新增模型接入（原型演示）')">＋ 接入模型</button></div>
+          <div class="card-b" style="padding-top:4px;">
+            <table>
+              <tr><th>模型</th><th>接入方式</th><th>Endpoint</th><th>Key</th><th>状态</th></tr>
+              <tr><td><b>千问-Max</b></td><td>API（收费）</td><td class="mono">dashscope</td><td><span class="badge b-green">有效</span></td><td><span class="badge b-green">在线</span></td></tr>
+              <tr><td><b>GLM-4</b></td><td>LiteLLM 网关（自部署）</td><td class="mono">10.10.169.34:18080</td><td><span class="badge b-green">有效</span></td><td><span class="badge b-orange">限流≈2并发</span></td></tr>
+              <tr><td><b>DeepSeek-V3</b></td><td>API</td><td class="mono">api.deepseek.com</td><td><span class="badge b-green">有效</span></td><td><span class="badge b-green">在线</span></td></tr>
+              <tr><td>text-embedding</td><td>随 Dify</td><td class="mono">dify 内置</td><td>—</td><td><span class="badge b-green">在线</span></td></tr>
+              <tr><td>rerank</td><td>随 Dify</td><td class="mono">dify 内置</td><td>—</td><td><span class="badge b-green">在线</span></td></tr>
+            </table>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-h"><h3>节点 → 模型绑定 <span class="badge b-ai">判定类 temperature=0</span></h3></div>
+          <div class="card-b" style="padding-top:4px;">
+            <table>
+              <tr><th>链路节点</th><th>绑定模型</th><th>temp</th><th>结构化输出</th><th>提示词</th></tr>
+              <tr><td>智能问答（首页）</td><td>千问-Max</td><td class="mono">0.3</td><td>—</td><td>—</td></tr>
+              <tr><td>上传前命名校验</td><td>DeepSeek-V3</td><td class="mono">0</td><td><span class="badge b-green">开</span></td><td><button class="btn sm ghost" onclick="openPrompt('p1')">查看</button></td></tr>
+              <tr><td>元数据推荐/打标</td><td>GLM-4</td><td class="mono">0</td><td><span class="badge b-green">开</span></td><td><button class="btn sm ghost" onclick="openPrompt('p2')">查看</button></td></tr>
+              <tr><td>摘要/图注生成</td><td>千问-Max</td><td class="mono">0.2</td><td>—</td><td><button class="btn sm ghost" onclick="openPrompt('p3')">查看</button></td></tr>
+              <tr><td>工单智能分诊</td><td>千问-Max</td><td class="mono">0</td><td><span class="badge b-green">开</span></td><td><button class="btn sm ghost" onclick="openPrompt('p4')">查看</button></td></tr>
+              <tr><td>巡检归档建议</td><td>DeepSeek-V3</td><td class="mono">0</td><td><span class="badge b-green">开</span></td><td><button class="btn sm ghost" onclick="openPrompt('p5')">查看</button></td></tr>
+            </table>
+            <div class="small" style="margin-top:8px;">首页问答模型由用户在输入框左下角随时切换；链路节点模型在此统一绑定，变更后自动触发回归评测。</div>
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-h"><h3>用量与成本（本月）</h3><div class="src"><button class="btn sm" onclick="doRefresh(this,'模型用量')">🔄 刷新</button></div></div>
+        <div class="card-b" style="padding-top:4px;">
+          <table>
+            <tr><th>模型</th><th>调用量</th><th>主要用途</th><th>成本趋势</th></tr>
+            <tr><td>千问-Max</td><td>4.2 万次</td><td class="small">问答 · 摘要 · 分诊</td><td class="small up">+12%（随问答量增长）</td></tr>
+            <tr><td>GLM-4（网关）</td><td>1.8 万次</td><td class="small">打标 · 元数据</td><td class="small flat">0（自部署）</td></tr>
+            <tr><td>DeepSeek-V3</td><td>0.9 万次</td><td class="small">命名校验 · 巡检建议</td><td class="small flat">稳定</td></tr>
+          </table>
+        </div>
+      </div>
+    </section>
+  </div>
+</div>
+
+<!-- ============ MODAL: 去维护 ============ -->
+<div class="mask" id="mtMask" onclick="if(event.target===this)this.classList.remove('show')">
+  <div class="modal" style="max-width:520px;">
+    <button class="m-close" onclick="document.getElementById('mtMask').classList.remove('show')">✕</button>
+    <h3>↗ 去维护</h3>
+    <div class="sub">本插件页面为只读视图，内容编辑在钉钉完成</div>
+    <div id="mtBody"></div>
+    <div style="margin-top:16px;display:flex;gap:10px;justify-content:flex-end;">
+      <button class="btn" onclick="document.getElementById('mtMask').classList.remove('show')">取消</button>
+      <button class="btn pri" onclick="toast('已在新窗口打开钉钉（原型演示）','ok');document.getElementById('mtMask').classList.remove('show')">打开钉钉</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ MODAL: 工具编辑 ============ -->
+<div class="mask" id="toolMask" onclick="if(event.target===this)this.classList.remove('show')">
+  <div class="modal" style="max-width:560px;">
+    <button class="m-close" onclick="document.getElementById('toolMask').classList.remove('show')">✕</button>
+    <h3 id="toolTitle">注册工具</h3>
+    <div class="sub">登记工具信息与「管理入口 URL」——全站所有「去维护/跳转」按钮按此配置生成</div>
+    <div class="formrow"><div class="f1"><label>工具名称</label><input id="tName" placeholder="如：Dify 知识库"></div>
+      <div class="f1"><label>类型</label><select><option>加工引擎</option><option>搬运</option><option>解析</option><option>检索</option><option>模型接入</option></select></div></div>
+    <div class="formrow"><div class="f1"><label>管理入口 URL（跳转配置）</label><input id="tUrl" placeholder="http://…"></div>
+      <div class="f1"><label>健康检查 URL（可选）</label><input placeholder="http://…/health"></div></div>
+    <div class="formrow"><div class="f1"><label>用途说明</label><input placeholder="该工具在加工链路中的作用"></div></div>
+    <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:6px;">
+      <button class="btn" onclick="document.getElementById('toolMask').classList.remove('show')">取消</button>
+      <button class="btn pri" onclick="toast('工具配置已保存，跳转入口已更新（原型演示）','ok');document.getElementById('toolMask').classList.remove('show')">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ MODAL: 提示词 ============ -->
+<div class="mask" id="prMask" onclick="if(event.target===this)this.classList.remove('show')">
+  <div class="modal">
+    <button class="m-close" onclick="document.getElementById('prMask').classList.remove('show')">✕</button>
+    <h3 id="prTitle">提示词全文</h3>
+    <div class="sub" id="prSub"></div>
+    <div class="promptbox" id="prBody"></div>
+    <div style="margin-top:14px;display:flex;gap:10px;justify-content:flex-end;">
+      <button class="btn" onclick="document.getElementById('prMask').classList.remove('show')">关闭</button>
+      <button class="btn pri" onclick="toast('提示词已保存（原型演示，真实维护入口待接入）','ok');document.getElementById('prMask').classList.remove('show')">保存</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+/* ---------- 页面切换 ---------- */
+const titles={home:'智能问答',collect:'知识采集',process:'知识加工',apply:'知识应用',operate:'运营看板',govern:'知识治理',model:'AI 模型配置'};
+function go(page,tab){
+  location.hash=tab?('#'+page+'/'+tab):('#'+page);
+  document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+  document.getElementById('pg-'+page).classList.add('active');
+  document.querySelectorAll('.nav a').forEach(a=>a.classList.remove('active'));
+  const nav=document.querySelector(`.nav a[data-page="${page}"]:not(.sub)`); if(nav)nav.classList.add('active');
+  document.getElementById('pgTitle').textContent=titles[page];
+  document.getElementById('northStrip').style.display=(page==='home')?'none':'';
+  document.getElementById('pulse')&&0;
+  window.scrollTo(0,0);
+  if(tab){const t=document.querySelector(`#pg-${page} .tabs .t[data-tab="${tab}"]`); if(t)t.click();}
+}
+document.querySelectorAll('.nav a').forEach(a=>a.addEventListener('click',e=>{e.preventDefault();go(a.dataset.page,a.dataset.tab);}));
+document.querySelectorAll('.tabs .t[data-tab]').forEach(t=>t.addEventListener('click',()=>{
+  const tabs=t.closest('.tabs');
+  tabs.querySelectorAll('.t').forEach(x=>x.classList.remove('active')); t.classList.add('active');
+  t.closest('.page').querySelectorAll(':scope > .tabpane').forEach(p=>p.classList.remove('active'));
+  document.getElementById(t.dataset.tab).classList.add('active');
+}));
+/* ---------- toast ---------- */
+function toast(msg,type){
+  const el=document.createElement('div'); el.className='toast'+(type?' '+type:''); el.innerHTML=msg;
+  document.getElementById('toast').appendChild(el);
+  setTimeout(()=>{el.style.opacity='0';el.style.transition='opacity .4s';setTimeout(()=>el.remove(),400);},3200);
+}
+/* ---------- 刷新 / 去维护 ---------- */
+function doRefresh(btn,name){
+  const card=btn.closest('.card');
+  if(card){card.classList.add('refreshing');setTimeout(()=>card.classList.remove('refreshing'),700);}
+  toast(`已从数据源刷新《${name}》`,'ok');
+}
+function doMaintain(name,type,path){
+  const icon={'钉钉文档':'📄','多维表':'📊','数据表':'📋'}[type]||'📄';
+  document.getElementById('mtBody').innerHTML=`
+    <div style="border:1px solid var(--border);border-radius:10px;padding:14px 16px;background:#fcfdff;font-size:13.5px;line-height:2;">
+      <div>${icon} <b>${name}</b> <span class="badge b-blue">${type}</span></div>
+      <div class="small">位置：${path}</div>
+      <div class="small" style="margin-top:6px;">编辑在钉钉完成，保存后本插件自动感知变更并重算，无需页面操作。</div>
+    </div>`;
+  document.getElementById('mtMask').classList.add('show');
+}
+/* ---------- 首页问答 ---------- */
+(function(){const h=new Date().getHours();document.getElementById('greetTime').textContent=h<12?'上午好':(h<18?'下午好':'晚上好');})();
+const input=document.getElementById('askInput');
+input.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendQ();}});
+function askSugg(q){input.value=q;sendQ();}
+function sendQ(){
+  const q=input.value.trim(); if(!q){input.focus();return;}
+  input.value='';
+  const home=document.getElementById('homeIntro'); if(home)home.style.display='none';
+  document.getElementById('sugg').style.display='none';
+  document.querySelector('.north-strip').style.display='none';
+  const chat=document.getElementById('chat'); chat.classList.add('show');
+  chat.insertAdjacentHTML('beforeend',`<div class="msg-u"><div class="bub">${esc(q)}</div></div>`);
+  chat.insertAdjacentHTML('beforeend',`<div class="msg-a"><div class="av">🤖</div><div class="body"><div class="meta">检索中 · 知识库检索开启 · ${document.getElementById('modelSel').value}</div><div class="ab"><span class="typing"><i></i><i></i><i></i></span></div></div></div>`);
+  chat.scrollIntoView({behavior:'smooth',block:'end'});
+  const node=chat.lastElementChild;
+  setTimeout(()=>{node.remove();renderAnswer(q);},900);
+}
+function esc(s){return s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+function renderAnswer(q){
+  const chat=document.getElementById('chat');
+  let html='';
+  if(q.includes('针距')){
+    html=`<div class="msg-a"><div class="av">🤖</div><div class="body">
+      <div class="meta">📚 产品手册(328篇) · 召回 3 段 · 权限过滤 2 段 · 置信度 0.92 · 用时 1.2s · 千问-Max</div>
+      <div class="ab">JK-8669D 针距范围为 <b>2.0~5.0mm</b>，允许偏差 <b>±0.1mm</b><span class="cite">[1]</span>。超差时：① 停机复核针距机构<span class="cite">[2]</span>；② 按工序 3.2 检验规程复检<span class="cite">[1]</span>；③ 连续 3 件超差须开品质异常单<span class="cite">[2]</span>。
+      <div class="refs"><div class="ref">[1]《JK-8669D_检验规程_金加工过程_V3》§3.2 · 第4页 <span class="badge b-blue">内部</span> <span class="badge b-green">在有效期</span> <button class="btn sm ghost" onclick="doMaintain('JK-8669D_检验规程_金加工过程_V3','钉钉文档','品质流程IT部 / 检验规程')">↗ 钉钉原文</button></div>
+      <div class="ref">[2]《JK-8669D 作业指导书》§5 · 第12页 <span class="badge b-blue">内部</span> <button class="btn sm ghost" onclick="doMaintain('JK-8669D 作业指导书','钉钉文档','产品中心 / 产品手册')">↗ 钉钉原文</button></div></div>
+      <div class="feedbackbar"><span class="small">有帮助吗？</span><button class="btn sm" onclick="toast('已记录「有帮助」，计入知识健康度','ok')">👍 有帮助</button><button class="btn sm" onclick="toast('纠错已写入钉钉工单多维表，AI 分诊后将通知 Owner','ok')">👎 纠错</button><button class="btn sm" onclick="toast('已记录，AI 判定中：将生成缺口/检索建议','ok')">❓ 没找到想要的</button></div></div></div></div>`;
+  }else if(q.includes('折扣')||q.includes('返利')){
+    html=`<div class="msg-a"><div class="av">🤖</div><div class="body">
+      <div class="meta">📚 路由 → 渠道政策库 · 召回 0 段 · No-Answer · 千问-Max</div>
+      <div class="ab">抱歉，当前知识库中未检索到「VIP 折扣 / 阶梯返利」相关内容。<br><b>这不是模型问题，是知识缺口</b>——近 30 天该问题已被问 41 次。<br><br>🤖 <b>AI 建议：</b>发起知识征集，指派 <b>销售运营</b> 补齐《渠道政策》知识包（已判定为高价值缺口）。
+      <div class="feedbackbar"><span class="small">要为我做点什么吗？</span><button class="btn sm pri" onclick="toast('已生成征集工单写入钉钉多维表《缺口与征集》，并通知销售运营','ok')">✓ 提交缺口征集</button><button class="btn sm" onclick="toast('已转人工客服/相关 Owner（原型演示）','ok')">⚑ 找人解答</button></div></div></div></div>`;
+  }else{
+    html=`<div class="msg-a"><div class="av">🤖</div><div class="body">
+      <div class="meta">📚 混合召回 · 命中 2 段 · 用时 0.9s · ${document.getElementById('modelSel').value}</div>
+      <div class="ab">根据《员工手册》与《试用期管理制度》<span class="cite">[1]</span>：试用期考核标准包括……（演示占位回答，真实回答由 Dify 检索生成）。
+      <div class="refs"><div class="ref">[1]《试用期管理制度》§2 考核 · 第3页 <span class="badge b-blue">内部</span> <button class="btn sm ghost" onclick="doMaintain('试用期管理制度','钉钉文档','人力资源 / 制度')">↗ 钉钉原文</button></div></div>
+      <div class="feedbackbar"><span class="small">有帮助吗？</span><button class="btn sm" onclick="toast('已记录「有帮助」','ok')">👍 有帮助</button><button class="btn sm" onclick="toast('纠错已写入钉钉工单多维表','ok')">👎 纠错</button><button class="btn sm" onclick="toast('已记录，AI 判定中','ok')">❓ 没找到想要的</button></div></div></div></div>`;
+  }
+  chat.insertAdjacentHTML('beforeend',html);
+  chat.scrollIntoView({behavior:'smooth',block:'end'});
+}
+/* ---------- 上传预检 ---------- */
+function simUpload(){
+  const c=document.getElementById('aiCheck');
+  c.classList.remove('show'); void c.offsetWidth;
+  c.classList.add('show');
+  toast('AI 预检完成：4 项检查，3 项建议待您判断','ok');
+  document.getElementById('ckCount').textContent='尚有 4 项待判断';
+  document.querySelectorAll('#aiCheck .ckbtns .btn').forEach(b=>b.disabled=false);
+  document.querySelectorAll('#aiCheck .ckitem').forEach(i=>i.style.opacity=1);
+}
+let judged=0,total=4;
+function judge(btn,what){
+  btn.closest('.ckbtns').querySelectorAll('.btn').forEach(b=>{b.disabled=true;b.style.opacity=.4;});
+  btn.disabled=false;btn.style.opacity=1;
+  const item=btn.closest('.ckitem');item.style.opacity=.75;
+  judged=Math.min(judged+1,total);
+  document.getElementById('ckCount').textContent=`已完成 ${judged}/${total} 项`;
+  toast(`已判断：${what}`,'ok');
+}
+/* ---------- 分诊/路由/工具/提示词 ---------- */
+function tri(btn,mode){btn.closest('td').innerHTML=`<span class="badge b-green">已${mode||'确认'}</span>`;toast('工单进入处置流：钉钉待办已通知 Owner，完成后 AI 自动回归评测','ok');}
+function editRoute(name){toast(`编辑「${name}」加工策略路由（原型演示）`);}
+function openTool(name){
+  document.getElementById('toolTitle').textContent=name?('编辑工具 · '+name):'注册新工具';
+  if(name)document.getElementById('tName').value=name;else document.getElementById('tName').value='';
+  document.getElementById('toolMask').classList.add('show');
+}
+const prompts={
+ p1:{t:'上传前命名校验 · 提示词全文',s:'绑定模型：DeepSeek-V3 · temperature=0 · 结构化输出开启（判定类节点）',b:`你是企业知识库的文档命名校验器。根据命名规范判断文件名是否合规，并给出改名建议。
+
+【命名规范】
+<机型|产品线>_<文档类型>_<主题>_<版本号>.<扩展名>
+示例：JK-8669D_检验规程_金加工过程_V3.docx
+
+【输入】
+文件名：{filename}
+文档前 500 字摘要：{doc_summary}
+
+【任务】
+1. 判断文件名是否符合规范（机型可从摘要中推断）
+2. 不合规时给出建议文件名
+3. 输出判断依据，供人工复核
+
+【输出 JSON Schema】
+{
+  "compliant": true/false,
+  "suggested_name": "string（合规时为空）",
+  "machine_model_detected": "string|null",
+  "reason": "string（≤50字）",
+  "confidence": 0~1
+}`},
+ p2:{t:'元数据推荐与打标 · 提示词全文',s:'绑定模型：GLM-4 · temperature=0 · 结构化输出开启',b:`你是知识库元数据标注助手。为文档推荐元数据与标签，供人工确认。
+
+【标签词表（系统标签）】
+机型：{机型词表}；流程域：{流程域词表}；知识类型：制度/规程/手册/FAQ/案例/标准；密级：公开/内部/秘密
+
+【输入】
+文档全文（分块）：{chunks}
+文档来源目录：{dingtalk_path}
+
+【规则】
+1. 只能从系统标签词表中选择标签，不得发明新标签
+2. 密级判断依据：含商务条款/价格→内部及以上；含技术参数→至少内部
+3. 自定义标签可建议，但须标注 suggested_custom=true，进入管理员审核队列
+
+【输出 JSON Schema】
+{
+  "classification": {"miji":"...","knowledge_type":"...","process_domain":"...","machine_models":[...]},
+  "system_tags": ["..."],
+  "custom_tags": [{"tag":"...","reason":"..."}],
+  "confidence": 0~1
+}`},
+ p3:{t:'摘要与图注生成 · 提示词全文',s:'绑定模型：千问-Max · temperature=0.2（生成类节点）',b:`你是知识加工流水线的增强节点，负责两类任务：
+
+【任务A：文档/章节摘要】（用于层级检索 HiQA 索引）
+为文档生成 ≤100 字文档级摘要；为每个一级章节生成 ≤50 字章节级摘要。
+摘要必须包含：适用机型/范围、核心主题、关键结论。禁止臆造摘要中未出现的信息。
+
+【任务B：图片描述】（用于图片召回）
+输入：图片 + 所在章节上下文。
+输出 ≤60 字描述：图的内容、量程/参数（若有）、在工序中的作用。描述须可独立用于文本检索匹配。
+
+【输出 JSON Schema】
+{
+  "doc_summary": "string",
+  "section_summaries": [{"title":"...","summary":"..."}],
+  "image_captions": [{"image_id":"...","caption":"..."}]
+}`},
+ p4:{t:'工单智能分诊 · 提示词全文',s:'绑定模型：千问-Max · temperature=0 · 结构化输出开启（治理关键节点，置信度<0.7 自动转人工）',b:`你是知识治理平台的反馈工单分诊助手。根据用户反馈判定根因并给出处置建议。你的判定结果将呈现给治理人员做最终裁决，请保持谨慎。
+
+【输入】
+- 用户问题：{query}
+- 智能体回答：{answer}
+- 召回分段（含来源与版本）：{chunks}
+- 反馈类型：{feedback_type}（纠错/无结果/内容过时/其他）
+- 问题描述：{user_comment}
+
+【根因枚举】
+knowledge_gap=知识缺口 | version_conflict=版本冲突（新旧版本同时被召回）
+bad_chunking=分段劣化 | no_permission=权限过滤误伤 | model_error=模型理解错误 | content_error=源文档内容错误
+
+【处置枚举】
+solicit=发起征集 | reprocess=回流Dify重加工 | fix_doc=修正源文档 | answer_correction=答案纠偏存档
+
+【输出 JSON Schema】
+{
+  "root_cause": "枚举值",
+  "severity": "high|medium|low",
+  "action": "枚举值",
+  "suggested_owner_role": "string",
+  "evidence": "string（引用哪条chunk支持判定，≤80字）",
+  "confidence": 0~1
+}
+
+【约束】
+- confidence < 0.7 时输出 root_cause="uncertain" 并说明需人工核实的点
+- severity 判定标准：引用过时/错误内容致业务风险=high；答非所问/检索不到=medium；表述瑕疵=low`},
+ p5:{t:'巡检归档建议 · 提示词全文',s:'绑定模型：DeepSeek-V3 · temperature=0 · 结构化输出开启',b:`你是知识生命周期巡检助手。对"90天零引用"文档逐一给出处置建议，供 Owner 确认。
+
+【输入】
+文档元数据：{metadata}（类型/密级/Owner/创建时间/最近更新/历史引用曲线）
+同目录文档引用分布：{sibling_stats}
+
+【判断规则】
+1. 制度/标准类：不建议归档（有合规价值），建议复审
+2. 活动记录/草稿类：建议归档
+3. 若同目录新版本存在：建议归档并声明被取代
+4. 无法判断时输出 review，交人工
+
+【输出 JSON Schema】
+{
+  "docs": [{"doc_id":"...","advice":"archive|keep|review","reason":"string（≤40字）"}]
+}`}
+};
+function openPrompt(k){
+  const p=prompts[k];
+  document.getElementById('prTitle').textContent=p.t;
+  document.getElementById('prSub').textContent=p.s;
+  document.getElementById('prBody').textContent=p.b;
+  document.getElementById('prMask').classList.add('show');
+}
+/* ---------- hash 路由 ---------- */
+window.addEventListener('hashchange',()=>{const h=location.hash.slice(1).split('/');if(h[0]&&titles[h[0]])go(h[0],h[1]);});
+(function(){const h=location.hash.slice(1).split('/');if(h[0]&&titles[h[0]])go(h[0],h[1]);})();
+</script>
+</body>
+</html>

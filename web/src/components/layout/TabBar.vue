@@ -82,11 +82,7 @@ onUnmounted(() => {
         @contextmenu="handleContextMenu($event, tab.path)"
       >
         <span class="tab-title">{{ tab.title }}</span>
-        <span
-          v-if="tab.closable"
-          class="tab-close"
-          @click="handleClose($event, tab.path)"
-        >
+        <span class="tab-close" @click="handleClose($event, tab.path)">
           <el-icon :size="12"><Close /></el-icon>
         </span>
       </div>

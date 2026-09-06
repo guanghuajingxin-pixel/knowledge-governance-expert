@@ -30,14 +30,33 @@ class Settings(BaseSettings):
     embed_dim: int = 1024
     mineru_api_url: str = "https://mineru.net/api/v4"
     mineru_api_key: str = ""          # 运行时可被 settings 表覆盖
+    # 本地 MinerU 解析引擎（mineru-api 常驻服务，见 services/mineru）；
+    # 置空字符串可禁用本地引擎、强制走云 API。
+    mineru_local_url: str = "http://127.0.0.1:2028"
 
     # LLM（默认 GLM；DeepSeek 同协议）
     llm_base_url: str = "https://open.bigmodel.cn/api/paas/v4"
     llm_api_key: str = ""
     llm_model: str = "glm-4-flash"
 
+    # Dify 知识库（用于智能问答 Agent；Service API 端点需含端口与 /v1）
+    dify_base_url: str = "http://127.0.0.1:8088/v1"
+    dify_api_key: str = ""           # Dataset API Key 或 App API Key
+    dify_dataset_ids: str = ""       # 默认检索的数据集 ID，逗号分隔
+    dify_retrieval_top_k: int = 50
+    dify_score_threshold: float = 0.4
+    # 检索方式：semantic_search / full_text_search / hybrid_search
+    dify_search_method: str = "semantic_search"
+    # Dify 侧重排（需在 Dify 控制台配置 Rerank 模型；未配置时应置 false，否则检索 400）
+    dify_reranking_enable: bool = False
+
     # 服务间
     kb_api_internal_url: str = "http://127.0.0.1:8000"
+
+    # 钉钉（企业知识库数据来源）
+    dingtalk_app_key: str = ""
+    dingtalk_app_secret: str = ""
+    dingtalk_operator_union_id: str = ""   # 调用知识库 API 的操作人 unionId
 
 @lru_cache
 def get_settings() -> Settings:

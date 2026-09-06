@@ -4,7 +4,8 @@ from kb_common.config import get_settings
 def _client(base_url: str | None = None, api_key: str | None = None) -> AsyncOpenAI:
     s = get_settings()
     return AsyncOpenAI(base_url=base_url or s.llm_base_url,
-                       api_key=api_key or s.llm_api_key or "empty")
+                       api_key=api_key or s.llm_api_key or "empty",
+                       timeout=15.0, max_retries=0)
 
 async def chat(messages: list[dict], model: str | None = None,
                base_url: str | None = None, api_key: str | None = None) -> str:

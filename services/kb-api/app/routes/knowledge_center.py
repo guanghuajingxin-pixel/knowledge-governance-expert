@@ -1,6 +1,12 @@
 """知识中心跨知识库聚合路由"""
+import asyncio
+import json
+import logging
+import os
+import time
 import uuid as _uuid
 from datetime import datetime, timedelta
+from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select, func, case, and_
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,10 +16,87 @@ from kb_common.clients import es_client
 from app.schemas import DirOut, KcDocumentOut, TrashItemOut, TaskStatsOut
 from app.deps import get_current_user, require_role
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api/v1/knowledge-center", tags=["knowledge-center"])
 
 # 回收站自动清理天数
 TRASH_RETENTION_DAYS = 20
+
+# 钉钉知识库文件列表内存缓存（全量遍历数千节点耗时较长，后台异步刷新）
+# loading=True 表示后台遍历进行中；files 已有时为旧数据（stale-while-revalidate）
+_dingtalk_cache: dict = {"files": None, "expire_at": 0.0, "loading": False, "error": None}
+_DINGTALK_TTL = 3600  # 1 小时；「手动刷新」强制重新拉取
+
+# 钉钉全量遍历结果磁盘快照：进程重启/uvicorn --reload 后用快照快速预热，
+# 避免每次冷启动都等待数十分钟的全量遍历（可用 KGE_DINGTALK_SNAPSHOT 覆盖路径）。
+_SNAPSHOT_PATH = Path(os.getenv("KGE_DINGTALK_SNAPSHOT", "/tmp/kge_dingtalk_files.json"))
+_snapshot_loaded = False
+
+
+def _load_dingtalk_snapshot() -> None:
+    """进程冷启动后用磁盘快照预热内存缓存。
+
+    快照文件尚不存在时（首次遍历未落盘）保持未加载状态，后续请求继续尝试，
+    使晚于进程启动落盘的快照也能被发现。
+    """
+    global _snapshot_loaded
+    if _snapshot_loaded:
+        return
+    try:
+        if not _SNAPSHOT_PATH.exists():
+            return
+        _snapshot_loaded = True
+        data = json.loads(_SNAPSHOT_PATH.read_text(encoding="utf-8"))
+        fetched_at = float(data.get("fetched_at") or 0)
+        files = data.get("files")
+        if files:
+            # 即使快照已过期也加载（有数据总比空等好），同时置 expire_at=now 触发后台刷新
+            _dingtalk_cache["files"] = files
+            _dingtalk_cache["expire_at"] = fetched_at + _DINGTALK_TTL
+            logger.info("钉钉文件快照预热完成：%d 个文件", len(files))
+    except Exception as e:
+        logger.warning("钉钉文件快照加载失败：%s", e)
+
+
+def _save_dingtalk_snapshot(files: list) -> None:
+    """全量遍历成功后落盘快照（原子替换），供下次进程启动预热。"""
+    try:
+        tmp_path = _SNAPSHOT_PATH.with_name(_SNAPSHOT_PATH.name + ".tmp")
+        tmp_path.write_text(
+            json.dumps({"fetched_at": time.time(), "files": files}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        tmp_path.replace(_SNAPSHOT_PATH)
+    except Exception as e:
+        logger.warning("钉钉文件快照写入失败：%s", e)
+
+
+async def _refresh_dingtalk_files() -> None:
+    """后台任务：遍历全部钉钉知识库并写缓存 + 落盘快照。"""
+    from kb_common.clients import dingtalk_client
+    try:
+        await dingtalk_client.sync_runtime_config()
+        files = await dingtalk_client.get_all_knowledge_files()
+        _dingtalk_cache["files"] = files
+        _dingtalk_cache["expire_at"] = time.time() + _DINGTALK_TTL
+        _dingtalk_cache["error"] = None
+        _save_dingtalk_snapshot(files)
+    except Exception as e:
+        _dingtalk_cache["error"] = f"钉钉数据拉取失败：{e}"
+    finally:
+        _dingtalk_cache["loading"] = False
+
+
+def _trigger_dingtalk_refresh(force: bool = False) -> None:
+    """缓存缺失/过期时启动后台遍历（单飞：正在遍历则跳过）。"""
+    _load_dingtalk_snapshot()
+    now = time.time()
+    fresh = (not force) and _dingtalk_cache["files"] and _dingtalk_cache["expire_at"] > now
+    if fresh or _dingtalk_cache["loading"]:
+        return
+    _dingtalk_cache["loading"] = True
+    asyncio.create_task(_refresh_dingtalk_files())
 
 
 async def _doc_to_kc_dict(r, directory_name: str | None = None) -> dict:
@@ -105,6 +188,7 @@ async def list_documents(
     date_to: str | None = Query(None),
     status: str | None = Query(None),
     kb_type: str | None = Query(None),
+    uploader_id: str | None = Query(None),
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=100),
     u=Depends(get_current_user),
@@ -120,12 +204,21 @@ async def list_documents(
         .label("directory_name")
     )
 
+    uploader_name_subq = (
+        select(User.username)
+        .where(User.id == Document.uploader_id)
+        .correlate(Document)
+        .scalar_subquery()
+        .label("uploader_name")
+    )
+
     q = (
         select(
             Document,
             KnowledgeBase.name.label("kb_name"),
             KnowledgeBase.kb_type.label("kb_type"),
             dir_name_subq,
+            uploader_name_subq,
         )
         .join(KnowledgeBase, Document.kb_id == KnowledgeBase.id)
         .where(Document.is_deleted == False)
@@ -146,6 +239,10 @@ async def list_documents(
         q = q.where(Document.created_at <= date_to)
     if status:
         q = q.where(Document.status == status)
+    if uploader_id:
+        ids = [uid.strip() for uid in uploader_id.split(",") if uid.strip()]
+        if ids:
+            q = q.where(Document.uploader_id.in_(ids))
 
     # 排序
     q = q.order_by(Document.created_at.desc())
@@ -174,12 +271,147 @@ async def list_documents(
             "file_size": doc.file_size,
             "status": doc.status,
             "chunk_count": doc.chunk_count,
-            "uploader_name": None,
+            "uploader_id": str(doc.uploader_id) if doc.uploader_id else None,
+            "uploader_name": row.uploader_name or None,
             "created_at": doc.created_at.isoformat() if doc.created_at else None,
             "updated_at": doc.updated_at.isoformat() if doc.updated_at else None,
         })
 
     return {"items": items, "total": total, "page": page, "size": size}
+
+
+@router.get("/uploaders")
+async def list_uploaders(
+    kb_type: str | None = Query(None),
+    u=Depends(get_current_user),
+    s: AsyncSession = Depends(get_session),
+):
+    """获取有文档的创建人列表（用于筛选下拉）"""
+    q = (
+        select(User.id, User.username)
+        .join(Document, Document.uploader_id == User.id)
+        .join(KnowledgeBase, Document.kb_id == KnowledgeBase.id)
+        .where(Document.is_deleted == False)
+        .distinct()
+    )
+    if kb_type:
+        q = q.where(KnowledgeBase.kb_type == kb_type)
+    rows = (await s.execute(q)).all()
+    return [{"id": str(r.id), "name": r.username} for r in rows]
+
+
+@router.get("/dingtalk/documents")
+async def list_dingtalk_documents(
+    workspace_id: str | None = Query(None, description="知识库ID，逗号分隔多选"),
+    creator_id: str | None = Query(None, description="创建人userid，逗号分隔多选"),
+    search: str | None = Query(None, description="按文件名模糊匹配"),
+    directory: str | None = Query(None, description="按目录路径模糊匹配"),
+    page: int = Query(1, ge=1),
+    size: int = Query(20, ge=1, le=200),
+    refresh: bool = Query(False, description="为 true 时绕过缓存重新拉取钉钉"),
+    u=Depends(get_current_user),
+):
+    """钉钉知识库文件列表（实时拉取钉钉开放平台数据）。
+
+    全量遍历操作人可见的团队知识库（耗时较长）改为后台任务执行，本接口立即返回：
+    首次/过期时返回 loading=true（前端轮询），缓存命中时直接返回数据；
+    「手动刷新」(refresh=true) 触发后台重新遍历，期间继续返回旧数据。
+    文件含多层目录路径（/ 分隔），创建人 userid 经钉钉通讯录接口解析为姓名。
+    """
+    from kb_common.clients import dingtalk_client
+
+    config_error = None
+    try:
+        await dingtalk_client.sync_runtime_config()
+        if not dingtalk_client.is_configured():
+            config_error = "钉钉 AppKey/AppSecret/操作人 未配置，请在「系统配置」中填写后重试"
+    except Exception as e:
+        config_error = f"钉钉配置加载失败：{e}"
+
+    if config_error:
+        return {
+            "items": [], "total": 0, "page": page, "size": size,
+            "workspaces": [], "creators": [],
+            "loading": False, "error": config_error,
+        }
+
+    _trigger_dingtalk_refresh(force=refresh)
+    loading = _dingtalk_cache["loading"] and not _dingtalk_cache["files"]
+    cached_files = _dingtalk_cache["files"]
+
+    # 首次同步尚未完成：不挂起请求，返回 loading 让前端轮询
+    if not cached_files:
+        return {
+            "items": [], "total": 0, "page": page, "size": size,
+            "workspaces": [], "creators": [],
+            "loading": True, "error": _dingtalk_cache["error"],
+        }
+
+    files = list(cached_files)
+    # 知识库 / 创建人过滤选项（从文件数据聚合，避免额外接口调用）
+    workspace_map: dict[str, str] = {}
+    creator_ids: set[str] = set()
+    for f in files:
+        if f.get("workspace_id") and f.get("workspace_name"):
+            workspace_map[f["workspace_id"]] = f["workspace_name"]
+        if f.get("creator_id"):
+            creator_ids.add(f["creator_id"])
+
+    name_map = await dingtalk_client.get_user_name_map(list(creator_ids))
+    creators = [
+        {"id": uid, "name": name_map.get(uid) or uid}
+        for uid in sorted(creator_ids, key=lambda x: name_map.get(x, ""))
+    ]
+    workspaces = [{"id": wid, "name": name} for wid, name in workspace_map.items()]
+
+    # 过滤
+    ws_ids = {v.strip() for v in workspace_id.split(",") if v.strip()} if workspace_id else set()
+    cr_ids = {v.strip() for v in creator_id.split(",") if v.strip()} if creator_id else set()
+    if ws_ids:
+        files = [f for f in files if f.get("workspace_id") in ws_ids]
+    if cr_ids:
+        files = [f for f in files if f.get("creator_id") in cr_ids]
+    if search:
+        kw = search.strip().lower()
+        files = [f for f in files if kw in (f.get("name") or "").lower()]
+    if directory:
+        kw = directory.strip()
+        files = [f for f in files if kw in (f.get("directory_path") or "")]
+
+    # 按创建时间倒序
+    files.sort(key=lambda f: f.get("created_at") or "", reverse=True)
+
+    total = len(files)
+    start = (page - 1) * size
+    page_items = files[start:start + size]
+    items = []
+    for f in page_items:
+        items.append({
+            "node_id": f.get("node_id"),
+            "workspace_id": f.get("workspace_id"),
+            "workspace_name": f.get("workspace_name") or "",
+            "name": f.get("name") or "",
+            "directory_path": f.get("directory_path") or "/",
+            "category": f.get("category"),
+            "extension": f.get("extension"),
+            "size": f.get("size") or 0,
+            "url": f.get("url"),
+            "creator_id": f.get("creator_id") or "",
+            "creator_name": name_map.get(f.get("creator_id") or "", "") or None,
+            "created_at": f.get("created_at"),
+            "modified_at": f.get("modified_at"),
+        })
+
+    return {
+        "items": items,
+        "total": total,
+        "page": page,
+        "size": size,
+        "workspaces": workspaces,
+        "creators": creators,
+        "loading": _dingtalk_cache["loading"],
+        "error": _dingtalk_cache["error"],
+    }
 
 
 @router.get("/documents/{doc_id}")

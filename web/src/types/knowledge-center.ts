@@ -16,6 +16,7 @@ export interface KnowledgeCenterDocument {
   file_size: number
   status: DocStatus | 'ACTIVE' | 'DELETED'
   chunk_count: number
+  uploader_id: string | null
   uploader_name: string | null
   created_at: string
   updated_at: string
@@ -68,6 +69,50 @@ export interface KcDocumentQuery {
   date_from?: string
   date_to?: string
   status?: string
+  uploader_id?: string
   page?: number
   size?: number
+}
+
+/** 创建人选项 */
+export interface UploaderOption {
+  id: string
+  name: string
+}
+
+/** 钉钉知识库文件（实时拉取自钉钉开放平台） */
+export interface DingTalkFile {
+  node_id: string
+  workspace_id: string
+  workspace_name: string
+  name: string
+  /** 上级目录路径，多层目录用 / 分隔，根目录为 "/" */
+  directory_path: string
+  category: string | null
+  extension: string | null
+  size: number
+  url: string | null
+  creator_id: string
+  creator_name: string | null
+  created_at: string | null
+  modified_at: string | null
+}
+
+/** 钉钉知识库 / 创建人选项 */
+export interface DingTalkOption {
+  id: string
+  name: string
+}
+
+/** 钉钉文件列表查询结果 */
+export interface DingTalkDocResult {
+  items: DingTalkFile[]
+  total: number
+  page: number
+  size: number
+  workspaces: DingTalkOption[]
+  creators: DingTalkOption[]
+  /** 后台正在遍历钉钉知识库时为 true（前端轮询） */
+  loading?: boolean
+  error?: string | null
 }

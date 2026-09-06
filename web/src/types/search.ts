@@ -27,6 +27,10 @@ export interface SearchResult {
   preview_type: string
   content_hash: string
   faq_answer: string | null
+  /** 钉钉文档等外链引用的可跳转 URL（会话历史恢复/纠错跳转用） */
+  url?: string
+  node_id?: string
+  extension?: string
 }
 
 export interface SearchResponse {

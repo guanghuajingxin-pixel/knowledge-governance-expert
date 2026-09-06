@@ -11,19 +11,84 @@ const routes: RouteRecordRaw[] = [
   {
     path: '/',
     component: () => import('@/layouts/AppLayout.vue'),
-    redirect: '/dashboard',
+    redirect: '/chat',
     children: [
+      // ===== 知识治理专家 · 七大模块 =====
       {
-        path: 'dashboard',
-        name: 'Dashboard',
-        component: () => import('@/views/dashboard/index.vue'),
-        meta: { title: '工作台', icon: 'Odometer', hidden: true },
+        path: 'chat',
+        name: 'Chat',
+        component: () => import('@/views/chat/index.vue'),
+        meta: { title: '智能问答', icon: 'ChatLineRound', group: 'feature' },
       },
+      {
+        path: 'hiagent',
+        name: 'HiAgent',
+        component: () => import('@/views/hiagent/index.vue'),
+        meta: { title: 'HiAgent智能问答', icon: 'ChatDotRound', group: 'feature' },
+      },
+      {
+        path: 'collection',
+        name: 'Collection',
+        component: () => import('@/views/governance/collection.vue'),
+        meta: { title: '知识采集', icon: 'Download', group: 'feature' },
+      },
+      {
+        path: 'process',
+        name: 'Process',
+        component: () => import('@/views/governance/process.vue'),
+        meta: { title: '知识加工', icon: 'Setting', group: 'feature' },
+      },
+      {
+        path: 'apply',
+        name: 'Apply',
+        component: () => import('@/views/governance/apply.vue'),
+        meta: { title: '知识应用', icon: 'Connection', group: 'feature' },
+      },
+      {
+        path: 'operate',
+        name: 'Operate',
+        component: () => import('@/views/governance/operate/index.vue'),
+        meta: { title: '知识运营', icon: 'DataLine', group: 'feature' },
+      },
+      {
+        path: 'govern',
+        name: 'Govern',
+        component: () => import('@/views/governance/govern.vue'),
+        meta: { title: '知识治理', icon: 'Stamp', group: 'feature' },
+      },
+      {
+        path: 'knowledge-center',
+        name: 'KnowledgeCenter',
+        component: () => import('@/views/knowledge-center/index.vue'),
+        meta: { title: '知识中心', icon: 'Reading', group: 'feature' },
+      },
+      {
+        path: 'model',
+        name: 'Model',
+        component: () => import('@/views/governance/model.vue'),
+        meta: { title: '系统配置', icon: 'Cpu', group: 'config' },
+      },
+      {
+        path: 'agent-config',
+        name: 'AgentConfig',
+        component: () => import('@/views/agent/config.vue'),
+        meta: { title: '智能体配置', icon: 'MagicStick', roles: ['super_admin', 'admin'], group: 'config' },
+      },
+
+      // ===== 平台管理 =====
+      {
+        path: 'admin/users',
+        name: 'AdminUsers',
+        component: () => import('@/views/admin/users.vue'),
+        meta: { title: '用户管理', icon: 'User', roles: ['super_admin', 'admin'], group: 'admin' },
+      },
+
+      // ===== 原有路由（保留，隐藏导航） =====
       {
         path: 'knowledge-bases',
         name: 'KnowledgeBases',
         component: () => import('@/views/knowledge-base/index.vue'),
-        meta: { title: '知识库', icon: 'Collection' },
+        meta: { title: '知识库', icon: 'Collection', hidden: true },
       },
       {
         path: 'knowledge-bases/:id',
@@ -41,7 +106,7 @@ const routes: RouteRecordRaw[] = [
         path: 'faq',
         name: 'FaqList',
         component: () => import('@/views/faq/index.vue'),
-        meta: { title: '问答库', icon: 'ChatDotRound' },
+        meta: { title: '问答库', icon: 'ChatDotRound', hidden: true },
       },
       {
         path: 'faq/:id',
@@ -53,37 +118,13 @@ const routes: RouteRecordRaw[] = [
         path: 'search',
         name: 'Search',
         component: () => import('@/views/search/index.vue'),
-        meta: { title: '统一检索', icon: 'Search' },
-      },
-      {
-        path: 'chat',
-        name: 'Chat',
-        component: () => import('@/views/chat/index.vue'),
-        meta: { title: 'RAG 问答', icon: 'ChatLineRound' },
+        meta: { title: '统一检索', icon: 'Search', hidden: true },
       },
       {
         path: 'settings',
         name: 'Settings',
         component: () => import('@/views/settings/index.vue'),
-        meta: { title: '模型配置', icon: 'Setting', roles: ['super_admin', 'admin'] },
-      },
-      {
-        path: 'admin/users',
-        name: 'AdminUsers',
-        component: () => import('@/views/admin/users.vue'),
-        meta: { title: '用户管理', icon: 'User', roles: ['super_admin', 'admin'] },
-      },
-      {
-        path: 'admin/api-keys',
-        name: 'AdminApiKeys',
-        component: () => import('@/views/admin/api-keys.vue'),
-        meta: { title: 'API Key 管理', icon: 'Key', roles: ['super_admin', 'admin'] },
-      },
-      {
-        path: 'knowledge-center',
-        name: 'KnowledgeCenter',
-        component: () => import('@/views/knowledge-center/index.vue'),
-        meta: { title: '知识中心', icon: 'Reading', bottomSidebar: true },
+        meta: { title: '模型配置', icon: 'Setting', roles: ['super_admin', 'admin'], hidden: true },
       },
     ],
   },
@@ -116,7 +157,7 @@ router.beforeEach((to, _from, next) => {
 
   const roles = to.meta.roles as string[] | undefined
   if (roles && userInfoRole(userStore) && !roles.includes(userInfoRole(userStore) as string)) {
-    next('/dashboard')
+    next('/chat')
     return
   }
 

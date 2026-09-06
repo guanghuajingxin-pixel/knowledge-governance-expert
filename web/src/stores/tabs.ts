@@ -5,31 +5,27 @@ import { useRoute, useRouter } from 'vue-router'
 export interface Tab {
   path: string
   title: string
-  closable: boolean
 }
 
-const HOME_TAB: Tab = {
-  path: '/dashboard',
-  title: '工作台',
-  closable: false,
-}
+// 关闭页签后无页签可停留时的回落页
+const DEFAULT_PATH = '/chat'
 
 export const useTabsStore = defineStore('tabs', () => {
   const route = useRoute()
   const router = useRouter()
 
-  const tabs = ref<Tab[]>([{ ...HOME_TAB }])
+  const tabs = ref<Tab[]>([])
 
   function addTab(path: string, title: string) {
     const existing = tabs.value.find((t) => t.path === path)
     if (!existing) {
-      tabs.value.push({ path, title, closable: true })
+      tabs.value.push({ path, title })
     }
   }
 
   function removeTab(path: string) {
     const tab = tabs.value.find((t) => t.path === path)
-    if (!tab || !tab.closable) return
+    if (!tab) return
 
     const idx = tabs.value.indexOf(tab)
     tabs.value.splice(idx, 1)
@@ -37,19 +33,17 @@ export const useTabsStore = defineStore('tabs', () => {
     // If closed tab was active, navigate to nearest sibling
     if (route.path === path || route.path.startsWith(path + '/') || route.path.startsWith(path + '?')) {
       const next = tabs.value[idx] || tabs.value[idx - 1]
-      if (next) {
-        router.push(next.path)
-      }
+      router.push(next ? next.path : DEFAULT_PATH)
     }
   }
 
   function closeOthers(path: string) {
-    tabs.value = tabs.value.filter((t) => !t.closable || t.path === path)
+    tabs.value = tabs.value.filter((t) => t.path === path)
   }
 
   function closeAll() {
-    tabs.value = tabs.value.filter((t) => !t.closable)
-    router.push(HOME_TAB.path)
+    tabs.value = []
+    router.push(DEFAULT_PATH)
   }
 
   // Auto-add tabs on route change

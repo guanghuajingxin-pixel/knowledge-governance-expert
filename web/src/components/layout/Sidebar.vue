@@ -16,6 +16,7 @@ interface MenuItem {
   path: string
   title: string
   icon: string
+  group: string
 }
 
 const allMenuItems = computed<MenuItem[]>(() =>
@@ -26,22 +27,23 @@ const allMenuItems = computed<MenuItem[]>(() =>
       path: r.path,
       title: r.meta!.title as string,
       icon: r.meta!.icon as string,
-      roles: r.meta?.roles as string[] | undefined,
+      group: (r.meta!.group as string) || 'feature',
     })),
 )
 
-const mainMenuItems = computed(() =>
-  allMenuItems.value.filter((item) => {
-    const route = router.getRoutes().find((r) => r.path === item.path)
-    return !route?.meta?.roles && !route?.meta?.bottomSidebar
-  }),
+// 功能区：feature 组
+const featureMenuItems = computed(() =>
+  allMenuItems.value.filter((item) => item.group === 'feature'),
 )
 
-const adminMenuItems = computed(() =>
+// 平台配置：config + admin 组（带 roles 的路由仅对应角色可见）
+const configMenuItems = computed(() =>
   allMenuItems.value.filter((item) => {
-    const route = router.getRoutes().find((r) => r.path === item.path)
-    const roles = route?.meta?.roles as string[] | undefined
-    return roles && userRole.value && roles.includes(userRole.value)
+    if (item.group !== 'config' && item.group !== 'admin') return false
+    const r = router.getRoutes().find((rr) => rr.path === item.path)
+    const roles = r?.meta?.roles as string[] | undefined
+    if (roles) return !!userRole.value && roles.includes(userRole.value)
+    return true
   }),
 )
 
@@ -55,33 +57,25 @@ function navigate(path: string) {
   }
 }
 
-function navigateToKC() {
-  router.push({ name: 'KnowledgeCenter' })
-}
-
-function isKCActive(): boolean {
-  return route.path === '/knowledge-center' || route.path.startsWith('/knowledge-center/')
-}
-
-const knowledgeCenterItem = computed(() =>
-  router.getRoutes().find((r) => (r.meta as any)?.bottomSidebar),
-)
+// 「关于我」产品介绍页：public/about.html，纯静态、不依赖登录态
+const aboutUrl = `${import.meta.env.BASE_URL}about.html`
 </script>
 
 <template>
   <aside class="sidebar" :class="{ collapsed: appStore.sidebarCollapsed }">
-    <div class="logo" @click="router.push('/dashboard')">
+    <div class="logo" @click="router.push('/chat')">
       <div class="logo-icon">
-        <el-icon :size="22" color="#fff"><Icons.Reading /></el-icon>
+        <el-icon :size="22" color="#fff"><Icons.Stamp /></el-icon>
       </div>
-      <span v-show="!appStore.sidebarCollapsed" class="logo-text">知识库平台</span>
+      <span v-show="!appStore.sidebarCollapsed" class="logo-text">知识治理专家</span>
     </div>
 
     <nav class="menu-container">
-      <!-- 功能菜单 -->
+      <!-- 功能区 -->
+      <div class="menu-group-label" v-show="!appStore.sidebarCollapsed">功能区</div>
       <div class="menu-group">
         <div
-          v-for="item in mainMenuItems"
+          v-for="item in featureMenuItems"
           :key="item.path"
           class="menu-item"
           :class="{ active: isActive(item.path) }"
@@ -97,16 +91,13 @@ const knowledgeCenterItem = computed(() =>
         </div>
       </div>
 
-      <!-- 平台管理 -->
-      <template v-if="adminMenuItems.length > 0">
+      <!-- 平台配置 -->
+      <template v-if="configMenuItems.length > 0">
         <div class="menu-divider" />
-        <div
-          v-show="!appStore.sidebarCollapsed"
-          class="menu-group-label"
-        >平台管理</div>
+        <div class="menu-group-label" v-show="!appStore.sidebarCollapsed">平台配置</div>
         <div class="menu-group">
           <div
-            v-for="item in adminMenuItems"
+            v-for="item in configMenuItems"
             :key="item.path"
             class="menu-item"
             :class="{ active: isActive(item.path) }"
@@ -124,18 +115,14 @@ const knowledgeCenterItem = computed(() =>
       </template>
     </nav>
 
-    <!-- 知识中心（左下角固定入口） -->
-    <div
-      v-if="knowledgeCenterItem"
-      class="kc-entry"
-      :class="{ active: isKCActive() }"
-      :title="(knowledgeCenterItem.meta as any)?.title || '知识中心'"
-      @click="navigateToKC"
-    >
-      <span class="menu-icon">
-        <el-icon :size="16"><Icons.Reading /></el-icon>
-      </span>
-      <span v-show="!appStore.sidebarCollapsed" class="menu-title">知识中心</span>
+    <!-- 左下角：关于我（新浏览器页签打开产品介绍） -->
+    <div class="sidebar-footer">
+      <a class="menu-item about-item" :href="aboutUrl" target="_blank" rel="noopener" title="关于我">
+        <span class="menu-icon about-icon">
+          <el-icon :size="16"><Icons.InfoFilled /></el-icon>
+        </span>
+        <span v-show="!appStore.sidebarCollapsed" class="menu-title">关于我</span>
+      </a>
     </div>
   </aside>
 </template>
@@ -156,7 +143,6 @@ const knowledgeCenterItem = computed(() =>
   width: 64px;
 }
 
-/* Logo */
 .logo {
   height: 60px;
   display: flex;
@@ -171,7 +157,7 @@ const knowledgeCenterItem = computed(() =>
   width: 36px;
   height: 36px;
   border-radius: 8px;
-  background: linear-gradient(135deg, #409EFF, #7C5CFC);
+  background: linear-gradient(135deg, #2b6bff, #6d28d9);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -179,13 +165,12 @@ const knowledgeCenterItem = computed(() =>
 }
 
 .logo-text {
-  font-size: 16px;
+  font-size: 15px;
   font-weight: 700;
   color: #1a1a2e;
   white-space: nowrap;
 }
 
-/* Menu Container */
 .menu-container {
   flex: 1;
   overflow-y: auto;
@@ -213,7 +198,6 @@ const knowledgeCenterItem = computed(() =>
   white-space: nowrap;
 }
 
-/* Menu Item */
 .menu-item {
   display: flex;
   align-items: center;
@@ -230,15 +214,14 @@ const knowledgeCenterItem = computed(() =>
 }
 
 .menu-item.active {
-  background: #ecf5ff;
+  background: #eef3ff;
 }
 
 .menu-item.active .menu-title {
-  color: #409EFF;
+  color: #2b6bff;
   font-weight: 600;
 }
 
-/* Menu Icon */
 .menu-icon {
   width: 32px;
   height: 32px;
@@ -257,18 +240,16 @@ const knowledgeCenterItem = computed(() =>
 }
 
 .menu-item.active .menu-icon {
-  background: #409EFF;
+  background: #2b6bff;
   color: #fff;
 }
 
-/* Menu Title */
 .menu-title {
   font-size: 14px;
   color: #303133;
   transition: color 0.15s ease;
 }
 
-/* Scrollbar */
 .menu-container::-webkit-scrollbar {
   width: 4px;
 }
@@ -282,40 +263,24 @@ const knowledgeCenterItem = computed(() =>
   background: transparent;
 }
 
-/* 知识中心底部入口 */
-.kc-entry {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 12px;
-  margin: 4px 8px;
-  border-radius: 8px;
-  cursor: pointer;
-  transition: background 0.15s ease;
-  white-space: nowrap;
+/* 左下角「关于我」 */
+.sidebar-footer {
   flex-shrink: 0;
+  padding: 8px;
   border-top: 1px solid #f0f0f0;
 }
 
-.kc-entry:hover {
-  background: #f5f7fa;
-}
-
-.kc-entry.active {
-  background: #ecf5ff;
-}
-
-.kc-entry.active .menu-title {
-  color: #409EFF;
-  font-weight: 600;
-}
-
-.kc-entry:hover .menu-icon {
-  transform: scale(1.08);
-}
-
-.kc-entry.active .menu-icon {
-  background: #409EFF;
+.about-icon {
+  background: linear-gradient(135deg, #6157ff, #8b7bff);
   color: #fff;
+}
+
+.about-item {
+  text-decoration: none;
+}
+
+.about-item .menu-title {
+  color: #6157ff;
+  font-weight: 600;
 }
 </style>

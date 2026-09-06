@@ -16,3 +16,26 @@ web/dist/
 
 # SDD workspace
 .superpowers/sdd/
+
+# 备份文件
+*.bak
+
+# Agent 运行时生成产物
+output/
+.claude/
+
+# DeerFlow 运行时数据（checkpoints/memory）
+services/deerflow/data/
+services/deerflow/backend/data/
+
+# Dify：仅跟踪 docker 部署配置与补丁，忽略上游源码与 volumes 数据
+dify/*
+!dify/docker
+dify/docker/*
+!dify/docker/docker-compose.yaml
+!dify/docker/docker-compose.middleware.yaml
+!dify/docker/pull-images.sh
+!dify/docker/patches
+dify/docker/patches/*
+!dify/docker/patches/README.md
+!dify/docker/patches/*.py

@@ -28,7 +28,7 @@ async function handleLogin() {
     try {
       await userStore.login(form)
       ElMessage.success('登录成功')
-      router.push('/dashboard')
+      router.push('/chat')
     } catch (e) {
       // 登录接口 401 由 request.ts 放行至此；展示后端 detail 或默认提示
       const err = e as { response?: { data?: { detail?: string } } }
@@ -45,7 +45,7 @@ async function handleLogin() {
     <div class="login-card">
       <div class="login-header">
         <el-icon size="40" color="#409EFF"><Reading /></el-icon>
-        <h2>知识库管理平台</h2>
+        <h2>知识治理专家</h2>
       </div>
       <el-form
         ref="formRef"

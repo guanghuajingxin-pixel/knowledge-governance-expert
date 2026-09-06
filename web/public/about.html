@@ -1,0 +1,717 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>知识治理专家 · 产品介绍</title>
+<style>
+  :root {
+    --brand: #6157ff;
+    --brand-2: #2b6bff;
+    --brand-3: #6d28d9;
+    --ink: #1a1a2e;
+    --ink-2: #4a4a68;
+    --ink-3: #8a8aa3;
+    --line: #e8e9f3;
+    --bg: #f7f8fc;
+    --card: #ffffff;
+    --radius: 16px;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", -apple-system, "Segoe UI", sans-serif;
+    color: var(--ink);
+    background: var(--bg);
+    line-height: 1.7;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: inherit; text-decoration: none; }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 0 24px; }
+
+  /* ===== 顶部导航 ===== */
+  .nav {
+    position: sticky; top: 0; z-index: 50;
+    background: rgba(255,255,255,.82);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--line);
+  }
+  .nav-inner { display: flex; align-items: center; gap: 28px; height: 60px; }
+  .nav-logo { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 15px; }
+  .nav-mark {
+    width: 32px; height: 32px; border-radius: 8px; flex-shrink: 0;
+    background: linear-gradient(135deg, var(--brand-2), var(--brand-3));
+    display: flex; align-items: center; justify-content: center; color: #fff; font-size: 16px;
+  }
+  .nav-links { display: flex; gap: 4px; margin-left: auto; }
+  .nav-links a {
+    padding: 6px 14px; border-radius: 8px; font-size: 14px; color: var(--ink-2);
+    transition: all .15s ease;
+  }
+  .nav-links a:hover { background: #eef0ff; color: var(--brand); }
+  .nav-cta {
+    margin-left: 8px; padding: 8px 18px; border-radius: 10px; font-size: 14px; font-weight: 600;
+    color: #fff !important; background: linear-gradient(135deg, var(--brand), #8b7bff);
+    box-shadow: 0 4px 14px rgba(97,87,255,.35); transition: transform .15s ease;
+  }
+  .nav-cta:hover { transform: translateY(-1px); }
+
+  /* ===== Hero ===== */
+  .hero {
+    position: relative; overflow: hidden; color: #fff;
+    background: linear-gradient(135deg, #17113a 0%, #2c2470 48%, #4f46c9 100%);
+    padding: 96px 0 110px;
+  }
+  .hero::before {
+    content: ""; position: absolute; inset: 0;
+    background-image:
+      linear-gradient(rgba(255,255,255,.05) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,.05) 1px, transparent 1px);
+    background-size: 44px 44px;
+    mask-image: radial-gradient(ellipse 80% 70% at 50% 30%, #000 30%, transparent 75%);
+  }
+  .hero::after {
+    content: ""; position: absolute; width: 560px; height: 560px; border-radius: 50%;
+    right: -160px; top: -220px;
+    background: radial-gradient(circle, rgba(139,123,255,.45), transparent 65%);
+  }
+  .hero .wrap { position: relative; z-index: 1; }
+  .hero-badge {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 6px 16px; border-radius: 999px; font-size: 13px;
+    background: rgba(255,255,255,.12); border: 1px solid rgba(255,255,255,.22);
+    letter-spacing: 1px;
+  }
+  .hero-badge i {
+    width: 7px; height: 7px; border-radius: 50%; background: #7ef7c8;
+    box-shadow: 0 0 8px #7ef7c8;
+  }
+  .hero h1 {
+    margin: 26px 0 8px; font-size: 52px; line-height: 1.25; font-weight: 800;
+    letter-spacing: 2px;
+  }
+  .hero h1 span {
+    background: linear-gradient(90deg, #a5b4ff, #d3c6ff 60%, #7ef7c8);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .hero .sub { font-size: 17px; color: rgba(255,255,255,.78); max-width: 720px; }
+  .hero-pills { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 30px; }
+  .hero-pills span {
+    padding: 7px 16px; border-radius: 999px; font-size: 13px;
+    background: rgba(255,255,255,.1); border: 1px solid rgba(255,255,255,.18);
+    color: rgba(255,255,255,.92);
+  }
+  .hero-actions { display: flex; gap: 14px; margin-top: 36px; }
+  .btn {
+    display: inline-block; padding: 12px 28px; border-radius: 12px; font-size: 15px; font-weight: 600;
+    transition: transform .15s ease, box-shadow .15s ease;
+  }
+  .btn:hover { transform: translateY(-2px); }
+  .btn-primary { background: #fff; color: var(--brand-3); box-shadow: 0 8px 24px rgba(0,0,0,.25); }
+  .btn-ghost { border: 1px solid rgba(255,255,255,.4); color: #fff; }
+  .btn-ghost:hover { background: rgba(255,255,255,.1); }
+
+  /* ===== 数据条 ===== */
+  .stats { margin-top: -56px; position: relative; z-index: 2; }
+  .stats-card {
+    display: grid; grid-template-columns: repeat(5, 1fr); gap: 0;
+    background: var(--card); border-radius: var(--radius);
+    box-shadow: 0 14px 40px rgba(26,26,46,.1);
+    padding: 26px 0;
+  }
+  .stat { text-align: center; padding: 4px 12px; border-right: 1px solid var(--line); }
+  .stat:last-child { border-right: none; }
+  .stat b { display: block; font-size: 26px; font-weight: 800; color: var(--brand); }
+  .stat span { font-size: 13px; color: var(--ink-3); }
+
+  /* ===== 通用 Section ===== */
+  section { padding: 84px 0 0; }
+  .sec-head { text-align: center; margin-bottom: 44px; }
+  .sec-tag {
+    display: inline-block; padding: 4px 14px; border-radius: 999px; font-size: 12px; font-weight: 600;
+    color: var(--brand); background: #eef0ff; letter-spacing: 2px;
+  }
+  .sec-head h2 { margin-top: 14px; font-size: 32px; font-weight: 800; letter-spacing: 1px; }
+  .sec-head p { margin-top: 10px; color: var(--ink-3); font-size: 15px; }
+
+  /* ===== 设计理念 ===== */
+  .idea-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
+  .idea {
+    background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 28px 26px; transition: all .2s ease;
+  }
+  .idea:hover { transform: translateY(-4px); box-shadow: 0 14px 34px rgba(97,87,255,.12); border-color: #d5d2ff; }
+  .idea-icon {
+    width: 46px; height: 46px; border-radius: 12px; font-size: 22px;
+    display: flex; align-items: center; justify-content: center; margin-bottom: 18px;
+    background: linear-gradient(135deg, #eef0ff, #f3edff); color: var(--brand);
+  }
+  .idea h3 { font-size: 17px; font-weight: 700; margin-bottom: 8px; }
+  .idea p { font-size: 13.5px; color: var(--ink-2); }
+  .idea p b { color: var(--brand); font-weight: 600; }
+
+  /* ===== 架构图 ===== */
+  .arch { display: flex; flex-direction: column; gap: 0; align-items: stretch; }
+  .arch-layer {
+    background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 22px 26px;
+  }
+  .arch-layer + .arch-arrow, .arch-layer + .arch-arrow + .arch-layer { margin-top: 0; }
+  .arch-arrow {
+    text-align: center; color: #c3c0f5; font-size: 18px; line-height: 1; padding: 6px 0;
+  }
+  .arch-title { display: flex; align-items: baseline; gap: 12px; margin-bottom: 14px; }
+  .arch-title b { font-size: 15px; }
+  .arch-title span { font-size: 12px; color: var(--ink-3); }
+  .arch-boxes { display: flex; flex-wrap: wrap; gap: 10px; }
+  .chip {
+    padding: 8px 14px; border-radius: 10px; font-size: 13px; line-height: 1.5;
+    background: #f6f7ff; border: 1px solid #e3e5fb; color: var(--ink-2);
+  }
+  .chip b { color: var(--ink); font-weight: 600; }
+  .chip small { display: block; color: var(--ink-3); font-size: 11.5px; }
+  .chip.hot { background: linear-gradient(135deg, #f0edff, #f7f0ff); border-color: #d8d0ff; }
+  .chip.hot b { color: var(--brand); }
+  .arch-layer.tint { background: linear-gradient(135deg, #fbfaff, #f5f4ff); }
+  .arch-layer.source { background: linear-gradient(135deg, #f4fbf8, #f0faf5); border-color: #d9f0e4; }
+
+  /* ===== 闭环流程（紧凑全景图） ===== */
+  .pano-card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 20px;
+    padding: 22px 28px 16px;
+    box-shadow: 0 12px 36px rgba(26,26,46,.06);
+  }
+  .pano-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .pano-head b { font-size: 17px; letter-spacing: 1px; }
+  .pano-head span { font-size: 12.5px; color: var(--ink-3); }
+  .pano-svg { width: 100%; height: auto; display: block; }
+  .pano-mobile { display: none; }
+  .pano-legend {
+    display: flex; flex-wrap: wrap; justify-content: center; gap: 8px 22px;
+    margin-top: 6px; padding-top: 12px; border-top: 1px dashed #ececf5;
+    font-size: 12.5px; color: var(--ink-2);
+  }
+  .pano-legend .lg { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; }
+  .pano-legend .dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+  .pano-legend .sw { width: 22px; height: 0; border-top: 2.5px solid #9aa5b1; flex-shrink: 0; }
+  .pano-legend .sw.orange { border-top-color: #f0a12c; }
+  .pano-legend .sw.dash-red { border-top-style: dashed; border-top-color: #e05252; }
+  .pano-values { display: flex; justify-content: center; gap: 12px; margin-top: 16px; flex-wrap: wrap; }
+  .pano-values .pv {
+    padding: 8px 20px; border-radius: 999px; font-size: 13px; color: var(--ink-2);
+    background: var(--card); border: 1px solid var(--line);
+    box-shadow: 0 4px 14px rgba(26,26,46,.05);
+  }
+  .pano-values .pv b { color: var(--brand); font-weight: 700; }
+
+  /* ===== 功能模块 ===== */
+  .mod-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 18px; }
+  .mod {
+    background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 24px 22px; position: relative; overflow: hidden; transition: all .2s ease;
+  }
+  .mod:hover { transform: translateY(-4px); box-shadow: 0 14px 34px rgba(97,87,255,.12); border-color: #d5d2ff; }
+  .mod-hero { grid-column: span 2; background: linear-gradient(135deg, #211a56, #4a3fb0 60%, #6157ff); border: none; color: #fff; }
+  .mod-hero:hover { box-shadow: 0 16px 40px rgba(74,63,176,.4); }
+  .mod-hero h3 { color: #fff; font-size: 18px; }
+  .mod-hero p { color: rgba(255,255,255,.82); }
+  .mod-hero .mod-tags span { background: rgba(255,255,255,.14); border-color: rgba(255,255,255,.22); color: #fff; }
+  .mod-no { position: absolute; right: 16px; top: 10px; font-size: 34px; font-weight: 800; color: rgba(97,87,255,.1); }
+  .mod-hero .mod-no { color: rgba(255,255,255,.14); }
+  .mod-emoji {
+    width: 42px; height: 42px; border-radius: 11px; font-size: 20px;
+    display: flex; align-items: center; justify-content: center; margin-bottom: 14px;
+    background: #f0edff;
+  }
+  .mod h3 { font-size: 15.5px; font-weight: 700; margin-bottom: 6px; }
+  .mod p { font-size: 12.8px; color: var(--ink-2); }
+  .mod-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+  .mod-tags span {
+    padding: 2px 10px; border-radius: 999px; font-size: 11px;
+    background: #f4f5fd; border: 1px solid #e6e8f8; color: var(--ink-3);
+  }
+
+  /* ===== 技术亮点 ===== */
+  .hl-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px 28px; }
+  .hl {
+    display: flex; gap: 14px; align-items: flex-start;
+    background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 18px 20px;
+    transition: all .2s ease;
+  }
+  .hl:hover { border-color: #d5d2ff; box-shadow: 0 8px 24px rgba(97,87,255,.08); }
+  .hl-check {
+    flex-shrink: 0; width: 24px; height: 24px; border-radius: 50%; margin-top: 2px;
+    background: linear-gradient(135deg, var(--brand), #8b7bff); color: #fff;
+    display: flex; align-items: center; justify-content: center; font-size: 13px;
+  }
+  .hl b { font-size: 14.5px; display: block; margin-bottom: 2px; }
+  .hl p { font-size: 13px; color: var(--ink-2); }
+
+  /* ===== 底部 CTA + Footer ===== */
+  .cta {
+    margin-top: 84px; padding: 64px 0; text-align: center; color: #fff;
+    background: linear-gradient(135deg, #17113a, #3d3390 55%, #6157ff);
+  }
+  .cta h2 { font-size: 30px; font-weight: 800; letter-spacing: 1px; }
+  .cta p { margin-top: 12px; color: rgba(255,255,255,.75); font-size: 15px; }
+  .cta .btn { margin-top: 28px; }
+  footer { padding: 26px 0 34px; text-align: center; font-size: 12.5px; color: var(--ink-3); }
+
+  /* ===== 响应式 ===== */
+  @media (max-width: 960px) {
+    .hero h1 { font-size: 36px; }
+    .stats-card { grid-template-columns: repeat(2, 1fr); row-gap: 18px; }
+    .stat:nth-child(2) { border-right: none; }
+    .idea-grid { grid-template-columns: 1fr; }
+    .mod-grid { grid-template-columns: repeat(2, 1fr); }
+    .mod-hero { grid-column: span 2; }
+    .hl-grid { grid-template-columns: 1fr; }
+    .pano-svg { display: none; }
+    .pano-mobile { display: block; padding: 12px 0 4px; }
+    .m-stage {
+      display: flex; align-items: center; gap: 12px;
+      border-radius: 12px; padding: 10px 14px; border: 1.5px solid;
+    }
+    .m-stage .ms-no {
+      width: 26px; height: 26px; border-radius: 50%; color: #fff; flex-shrink: 0;
+      font-size: 13px; font-weight: 700;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .m-stage .ms-body { line-height: 1.4; }
+    .m-stage .ms-body b { font-size: 14px; }
+    .m-stage .ms-body p { font-size: 11.5px; color: var(--ink-2); }
+    .m-stage .ms-val { margin-left: auto; font-size: 12px; font-weight: 700; flex-shrink: 0; }
+    .m-arrow { text-align: center; color: #c3c0f5; font-size: 15px; line-height: 1; padding: 2px 0; }
+    .m-back {
+      margin-top: 8px; border: 1.5px dashed #c3bff5; border-radius: 12px;
+      padding: 12px 14px; font-size: 12px; color: var(--ink-2); line-height: 1.9;
+    }
+    .m-back b { color: var(--brand); }
+    .nav-links a:not(.nav-cta) { display: none; }
+  }
+  @media (max-width: 560px) {
+    .mod-grid { grid-template-columns: 1fr; }
+    .mod-hero { grid-column: span 1; }
+    .stats-card { grid-template-columns: 1fr 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ===== 顶部导航 ===== -->
+<div class="nav">
+  <div class="wrap nav-inner">
+    <div class="nav-logo"><span class="nav-mark">✦</span>知识治理专家</div>
+    <div class="nav-links">
+      <a href="#philosophy">设计理念</a>
+      <a href="#loop">闭环流程</a>
+      <a href="#architecture">系统架构</a>
+      <a href="#modules">功能模块</a>
+      <a href="#highlights">技术亮点</a>
+      <a class="nav-cta" href="/">进入平台 →</a>
+    </div>
+  </div>
+</div>
+
+<!-- ===== Hero ===== -->
+<div class="hero">
+  <div class="wrap">
+    <div class="hero-badge"><i></i>企业知识治理与智能问答平台</div>
+    <h1>让每一份企业知识<br /><span>都能被找到、读懂、用上</span></h1>
+    <p class="sub">
+      知识治理专家（Knowledge Governance Expert）打通<strong>钉钉企业知识</strong>与<strong>本地知识库</strong>，
+      以 DeerFlow 2.0 智能体为问答底座，覆盖知识「采集 → 加工 → 应用 → 运营 → 治理」闭环全生命周期，
+      让组织沉淀的知识真正流动起来。
+    </p>
+    <div class="hero-pills">
+      <span>🦌 DeerFlow 2.0 智能体底座</span>
+      <span>🔎 Dify + 钉钉双源检索</span>
+      <span>⏱ 限时探索 · 用户可控</span>
+      <span>⚡ SSE 流式问答</span>
+      <span>📄 MinerU 文档解析</span>
+      <span>🧩 人格 / 技能 / 工具全可配</span>
+    </div>
+    <div class="hero-actions">
+      <a class="btn btn-primary" href="#modules">了解核心能力</a>
+      <a class="btn btn-ghost" href="#architecture">查看系统架构</a>
+    </div>
+  </div>
+</div>
+
+<!-- ===== 数据条 ===== -->
+<div class="stats">
+  <div class="wrap">
+    <div class="stats-card">
+      <div class="stat"><b>4</b><span>应用微服务进程</span></div>
+      <div class="stat"><b>5</b><span>基础设施容器</span></div>
+      <div class="stat"><b>1.6万+</b><span>钉钉知识节点纳管</span></div>
+      <div class="stat"><b>6.7TB</b><span>企业存储全口径统计</span></div>
+      <div class="stat"><b>1/5/10min</b><span>限时探索三级兜底</span></div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== 设计理念 ===== -->
+<section id="philosophy">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="sec-tag">PHILOSOPHY</div>
+      <h2>设计理念</h2>
+      <p>五个原则，贯穿产品的每一次检索、每一句回答、每一个配置项</p>
+    </div>
+    <div class="idea-grid">
+      <div class="idea">
+        <div class="idea-icon">💡</div>
+        <h3>答案优先，而非链接堆砌</h3>
+        <p>知识类问题<b>主动、同时检索 Dify 与钉钉双来源</b>，穷尽同义词 / 上下位词 / 拆解子问题等 3-5 轮关键词替换策略，归纳合并去重后，<b>第一句就是实质答案</b>，参考文档仅作补充。</p>
+      </div>
+      <div class="idea">
+        <div class="idea-icon">🧭</div>
+        <h3>先预判目录，再进目录</h3>
+        <p>模拟真人查资料：先浏览知识库<b>目录地图</b>预判问题最可能落在哪个知识库与目录，再进入目录<b>优先精读在线文档</b>，每读完一篇立即判断能否作答——<b>能答即停</b>，拒绝无差别遍历。</p>
+      </div>
+      <div class="idea">
+        <div class="idea-icon">⏱</div>
+        <h3>把时间还给用户</h3>
+        <p>检索满 1 分钟主动询问、5 分钟再问、10 分钟兜底收尾，由中间件<b>确定性触发</b>而非依赖模型自觉；回答随时<b>一键中断</b>，检索过程<b>全程可展开回溯</b>，Token 消耗透明可见。</p>
+      </div>
+      <div class="idea">
+        <div class="idea-icon">🎛</div>
+        <h3>一切皆可配置</h3>
+        <p>智能体人格（SOUL.md）、问答技能（SKILL.md）、工具开关、任务规划 / 子智能体 / 长期记忆、模型供应商与超参，全部在后台在线编辑，<b>保存即热生效</b>，新对话立即应用。</p>
+      </div>
+      <div class="idea">
+        <div class="idea-icon">🛡</div>
+        <h3>安全与稳定是默认值</h3>
+        <p>API Key / AppSecret <b>脱敏展示、加密落库</b>，所有配置项<b>连通性测试通过才允许保存</b>；sidecar 不可用时自动回退内置工作流，密钥走数据库而非明文环境变量。</p>
+      </div>
+      <div class="idea">
+        <div class="idea-icon">🪞</div>
+        <h3>基于正文作答，拒绝猜测</h3>
+        <p>文件名与目录只用于「该不该读」的预判，<b>答案必须基于文档正文</b>：pptx / docx / pdf 等办公文档由 MinerU 引擎秒级解析为 Markdown 后精读，钉钉命中文档必读正文再作答。</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== 闭环流程（紧凑全景图） ===== -->
+<section id="loop">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="sec-tag">LIFECYCLE</div>
+      <h2>知识治理闭环</h2>
+      <p>采集 → 加工 → 应用 → 运营 → 治理，实线流转、虚线回流，越用越准、越治越新</p>
+    </div>
+
+    <div class="pano-card">
+      <div class="pano-head"><b>闭环全景图</b><span>实线 = 生产流转（首尾相接成环）　红虚线 = 质量回流　橙弧 = 缺口回流收口（本系统核心）</span></div>
+
+      <!-- 桌面端：SVG 环形闭环全景图 -->
+      <svg class="pano-svg" viewBox="0 0 1000 500" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="知识治理闭环全景图：采集、加工、应用、运营、治理五环节沿圆环首尾相接顺时针流转，中心为治理飞轮，红色虚线为质量回流">
+        <defs>
+          <marker id="ah-gray" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="#9aa5b1"/>
+          </marker>
+          <marker id="ah-red" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="#e05252"/>
+          </marker>
+          <marker id="ah-orange" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="#f0a12c"/>
+          </marker>
+          <linearGradient id="hubGrad" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0" stop-color="#6157ff"/>
+            <stop offset="1" stop-color="#8b7bff"/>
+          </linearGradient>
+        </defs>
+
+        <!-- 环形实线流转（首尾相接成闭环） -->
+        <g stroke="#9aa5b1" stroke-width="2.6">
+          <path d="M 605 97.5 A 210 190 0 0 1 656 134.9" marker-end="url(#ah-gray)"/>
+          <path d="M 708.4 285.2 A 210 190 0 0 1 683.7 354.3" marker-end="url(#ah-gray)"/>
+          <path d="M 518.3 446.9 A 210 190 0 0 1 481.7 446.9" marker-end="url(#ah-gray)"/>
+          <path d="M 316.3 354.1 A 210 190 0 0 1 291.5 285.2" marker-end="url(#ah-gray)"/>
+        </g>
+        <!-- 闭环收口弧：治理 → 采集（缺口回流，驱动再采集） -->
+        <path d="M 330.1 150.3 A 210 190 0 0 1 401.5 94.2" stroke="#f0a12c" stroke-width="2.6" marker-end="url(#ah-orange)"/>
+
+        <!-- 中心：治理飞轮 -->
+        <circle cx="500" cy="262" r="70" fill="url(#hubGrad)"/>
+        <circle cx="500" cy="262" r="54" stroke="#ffffff" stroke-opacity=".45" stroke-width="1.6" stroke-dasharray="5 5"/>
+        <text x="500" y="256" text-anchor="middle" font-size="20" font-weight="800" fill="#ffffff">治理飞轮</text>
+        <text x="500" y="284" text-anchor="middle" font-size="11.5" fill="#ffffff" fill-opacity=".88">越用越准 · 越治越新</text>
+
+        <!-- 质量回流①（红虚线）：治理 → 加工（重处理） -->
+        <path d="M 388 195 C 445 132, 555 132, 612 195" stroke="#e05252" stroke-width="2.2" stroke-dasharray="8 6" marker-end="url(#ah-red)"/>
+
+        <!-- 质量回流②（红虚线）：应用 → 治理（问答反馈） -->
+        <path d="M 535 385 C 480 355, 395 315, 335 262" stroke="#e05252" stroke-width="2.2" stroke-dasharray="8 6" marker-end="url(#ah-red)"/>
+
+        <!-- 节点① 知识采集（顶部） -->
+        <g>
+          <rect x="412" y="26" width="176" height="92" rx="14" fill="#f0f7ff" stroke="#4096ff" stroke-width="2"/>
+          <text x="500" y="60" text-anchor="middle" font-size="18" font-weight="700" fill="#1f78d1">① 知识采集</text>
+          <text x="500" y="84" text-anchor="middle" font-size="12" fill="#666">钉钉纳管 · 本地上传 · FAQ</text>
+          <text x="500" y="106" text-anchor="middle" font-size="12.5" font-weight="700" fill="#1f78d1">让知识汇得拢</text>
+        </g>
+        <!-- 节点② 知识加工（右上） -->
+        <g>
+          <rect x="612" y="157" width="176" height="92" rx="14" fill="#f5f3ff" stroke="#8b7bff" stroke-width="2"/>
+          <text x="700" y="191" text-anchor="middle" font-size="18" font-weight="700" fill="#6d5bf0">② 知识加工</text>
+          <text x="700" y="215" text-anchor="middle" font-size="12" fill="#666">解析 · 切片 · 向量化 · 索引</text>
+          <text x="700" y="237" text-anchor="middle" font-size="12.5" font-weight="700" fill="#6d5bf0">让知识读得懂</text>
+        </g>
+        <!-- 节点③ 知识应用（右下） -->
+        <g>
+          <rect x="535" y="370" width="176" height="92" rx="14" fill="#eefbf4" stroke="#35c78a" stroke-width="2"/>
+          <text x="623" y="404" text-anchor="middle" font-size="18" font-weight="700" fill="#0f9d6a">③ 知识应用</text>
+          <text x="623" y="428" text-anchor="middle" font-size="12" fill="#666">双源问答 · 检索 · 溯源</text>
+          <text x="623" y="450" text-anchor="middle" font-size="12.5" font-weight="700" fill="#0f9d6a">让知识用得上</text>
+        </g>
+        <!-- 节点④ 运营看板（左下） -->
+        <g>
+          <rect x="289" y="370" width="176" height="92" rx="14" fill="#fff8eb" stroke="#f5a623" stroke-width="2"/>
+          <text x="377" y="404" text-anchor="middle" font-size="18" font-weight="700" fill="#d48806">④ 运营看板</text>
+          <text x="377" y="428" text-anchor="middle" font-size="12" fill="#666">存储 · 分布 · 热门 Top20</text>
+          <text x="377" y="450" text-anchor="middle" font-size="12.5" font-weight="700" fill="#d48806">让资产看得见</text>
+        </g>
+        <!-- 节点⑤ 知识治理（左上） -->
+        <g>
+          <rect x="212" y="157" width="176" height="92" rx="14" fill="#fef0f0" stroke="#f56c6c" stroke-width="2"/>
+          <text x="300" y="191" text-anchor="middle" font-size="18" font-weight="700" fill="#d64545">⑤ 知识治理</text>
+          <text x="300" y="215" text-anchor="middle" font-size="12" fill="#666">规范 · 版本 · 时效 · Owner</text>
+          <text x="300" y="237" text-anchor="middle" font-size="12.5" font-weight="700" fill="#d64545">让质量管得住</text>
+        </g>
+
+        <!-- 回流标签（最后绘制并加白色描边，保证压线可读） -->
+        <text x="500" y="172" text-anchor="middle" font-size="12.5" font-weight="700" fill="#d04040" style="paint-order:stroke;stroke:#ffffff;stroke-width:5;stroke-linejoin:round">治理不达标 → 重分段 / 重打标 / 重建索引</text>
+        <text x="418" y="358" text-anchor="middle" font-size="12.5" font-weight="700" fill="#d04040" style="paint-order:stroke;stroke:#ffffff;stroke-width:5;stroke-linejoin:round">问答反馈 · 点赞 / 踩 / 无结果</text>
+      </svg>
+
+      <!-- 窄屏降级：纵向紧凑列表 -->
+      <div class="pano-mobile">
+        <div class="m-stage" style="border-color:#4096ff;background:#f0f7ff">
+          <span class="ms-no" style="background:#4096ff">1</span>
+          <span class="ms-body"><b style="color:#1f78d1">知识采集</b><p>钉钉纳管 · 本地上传 · FAQ</p></span>
+          <span class="ms-val" style="color:#1f78d1">汇得拢</span>
+        </div>
+        <div class="m-arrow">▼</div>
+        <div class="m-stage" style="border-color:#8b7bff;background:#f5f3ff">
+          <span class="ms-no" style="background:#8b7bff">2</span>
+          <span class="ms-body"><b style="color:#6d5bf0">知识加工</b><p>解析 · 切片 · 向量化 · 索引</p></span>
+          <span class="ms-val" style="color:#6d5bf0">读得懂</span>
+        </div>
+        <div class="m-arrow">▼</div>
+        <div class="m-stage" style="border-color:#35c78a;background:#eefbf4">
+          <span class="ms-no" style="background:#35c78a">3</span>
+          <span class="ms-body"><b style="color:#0f9d6a">知识应用</b><p>双源问答 · 检索 · 溯源</p></span>
+          <span class="ms-val" style="color:#0f9d6a">用得上</span>
+        </div>
+        <div class="m-arrow">▼</div>
+        <div class="m-stage" style="border-color:#f5a623;background:#fff8eb">
+          <span class="ms-no" style="background:#f5a623">4</span>
+          <span class="ms-body"><b style="color:#d48806">运营看板</b><p>存储 · 分布 · 热门 Top20</p></span>
+          <span class="ms-val" style="color:#d48806">看得见</span>
+        </div>
+        <div class="m-arrow">▼</div>
+        <div class="m-stage" style="border-color:#f56c6c;background:#fef0f0">
+          <span class="ms-no" style="background:#f56c6c">5</span>
+          <span class="ms-body"><b style="color:#d64545">知识治理</b><p>规范 · 版本 · 时效 · Owner</p></span>
+          <span class="ms-val" style="color:#d64545">管得住</span>
+        </div>
+        <div class="m-back">
+          <b>↩ 反馈回流（闭环核心）</b><br />
+          治理不达标 → 重分段 / 重打标 / 重建索引<br />
+          问答反馈 · 点赞 / 踩 / 无结果 → 驱动治理<br />
+          知识缺口征集 · 过期更新 · Owner 重新认领 → 指导采集
+        </div>
+      </div>
+
+      <!-- 图例 -->
+      <div class="pano-legend">
+        <span class="lg"><i class="dot" style="background:#4096ff"></i>采集 · 汇得拢</span>
+        <span class="lg"><i class="dot" style="background:#8b7bff"></i>加工 · 读得懂</span>
+        <span class="lg"><i class="dot" style="background:#35c78a"></i>应用 · 用得上</span>
+        <span class="lg"><i class="dot" style="background:#f5a623"></i>运营 · 看得见</span>
+        <span class="lg"><i class="dot" style="background:#f56c6c"></i>治理 · 管得住</span>
+        <span class="lg"><i class="sw"></i>生产流转</span>
+        <span class="lg"><i class="sw dash-red"></i>质量回流（重处理 / 问答反馈）</span>
+        <span class="lg"><i class="sw orange"></i>缺口回流：治理 → 采集（征集 · 过期更新 · Owner 认领）</span>
+      </div>
+    </div>
+
+    <!-- 闭环整体价值：轻量胶囊 -->
+    <div class="pano-values">
+      <span class="pv">🌊 <b>知识不沉没</b> · 全链路在线</span>
+      <span class="pv">🔄 <b>质量自进化</b> · 回流驱动飞轮</span>
+      <span class="pv">📐 <b>投入可度量</b> · 成效可汇报</span>
+    </div>
+  </div>
+</section>
+
+<!-- ===== 系统架构 ===== -->
+<section id="architecture">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="sec-tag">ARCHITECTURE</div>
+      <h2>系统架构</h2>
+      <p>4 个应用进程 + 5 个基础设施容器 + 本地 Dify 服务，微服务分层、各司其职</p>
+    </div>
+    <div class="arch">
+      <div class="arch-layer">
+        <div class="arch-title"><b>🖥 接入层</b><span>Web · Vue 3 + Element Plus · :3000</span></div>
+        <div class="arch-boxes">
+          <div class="chip"><b>智能问答 / 知识中心 / 运营看板</b><small>SSE 流式渲染 · 会话侧栏 · 步骤可展开</small></div>
+          <div class="chip"><b>治理 / 配置 / 平台管理</b><small>采集 · 加工 · 应用 · 治理 · 系统与智能体配置</small></div>
+        </div>
+      </div>
+      <div class="arch-arrow">▼</div>
+      <div class="arch-layer tint">
+        <div class="arch-title"><b>🦌 智能体层</b><span>DeerFlow 2.0 Sidecar · :2027 · Python 3.12</span></div>
+        <div class="arch-boxes">
+          <div class="chip hot"><b>Lead Agent（进程内嵌入式运行）</b><small>create_agent 中间件链 · 无需 langgraph server</small></div>
+          <div class="chip"><b>Sub-Agent 并行调研</b><small>复杂问题分头调研再汇总</small></div>
+          <div class="chip"><b>Todo 任务规划</b><small>计划拆解 · 检索反思循环</small></div>
+          <div class="chip"><b>长期记忆 + 摘要压缩</b><small>sqlite 检查点 · thread 级多轮上下文</small></div>
+          <div class="chip"><b>限时探索中间件</b><small>1/5/10 分钟确定性短路 · 可取消</small></div>
+        </div>
+      </div>
+      <div class="arch-arrow">▼</div>
+      <div class="arch-layer">
+        <div class="arch-title"><b>⚙ 应用服务层</b><span>4 个原生进程</span></div>
+        <div class="arch-boxes">
+          <div class="chip hot"><b>kb-api · :8000</b><small>FastAPI + BGE-M3 嵌入/重排 · 认证/检索/问答/运营 · DeerFlow Runner（SSE 转译与优雅回退）</small></div>
+          <div class="chip"><b>faq-service · :8004</b><small>FAQ 问答库 · 精准 + 语义融合匹配</small></div>
+          <div class="chip"><b>kb-worker</b><small>Celery 摄取队列：解析 → 切片 → 向量化 → 索引</small></div>
+        </div>
+      </div>
+      <div class="arch-arrow">▼</div>
+      <div class="arch-layer">
+        <div class="arch-title"><b>📚 检索与解析</b></div>
+        <div class="arch-boxes">
+          <div class="chip hot"><b>MinerU 解析引擎 · :2028</b><small>Office 原生 OOXML 秒级转换 · PDF/扫描件 OCR · 多级降级</small></div>
+          <div class="chip hot"><b>Dify 知识库（本地化部署）</b><small>语义 + 全文混合检索 · 答案内容主来源</small></div>
+          <div class="chip"><b>Elasticsearch</b><small>kNN + BM25 + RRF 融合 + 重排</small></div>
+          <div class="chip"><b>钉钉知识库</b><small>目录浏览 / 全文检索 / 正文读取（dws CLI）</small></div>
+        </div>
+      </div>
+      <div class="arch-arrow">▼</div>
+      <div class="arch-layer source">
+        <div class="arch-title"><b>🗄 基础设施</b><span>dev-services · Docker Compose</span></div>
+        <div class="arch-boxes">
+          <div class="chip"><b>PostgreSQL</b><small>业务数据 / 配置 / 运营流水</small></div>
+          <div class="chip"><b>Redis</b><small>缓存 / 队列</small></div>
+          <div class="chip"><b>MinIO</b><small>对象存储</small></div>
+          <div class="chip"><b>KKFileView</b><small>文档预览</small></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== 功能模块 ===== -->
+<section id="modules">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="sec-tag">MODULES</div>
+      <h2>功能模块</h2>
+      <p>从一条文档的入库，到一句提问的回答，再到一份看板的洞察</p>
+    </div>
+    <div class="mod-grid">
+      <div class="mod mod-hero">
+        <div class="mod-no">01</div>
+        <div class="mod-emoji" style="background:rgba(255,255,255,.16)">💬</div>
+        <h3>智能问答 ·「杰克百晓生」</h3>
+        <p>以 DeerFlow 2.0 为底座的企业知识智能体：SSE 逐字流式输出，检索步骤实时可见、可展开回溯；限时探索到点主动询问用户；回答进行中可一键中断；答案附引用来源与 Token 用量。</p>
+        <div class="mod-tags">
+          <span>双源主动检索</span><span>目录预判</span><span>在线文档优先</span><span>引用溯源</span><span>会话记忆</span>
+        </div>
+      </div>
+      <div class="mod">
+        <div class="mod-no">02</div>
+        <div class="mod-emoji">📥</div>
+        <h3>知识采集</h3>
+        <p>本地上传与目录接入，自动记录上传人，任务队列状态（执行中 / 已完成 / 失败）一目了然。</p>
+        <div class="mod-tags"><span>批量上传</span><span>状态跟踪</span></div>
+      </div>
+      <div class="mod">
+        <div class="mod-no">03</div>
+        <div class="mod-emoji">⚗️</div>
+        <h3>知识加工</h3>
+        <p>MinerU 统一解析为 Markdown → 智能切片 → BGE-M3 向量化 → ES 索引，PENDING → COMPLETED 全流程可视。</p>
+        <div class="mod-tags"><span>OCR</span><span>切片预览</span><span>向量化</span></div>
+      </div>
+      <div class="mod">
+        <div class="mod-no">04</div>
+        <div class="mod-emoji">🔗</div>
+        <h3>知识应用</h3>
+        <p>统一检索与 FAQ 问答库，精准匹配 + 语义融合双路召回，切片级预览溯源。</p>
+        <div class="mod-tags"><span>混合检索</span><span>FAQ 精准匹配</span></div>
+      </div>
+      <div class="mod">
+        <div class="mod-no">05</div>
+        <div class="mod-emoji">🗂</div>
+        <h3>知识中心</h3>
+        <p>钉钉企业知识全景：多级目录路径、按库 / 按人 / 关键词多维过滤，缓存快照重启秒级预热；本地上传知识同屏统览。</p>
+        <div class="mod-tags"><span>1.6万+ 节点</span><span>多级路径</span><span>多维过滤</span></div>
+      </div>
+      <div class="mod">
+        <div class="mod-no">06</div>
+        <div class="mod-emoji">📊</div>
+        <h3>运营看板</h3>
+        <p>企业存储总量（全应用 6.7TB 口径）、知识数量与分布、热门知识 Top20，每日 0 点定时统计，流水表持久化 180 天。</p>
+        <div class="mod-tags"><span>定时统计</span><span>热门排行</span><span>echarts 可视化</span></div>
+      </div>
+      <div class="mod">
+        <div class="mod-no">07</div>
+        <div class="mod-emoji">📏</div>
+        <h3>知识治理</h3>
+        <p>治理标准实时读取钉钉多维表《知识管理规范》，文档号 / 版本 / 状态 / 维护人在线可查，有据可依。</p>
+        <div class="mod-tags"><span>规范在线化</span><span>多维表直连</span></div>
+      </div>
+      <div class="mod">
+        <div class="mod-no">08</div>
+        <div class="mod-emoji">🎛</div>
+        <h3>配置中心</h3>
+        <p>系统配置：LLM 供应商卡片式接入、Dify / 钉钉 / MinerU 连通性测试后保存、密钥脱敏；智能体配置：人格与技能 Markdown 编辑、工具开关、规划 / 子智能体 / 长期记忆。</p>
+        <div class="mod-tags"><span>热生效</span><span>密钥加密</span><span>工具开关</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== 技术亮点 ===== -->
+<section id="highlights">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="sec-tag">HIGHLIGHTS</div>
+      <h2>技术亮点</h2>
+      <p>不止于「能用」，每一处都是工程化的确定性设计</p>
+    </div>
+    <div class="hl-grid">
+      <div class="hl"><div class="hl-check">✓</div><div><b>进程内嵌入式 DeerFlow 2.0</b><p>以官方 DeerFlowClient 直接驱动 Lead Agent（中间件链 + 子智能体 + 检查点），无需 langgraph server / gateway，独立 sidecar 解决 Python 3.12 与主服务依赖隔离。</p></div></div>
+      <div class="hl"><div class="hl-check">✓</div><div><b>混合检索管线</b><p>kNN 向量 + BM25 全文 + RRF 融合排序 + bge-reranker-v2-m3 重排，BGE 模型进程内单次加载、跨服务复用，兼顾质量与内存。</p></div></div>
+      <div class="hl"><div class="hl-check">✓</div><div><b>企业检索工具链「四件套」</b><p>knowledge_search（Dify 检索）/ dingtalk_browse（目录地图与列表）/ dingtalk_search（文件名补漏）/ dingtalk_read_doc（正文读取），SOUL 规定检索纪律。</p></div></div>
+      <div class="hl"><div class="hl-check">✓</div><div><b>办公文档正文秒级可读</b><p>pptx / docx / xlsx 走 MinerU 原生 OOXML 转换（秒级、无需模型），PDF / 扫描件走 pipeline OCR，本地即时解析与云 API 多级降级兜底。</p></div></div>
+      <div class="hl"><div class="hl-check">✓</div><div><b>确定性的限时探索</b><p>中间件在模型调用边界短路合成询问，到点动作不依赖模型自觉、不额外消耗 Token；阈值可用环境变量覆盖。</p></div></div>
+      <div class="hl"><div class="hl-check">✓</div><div><b>真正可中断的问答</b><p>前端 abort + 后端 cancel 双保险，worker 线程注入 GeneratorExit 确定性停图并释放锁，中断后立即发起新问答零卡顿。</p></div></div>
+      <div class="hl"><div class="hl-check">✓</div><div><b>输出干净的答案正文</b><p>过渡独白与规划段落过滤、引用按答案正文反向过滤（只列真正提及的文档），第一句话就是用户要的答案。</p></div></div>
+      <div class="hl"><div class="hl-check">✓</div><div><b>优雅回退与自愈</b><p>sidecar 不可达自动回退内置 LangGraph 工作流（分类 → 改写 → 检索 → 判定 → 生成）；定时统计错过后启动自动补跑。</p></div></div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== 底部 CTA ===== -->
+<div class="cta">
+  <div class="wrap">
+    <h2>知识沉淀在企业，价值流动在指尖</h2>
+    <p>采集 · 加工 · 应用 · 运营 · 治理 —— 一个平台，闭环治理，越用越准</p>
+    <a class="btn btn-primary" href="/">立即体验 →</a>
+  </div>
+</div>
+
+<footer>
+  知识治理专家 Knowledge Governance Expert · DeerFlow 2.0 智能体底座 · Dify + 钉钉双源知识 · Vue 3 / FastAPI / LangGraph / MinerU
+</footer>
+
+</body>
+</html>

@@ -9,6 +9,13 @@ const appStore = useAppStore()
 const userStore = useUserStore()
 const router = useRouter()
 
+const metrics = [
+  { label: '今日新增', value: 12 },
+  { label: '今日加工', value: 8 },
+  { label: '累计采纳', value: 5 },
+  { label: '累计反馈', value: 23 },
+]
+
 function handleCommand(command: string) {
   if (command === 'logout') {
     userStore.logout()
@@ -26,6 +33,16 @@ function handleCommand(command: string) {
       </el-icon>
       <Breadcrumb />
     </div>
+
+    <div class="header-center">
+      <!-- 关键指标 -->
+      <div class="metrics">
+        <span v-for="m in metrics" :key="m.label" class="metric-item">
+          {{ m.label }} <b>{{ m.value }}</b>
+        </span>
+      </div>
+    </div>
+
     <div class="header-right">
       <el-dropdown @command="handleCommand">
         <span class="user-info">
@@ -45,21 +62,56 @@ function handleCommand(command: string) {
 
 <style scoped>
 .header {
-  height: 60px;
+  height: 56px;
   background: #fff;
   display: flex;
   justify-content: space-between;
   align-items: center;
   padding: 0 20px;
   border-bottom: 1px solid #e6e6e6;
+  gap: 16px;
 }
 .header-left {
   display: flex;
   align-items: center;
   gap: 16px;
+  flex-shrink: 0;
 }
 .collapse-btn {
   cursor: pointer;
+}
+.header-center {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+}
+.metrics {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.metric-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: #6b7280;
+  background: #f5f7fa;
+  border: 1px solid #e5e8ee;
+  border-radius: 999px;
+  padding: 4px 14px;
+  white-space: nowrap;
+}
+.metric-item b {
+  color: #2b6bff;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.header-right {
+  flex-shrink: 0;
 }
 .user-info {
   display: flex;
@@ -69,5 +121,8 @@ function handleCommand(command: string) {
 }
 .username {
   font-size: 14px;
+}
+@media (max-width: 1200px) {
+  .metrics { display: none; }
 }
 </style>

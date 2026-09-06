@@ -11,6 +11,22 @@ services:
       dockerfile: services/kb-api/Dockerfile
     ports: ["8000:8000"]
     env_file: .env.docker
+    # DeerFlow sidecar 服务发现（DEERFLOW_SERVICE_URL 见 .env.docker，指向 http://deerflow:2027）
+    networks: [dev-network]
+
+  # DeerFlow 2.0 智能问答 Agent 底座 sidecar（Python 3.12 + uv，独立于 kb-api 3.11 环境）
+  # 启动时从 kb-api /api/v1/agent/bootstrap 拉取模型配置，并通过内部接口回调知识检索
+  deerflow:
+    build:
+      context: .
+      dockerfile: services/deerflow/Dockerfile
+    ports: ["2027:2027"]
+    env_file: .env.docker
+    environment:
+      # 容器网络内回连 kb-api（覆盖本地默认 127.0.0.1）
+      KB_API_URL: http://kb-api:8000
+    depends_on:
+      - kb-api
     networks: [dev-network]
 
   faq-service:

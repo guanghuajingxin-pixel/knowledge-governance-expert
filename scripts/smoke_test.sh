@@ -86,6 +86,12 @@ if [ -z "${EXTERNAL_SERVICES:-}" ]; then
   fi
   wait_health "$KB_API" kb-api 90 || { echo "FAIL: kb-api not healthy"; exit 1; }
   wait_health "$FAQ_API" faq-service 30 || { echo "FAIL: faq-service not healthy"; exit 1; }
+  # MinerU 本地解析引擎（可选服务：未运行时 office 文档降级 python-pptx/docx 即时解析，不阻塞 smoke）
+  if curl -sf http://127.0.0.1:2028/health >/dev/null 2>&1; then
+    echo "  -> MinerU 引擎(2028) healthy（pptx/docx/pdf 走本地解析）"
+  else
+    echo "  -> WARN: MinerU 引擎(2028)未运行，office/pdf 解析走即时解析兜底（bash scripts/start-mineru.sh 可启动）"
+  fi
 else
   echo "[0/9] EXTERNAL_SERVICES=1 - assuming services already running"
   wait_health "$KB_API" kb-api 5 || { echo "FAIL: kb-api not healthy"; exit 1; }

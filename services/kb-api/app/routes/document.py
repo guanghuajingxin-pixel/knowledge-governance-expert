@@ -28,7 +28,7 @@ async def upload(kb_id: uuid.UUID = Query(...), directory_id: uuid.UUID | None =
                  file: UploadFile = File(...), u=Depends(get_current_user),
                  s: AsyncSession = Depends(get_session)):
     kb = await s.get(KnowledgeBase, kb_id) or (_ for _ in ()).throw(HTTPException(404))
-    doc = await upload_document(s, kb, file, directory_id, lambda did: process_document.delay(did))
+    doc = await upload_document(s, kb, file, directory_id, lambda did: process_document.delay(did), uploader_id=u.id)
     return {"document_id": str(doc.id), "status": doc.status}
 
 
