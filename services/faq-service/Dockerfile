@@ -1,6 +1,7 @@
 FROM python:3.11-slim
 WORKDIR /app
-RUN pip install uv
+ENV UV_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
+RUN pip install uv -i https://mirrors.aliyun.com/pypi/simple/
 # Build context is the repo root so the editable kb-common sibling resolves.
 COPY services/kb-common/ ./services/kb-common/
 COPY services/faq-service/ ./services/faq-service/

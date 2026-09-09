@@ -140,6 +140,74 @@ docker compose -f docker-compose.app.yml up -d --build
 docker compose -f docker-compose.app.yml down
 ```
 
+### 模式 3：内网服务器部署（独立 Linux 服务器）
+
+把完整服务部署到一台内网 Linux 服务器（无 Docker、无公网，端口可能被其他服务占用）。与模式 2 的区别：基础设施与应用都在服务器上跑 Docker，前端由服务器 nginx 托管（非 vite dev），并针对**内网服务器的硬约束**做了适配。
+
+**服务器硬约束与适配**（已内置到依赖 / Dockerfile，无需额外手工处理）：
+
+| 约束 | 适配 |
+|------|------|
+| 老 CPU（仅 x86-64-v1，缺 SSE4.1/POPCNT） | `kb-common` 固定 `numpy<2`（NumPy 2.x 要求 x86-64-v2，会 `Illegal instruction`/`cannot load module`）；minio 固定旧版镜像 `RELEASE.2022-12-12T19-27-27Z`（新镜像要求 x86-64-v2） |
+| 内存偏小（<8GB） | kb-worker 以 `EMBED_VIA_INTERNAL=true` 复用 kb-api 的 BGE 模型（不重复加载，见 [indexer.py](services/kb-common/kb_common/rag/indexer.py)）；ES `-Xms512m -Xmx512m`；服务器加 8G swap 兜底 |
+| 内网网络（docker.io 超时 / HTTP 透明代理污染） | 三个 Dockerfile 内 `UV_INDEX_URL` 走阿里云 pypi；Docker Hub 配 `registry-mirrors`（daocloud 等）；apt 源 / pypi 一律用 **HTTPS**（内网对 HTTP 常有透明代理导致 Hash Sum mismatch） |
+| containerd 并发拉取 overlayfs 偶发 `device or resource busy` | **串行**拉取 / 构建（一次一个服务），失败重试即绕过 |
+
+**部署步骤**（已在 `10.10.166.2`（Ubuntu 22.04，jack）验证，服务器工作目录统一 `/opt/kge`；部署文件在仓库 `deploy/intranet/`）：
+
+```bash
+# 0. 安装 Docker（HTTPS 阿里云源 + 镜像加速器）
+#    - /etc/apt/sources.list 换成 https://mirrors.aliyun.com/ubuntu/
+#    - docker-ce 源 https://mirrors.aliyun.com/docker-ce/linux/ubuntu
+#    - /etc/docker/daemon.json 配 registry-mirrors（docker.m.daocloud.io 等）
+#    - 加 8G swap：fallocate -l 8G /swapfile && mkswap && swapon
+
+# 1. 上传仓库到服务器（build context = repo root；排除本地 venv/依赖/前端源码）
+rsync -a --exclude '.venv' --exclude '__pycache__' --exclude 'node_modules' \
+  --exclude 'web/src' --exclude 'services/*/tests' --exclude 'services/*/data' \
+  . jack@<服务器IP>:/opt/kge/
+
+# 2. 准备模型（内网无法从 HuggingFace 下载，须预先物化到 deploy/intranet/models/）
+#    bge-m3 + bge-reranker-v2-m3（扁平目录，含权重 + tokenizer）
+# 3. 准备前端产物：本地 `cd web && pnpm build`，把 dist/ 上传到 /opt/kge/web/dist（nginx root）
+
+# 4. 基础设施（postgres/redis/elasticsearch/minio/kkfileview）
+cd /opt/kge/deploy/intranet
+cp .env.infra.example .env.infra && cp .env.app.example .env.app   # 填真实随机密码
+docker compose --env-file .env.infra -f docker-compose.infra.yml up -d
+
+# 5. 构建应用（串行，规避 containerd overlayfs bug；kb-worker 复用 kb-api 镜像）
+docker compose -f docker-compose.app.yml build kb-api
+docker compose -f docker-compose.app.yml build faq-service
+docker compose -f docker-compose.app.yml build deerflow
+
+# 6. 启动应用（kb-api:8001 / faq-service:8004 / deerflow:2027 / kb-worker）
+docker compose -f docker-compose.app.yml up -d
+
+# 7. 初始化 DB + 种子 admin
+docker exec kge-kb-api sh -c "cd /app/services/kb-api && uv run alembic -c ../../alembic.ini upgrade head"
+docker exec kge-kb-api sh -c "cd /app/services/kb-api && uv run python ../../scripts/seed_admin.py"
+
+# 8. 前端 nginx（8080 端口，反代 /api/v1/faq→8004、/api/v1→8001）
+sudo cp nginx-kge.conf /etc/nginx/sites-enabled/kge && sudo nginx -t && sudo systemctl reload nginx
+```
+
+部署文件清单（`deploy/intranet/`）：`docker-compose.infra.yml`（基础设施）、`docker-compose.app.yml`（应用，build context 自动指向上两级 repo root）、`.env.infra.example` / `.env.app.example`（脱敏模板，部署时复制为 `.env.infra` / `.env.app` 填真实密码）、`nginx-kge.conf`（前端反代）。`deploy/intranet/models/` 用于放置物化好的 BGE 模型（勿提交，用 `.gitignore` 忽略）。
+
+**访问**：`http://<服务器IP>:8080`，登录 `admin` / `admin123`。
+
+**端口规划**（服务器常已有服务占 80/8000，需错开）：
+
+| 服务 | 宿主端口 | 容器内 |
+|------|---------|--------|
+| 前端（nginx） | 8080 | — |
+| kb-api | 8001 | 8000 |
+| faq-service | 8004 | 8004 |
+| deerflow | 2027 | 2027 |
+| postgres / redis / es / minio / kkfileview | 5432 / 6379 / 9200 / 9000 / 8012 | 同左 |
+
+> 部署完成后仍需在「模型配置」页补 **LLM API Key**（智能问答，否则 deerflow bootstrap 返回 409「LLM not configured」）与 **MinerU 云 API Key**（PDF/Office 解析，未配仅支持 txt/md/csv 本地解析）。BGE 模型从宿主机 `models/` 以只读卷挂载到 kb-api，`BGE_EMBED_MODEL=/models/bge-m3`、`BGE_RERANK_MODEL=/models/bge-reranker-v2-m3`（内网无法从 HuggingFace 下载，须预先物化好模型文件）。
+
 ## .env 配置
 
 仓库根目录 `.env`（开发模式用）：
@@ -315,7 +383,9 @@ Dify 知识库的**语义检索/混合检索**在查询时要用 Embedding 模�
 
 在 Dify 控制台（http://127.0.0.1:8088）：
 1. 右上角「设置 → 模型供应商」配置一个 OpenAI 兼容的 Embedding 模型（如 OpenAI / 本地网关的 `text-embedding-3-small`、`bge-m3` 等）
-2. 在「设置 → 模型供应商 → 默认模型」中将其设为系统默认 **Embedding 模型**（如用重排，再设默认 Rerank 模型；未设时本项目 `dify_reranking_enable` 默认 false）
+2. 在「设置 → 模型供应商 → 默认模型」中将其设为系统默认 **Embedding 模型**（如用重排，再设默认 Rerank 模型）
+
+> **检索重排（Rerank）**：智能问答检索各 Dify 知识库时，**优先使用该知识库在 Dify 控制台保存的检索设置**（检索方式、Rerank 模型、分数阈值均以知识库配置为准，仅放大 top_k）。在知识库的「检索设置」中启用 Rerank 模型后，检索结果即按重排分数返回；仅当知识库配置拉取失败时才回退到 `.env` 的 `dify_search_method` / `dify_reranking_enable`（默认关闭重排）。当召回内容只来自单一知识库时，直接采用 Dify 重排后的分数与顺序，不再做本地 RRF 融合；多知识库/本地知识库混合召回时仍走 RRF 融合。
 
 ### 接入到本项目
 
@@ -379,6 +449,61 @@ docker compose down -v        # 同时删除卷（清空 Dify 数据库与知识
 - **手动刷新**：右上角「刷新」按钮；任务队列状态栏展示 全部/执行中/已完成/失败 计数。
 - 创建人通过 `documents.uploader_id` 关联 `users` 表（迁移 `0005_add_document_uploader` 新增；历史文档显示 `-`，新上传自动记录）。
 
+## 知识采集（collection 模块）
+
+侧边栏「知识采集」（路由 `/collection`）含六个页签，覆盖从钉钉单文件同步到 Dify 知识库批量入库，再到定时增量同步与运行监控的完整采集动线：
+
+- **从钉钉同步**：**按目录查询**（避免全量遍历超时）——依次选择钉钉知识库 + 文件夹（级联懒加载子目录，任意层级可选）后点「查询」，仅加载该目录的**直接子文档**；首次进入未选择时列表为空。实时数据 + 浏览器内存缓存（5 分钟 TTL，不持久化），「强制刷新」绕过缓存重新拉取。过滤文件名/分页为前端本地进行。后端新增轻量接口（[knowledge_center.py](services/kb-api/app/routes/knowledge_center.py)）：`GET /knowledge-center/dingtalk/workspaces`（实时列团队知识库，含根节点 ID）、`GET /knowledge-center/dingtalk/nodes?parent_node_id=`（实时列某父节点直接子节点），均为单次钉钉 API 调用（约 1.5s）；勾选文档同步到 Dify 沿用 `POST /api/v1/dify/datasets/{id}/sync-dingtalk`（请求体传 `node_id`，后端用 `dingtalk_client.download_document` 走 `queryDentryId → downloadInfos/query → OSS 直链` 下载原文件；**注意**：钉钉 wiki 节点的 `url` 字段是 alidocs 在线预览页，直接下载会得到 HTML 导致 Dify 解析失败，且 OSS 返回的文件名是无扩展名哈希串，上传时须用前端传入的带扩展名原始文件名）。**大文件兜底**：文件 ≤15MB 直接 `create-by-file`；>15MB 或 `create-by-file` 失败时，先存 OSS（Minio `raw-docs` bucket，`dingtalk-sync/` 前缀）作为原始备份，再用 MinerU 解析为 Markdown，通过 `create-by-text` 写入 Dify（`doc_form`/`indexing_technique` 从数据集读取保持一致，避免 400），Dify 自动分块索引即「块拼接」；返回 `method=text` 标识此路径，原文件 OSS key 一并返回。
+- **上传到 Dify 知识库** / **上传前 AI 预检** / **缺口与征集**：单文件与批量上传、AI 预检与缺口看板（详见各页签内说明）。
+- **同步源管理**（后端 `app/routes/sync_route.py`，`/api/v1/sync/sources`）：配置钉钉知识库目录 → Dify 数据集的映射关系，每个同步源自带独立 `cron` 定时表达式（默认 `0 2 * * *` 每日凌晨 2 点）。支持新增/编辑/启停/删除、**预演**（dry-run，只比对不写入）、**立即同步**、连接测试。表单内可懒加载钉钉目录树并按关键字搜索定位起始目录；同步源保存后由 `app/services/sync/scheduler.py`（APScheduler BackgroundScheduler）按 cron 注册任务，增删改自动 `reload_sync_jobs`。
+- **运行监控**（合并自源项目 Monitor + Logs 单页三区块）：① **失败清单**（待处理，可单项/全部重试）；② **同步历史**（运行记录表：触发方式/耗时/新增·更新·删除·跳过·失败计数/结果状态）；③ **运行日志**（按级别 info/warn/error、关键字、时间窗筛选）。
+
+### 钉钉知识库 → Dify 定时增量同步（合并自 DingDingKonwledgePipeline）
+
+并入平台后保留的核心能力，相关代码分布：
+
+- **数据模型**（迁移 `alembic/versions/0011_add_sync_tables.py`）：`sync_sources`（含 `cron` 字段，不保留独立 jobs 表）、`sync_runs`、`sync_document_mappings`、`sync_failures`、`sync_logs`，模型定义见 [kb_common/models.py](services/kb-common/kb_common/models.py)。
+- **同步引擎**（[services/sync/engine.py](services/kb-api/app/services/sync/engine.py)）：钉钉目录树遍历 → 下载/导出（ALIDOC 与 .able 经 dws CLI）→ Dify 增量上传（元数据指纹 + 内容 hash 判定新增/更新/跳过；`delete_policy=sync` 时同步删除已不存在的 Dify 文档）。同步版 httpx + 同步 ORM，跑在 `ThreadPoolExecutor` 后台线程不阻塞事件循环。
+- **配置读取**：钉钉 AppKey/Secret/操作人、Dify base_url/api_key 复用「系统配置」页；同步参数（`sync_max_depth`、`sync_export_format`、`sync_skip_extensions`、`sync_dify_wait_indexing` 等）与 `dws_bin`/`dws_config_dir` 从 [kb_common/config.py](services/kb-common/kb_common/config.py) 读取，可用 `.env` 覆盖。
+- **依赖**：kb-api 新增 `apscheduler`（cron 调度）与 `psycopg[binary]`（同步引擎的同步 DB 会话，连接同一套库；平台主 ORM 仍为 asyncpg）。
+- **认证**：沿用平台 `require_role("super_admin","admin","editor")`，不保留源项目的 admin/password 哈希登录。
+- **不保留**：独立 SyncJob 表（cron 合并到 sync_sources）、独立 Settings/Login/Dashboard 页、告警 webhook（alert.py）。
+
+## 知识加工（process 模块）
+
+侧边栏「知识加工」（路由 `/process`）对已进入 Dify 知识库的文档进行 **AI 打标 + 摘要生成 + 知识关系构建**，为智能问答提供结构化上下文工程能力。
+
+### 核心能力
+
+- **AI 打标**：对 Dify 文档的分块内容调用 LLM，生成 3-6 个主题标签、3-8 个检索关键词，并识别文档类型（制度规范/技术文档/产品手册/FAQ 等）。标签统一写入 `knowledge_tags` 标签库，按使用次数统计。
+- **摘要生成**：生成 200 字以内文档摘要，概括核心内容与适用场景。
+- **知识关系构建**：对数据集中已加工文档两两分析，识别引用/相似主题/因果/包含/并列/前置知识/依赖/对比等语义关系，构建知识图谱（`knowledge_relations` 表，双向存储）。
+- **上下文工程**：智能问答检索命中后，自动附加命中文档的摘要/标签（`internal/kb/retrieve` 富化），并提供 `knowledge_context_expand` 工具供 DeerFlow 智能体主动扩展关联文档，实现深度探索。
+
+### 数据模型（迁移 `0014_add_knowledge_processing.py`）
+
+| 表 | 用途 |
+| --- | --- |
+| `processed_documents` | 文档加工记录：dataset_id/document_id/name/tags/summary/keywords/doc_type/process_status |
+| `knowledge_relations` | 知识关系：source_doc_id→target_doc_id，relation_type/weight/description |
+| `knowledge_tags` | 标签库：name/color/count |
+
+### 关键接口
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/api/v1/process/datasets/{dataset_id}/documents` | 文档列表（合并 Dify 文档 + 加工状态） |
+| POST | `/api/v1/process/datasets/{dataset_id}/documents/{document_id}/enhance` | 单文档 AI 打标+摘要 |
+| POST | `/api/v1/process/datasets/{dataset_id}/enhance-all` | 批量加工 |
+| POST | `/api/v1/process/datasets/{dataset_id}/build-relations` | 构建知识关系 |
+| GET | `/api/v1/process/datasets/{dataset_id}/graph` | 知识图谱（节点+边） |
+| GET | `/api/v1/process/documents/{document_id}/relations` | 文档关联文档 |
+| GET | `/api/v1/process/context/expand` | 上下文扩展（摘要+关联+标签） |
+| GET | `/api/v1/process/tags` | 标签库 |
+| POST | `/api/v1/internal/process/context-expand` | 内部上下文扩展（DeerFlow 工具调用） |
+
+> 实现：服务层 [services/processing.py](services/kb-api/app/services/processing.py)，路由 [routes/process_route.py](services/kb-api/app/routes/process_route.py)，Dify 文档/分块读取见 [dify_client.py](services/kb-common/kb_common/clients/dify_client.py) 新增 `list_documents`/`get_document_segments`。
+
 ## 知识运营（原运营看板）
 
 侧边栏「知识运营」（路由 `/operate`）含三个页签：
@@ -430,13 +555,18 @@ knowledge-governance-expert/
 ├── services/
 │   ├── kb-common/               # 共享：models/clients/rag/auth/config（含 dify_client）
 │   ├── kb-api/                  # FastAPI + Celery
-│   │   └── app/services/agent/  # LangGraph 智能问答 Agent（workflow/prompts/run）
+│   │   └── app/services/agent/  # 企业证据问答（enterprise/retrieval/DWS）+ 旧版兼容 Agent
+│   │   └── app/services/sync/   # 钉钉知识库 → Dify 定时增量同步（engine/scheduler/clients）
 │   └── faq-service/             # FAQ KB + 精准匹配（FastAPI）
 └── web/                         # Vue3 + Element Plus 前端（七大治理模块）
     ├── public/about.html        # 「关于我」产品介绍页（侧边栏左下角新页签打开）
     └── src/views/
         ├── chat/                # 智能问答（Dify 数据集多选 + Agent）
         ├── hiagent/             # HiAgent智能问答（火山 HiAgent WebSDK iframe 嵌入）
-        ├── governance/          # 知识治理 7 大模块（含 model.vue 接入配置；治理标准页实时读取钉钉多维表《杰克知识管理规范》，需应用开通 Notable.Base.Read.All 权限）
+        ├── governance/          # 知识治理 7 大模块（默认页签为知识缺口；含 model.vue 接入配置；治理标准页实时读取钉钉多维表《杰克知识管理规范》，需应用开通 Notable.Base.Read.All 权限；知识缺口页知识库过滤选项取自知识源管理中已启用的钉钉知识库，选中钉钉知识库后查询读取 dingtalk_folder_stats 快照表（文件夹直属文档数=在线文档+本地上传文件），「刷新数据」按钮触发后台全量遍历并覆盖写入快照（几万文档的大库需数分钟，前端轮询进度）；新增钉钉知识源时自动触发该库快照预热，知识源列表显示「目录获取中」状态）
         └── settings/            # 兼容旧路由的模型配置页（隐藏）
 ```
+
+## 企业问答增强与准确率验收
+
+智能问答采用统一的企业知识检索、DWS 钉钉补查、原文摘录校验与语义核验链路。配置方式、权限边界、标签/摘要/图谱与记忆设计，以及超过 90% 准确率的专家题集验收方法见 [企业问答说明](docs/qa-evaluation/README.md)。实际验证范围见 [验证记录](docs/qa-evaluation/VALIDATION.md)。

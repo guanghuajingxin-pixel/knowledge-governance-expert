@@ -5,7 +5,8 @@
 #   docker build -f services/deerflow/Dockerfile -t kge-deerflow .
 FROM python:3.12-slim
 
-RUN pip install --no-cache-dir uv
+ENV UV_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
+RUN pip install --no-cache-dir uv -i https://mirrors.aliyun.com/pypi/simple/
 
 WORKDIR /app
 

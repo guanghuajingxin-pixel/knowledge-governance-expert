@@ -1,0 +1,99 @@
+name: kge-infra
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: kge-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: dev
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: dev_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dev -d dev_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks: [kge-network]
+
+  redis:
+    image: redis:7-alpine
+    container_name: kge-redis
+    restart: unless-stopped
+    command: redis-server --requirepass ${REDIS_PASSWORD} --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks: [kge-network]
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.0
+    container_name: kge-elasticsearch
+    restart: unless-stopped
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: false
+      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    networks: [kge-network]
+
+  minio:
+    # 服务器 CPU（仅 x86-64-v1）不满足 minio 新镜像的 x86-64-v2 要求，固定旧版
+    image: minio/minio:RELEASE.2022-12-12T19-27-27Z
+    container_name: kge-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+    networks: [kge-network]
+
+  kkfileview:
+    image: keking/kkfileview:latest
+    container_name: kge-kkfileview
+    restart: unless-stopped
+    environment:
+      OFFICE_PREVIEW_TYPE: pdf
+      JAVA_OPTS: "-Xms256m -Xmx512m -Dfile.encoding=UTF-8"
+    ports:
+      - "8012:8012"
+    mem_limit: 1g
+    networks: [kge-network]
+
+volumes:
+  postgres-data: {}
+  redis-data: {}
+  es-data: {}
+  minio-data: {}
+
+networks:
+  kge-network:
+    name: kge-network
+    driver: bridge

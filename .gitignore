@@ -7,6 +7,11 @@ services/**/.venv
 # Env
 .env
 
+# 内网部署：模型文件与真实 env（含密码）不提交
+deploy/intranet/models/
+deploy/intranet/.env.infra
+deploy/intranet/.env.app
+
 # Frontend
 web/node_modules/
 web/dist/

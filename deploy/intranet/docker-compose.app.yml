@@ -1,0 +1,72 @@
+name: kge-app
+
+services:
+  kb-api:
+    build:
+      context: ../../
+      dockerfile: services/kb-api/Dockerfile
+    image: kge-kb-api:latest
+    container_name: kge-kb-api
+    restart: unless-stopped
+    ports:
+      - "8001:8000"
+    env_file: .env.app
+    environment:
+      BGE_EMBED_MODEL: /models/bge-m3
+      BGE_RERANK_MODEL: /models/bge-reranker-v2-m3
+      MINERU_LOCAL_URL: ""
+    volumes:
+      - ./models:/models:ro
+      - kb-api-data:/app/services/kb-api/data
+    networks: [kge-network]
+
+  deerflow:
+    build:
+      context: ../../
+      dockerfile: services/deerflow/Dockerfile
+    image: kge-deerflow:latest
+    container_name: kge-deerflow
+    restart: unless-stopped
+    ports:
+      - "2027:2027"
+    env_file: .env.app
+    environment:
+      KB_API_URL: http://kb-api:8000
+    depends_on:
+      - kb-api
+    volumes:
+      - deerflow-data:/app/services/deerflow/data
+    networks: [kge-network]
+
+  faq-service:
+    build:
+      context: ../../
+      dockerfile: services/faq-service/Dockerfile
+    image: kge-faq-service:latest
+    container_name: kge-faq-service
+    restart: unless-stopped
+    ports:
+      - "8004:8004"
+    env_file: .env.app
+    networks: [kge-network]
+
+  kb-worker:
+    build:
+      context: ../../
+      dockerfile: services/kb-api/Dockerfile
+    image: kge-kb-api:latest
+    container_name: kge-kb-worker
+    restart: unless-stopped
+    command: ["uv", "run", "celery", "-A", "app.worker", "worker", "-Q", "ingestion", "--concurrency=1", "-l", "info"]
+    env_file: .env.app
+    environment:
+      EMBED_VIA_INTERNAL: "true"
+    networks: [kge-network]
+
+volumes:
+  kb-api-data: {}
+  deerflow-data: {}
+
+networks:
+  kge-network:
+    external: true

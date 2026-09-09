@@ -14,6 +14,7 @@ dependencies = [
   "redis>=5.0",
   "celery>=5.4",
   "FlagEmbedding>=1.2.7",
+  "numpy<2",  # numpy 2.x 要求 x86-64-v2；内网服务器 CPU 仅 x86-64-v1，固定 1.26
   "transformers>=4.41,<5",  # FlagEmbedding 1.4 FlagReranker 调用 tokenizer.prepare_for_model，5.x 已移除该 API
   "openai>=1.30",          # GLM/DeepSeek 兼容客户端
   "langchain>=0.3",

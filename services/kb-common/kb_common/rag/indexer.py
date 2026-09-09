@@ -1,14 +1,34 @@
+import os
+
+import httpx
+
 from kb_common.rag import embedder, chunker
 from kb_common.clients import es_client
+from kb_common.config import get_settings
 from kb_common.models import Segment
 from datetime import datetime, timezone
+
+
+async def _embed_internal(texts: list[str]) -> list[list[float]]:
+    """通过 kb-api 的 /internal/embed 复用其常驻 BGE-M3（避免 worker 重复加载模型）。"""
+    s = get_settings()
+    async with httpx.AsyncClient(timeout=300) as c:
+        r = await c.post(f"{s.kb_api_internal_url}/internal/embed", json={"texts": texts})
+        r.raise_for_status()
+        return r.json()["vectors"]
+
 
 async def index_document(s, kb, doc, markdown: str) -> int:
     """切片 -> 向量化 -> ES bulk -> 回写 segments。返回 chunk 数。"""
     chunks = chunker.chunk(markdown, kb.chunk_strategy, kb.chunk_size, kb.chunk_overlap, kb.delimiter)
     if not chunks: return 0
     texts = [c["text"] for c in chunks]
-    vectors = embedder.embed(texts)   # 本地 FlagEmbedding
+    # 低内存部署（EMBED_VIA_INTERNAL=true，如 kb-worker 容器）：走 kb-api 内部接口复用模型；
+    # 默认本地 FlagEmbedding（kb-api 自身），行为不变。
+    if os.getenv("EMBED_VIA_INTERNAL", "").lower() in ("1", "true", "yes"):
+        vectors = await _embed_internal(texts)
+    else:
+        vectors = embedder.embed(texts)   # 本地 FlagEmbedding
     index = await es_client.ensure_index(str(kb.id))
 
     docs = []
