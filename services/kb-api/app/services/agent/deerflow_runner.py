@@ -251,12 +251,18 @@ async def run_deerflow_stream(
             if sig in seen_docs:
                 continue
             seen_docs.add(sig)
-            citations.append({
+            cite: dict[str, Any] = {
                 "document_title": title,
                 "page_number": h.get("page_number"),
                 "score": h.get("score"),
                 "content": h.get("content") or "",
-            })
+            }
+            # 同步自钉钉知识库的 Dify 文档：携带钉钉原始链接，引用来源点击跳钉钉预览
+            if h.get("url"):
+                cite["url"] = h.get("url")
+                cite["node_id"] = h.get("node_id") or ""
+                cite["source"] = h.get("source") or "dingtalk"
+            citations.append(cite)
         return len(hits)
 
     def _absorb_dingtalk(content: str) -> int:

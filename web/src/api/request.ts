@@ -21,7 +21,8 @@ service.interceptors.request.use(
 service.interceptors.response.use(
   (response) => response.data,
   (error) => {
-    const message = error.response?.data?.message || error.message || '请求失败'
+    const detail = error.response?.data?.detail
+    const message = (typeof detail === 'string' ? detail : '') || error.response?.data?.message || error.message || '请求失败'
     if (error.response?.status === 401) {
       // 登录接口 401（用户名/密码错误）：不登出/不重载，交由登录页 catch 提示
       const reqUrl = error.config?.url || ''

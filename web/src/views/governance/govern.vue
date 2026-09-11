@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
+import KnowledgeGaps from './components/KnowledgeGaps.vue'
 import { ElMessage } from 'element-plus'
 import { getStandards, type StandardDoc } from '@/api/governance'
 
-const activeTab = ref('triage')
+const activeTab = ref('gaps')
 
 // 工单分诊
 interface Ticket {
@@ -95,11 +96,8 @@ const statusTag: Record<string, string> = {
 <template>
   <div class="page">
     <h2 class="pg-title">知识治理</h2>
-    <p class="pg-sub">治理的「账」记在钉钉（多维表/文档），本页是只读工作视图。反馈工单由 AI 自动分诊（分类/定级/指派建议），<b>人只做确认与裁决</b>。</p>
-
-    <div class="chain">🛡️ 治理（AI 分诊 + 人裁决）<span class="arr">⟲</span> 反哺采集（缺口征集/版本换版）</div>
-
     <el-tabs v-model="activeTab">
+      <el-tab-pane label="知识缺口" name="gaps" lazy><KnowledgeGaps /></el-tab-pane>
       <!-- 工单智能分诊 -->
       <el-tab-pane label="工单智能分诊" name="triage">
         <div class="hl">
@@ -244,10 +242,7 @@ const statusTag: Record<string, string> = {
 
 <style scoped>
 .page { padding: 20px 24px 48px; max-width: 1320px; margin: 0 auto; }
-.pg-title { font-size: 19px; margin-bottom: 4px; }
-.pg-sub { color: #6b7280; font-size: 13px; margin-bottom: 16px; line-height: 1.8; }
-.chain { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; background: #eef3ff; border: 1px dashed #c7d7fe; border-radius: 10px; padding: 8px 14px; font-size: 12.5px; color: #1e40af; margin-bottom: 16px; }
-.chain .arr { color: #93b4f5; }
+.pg-title { font-size: 19px; margin-bottom: 16px; }
 .card { margin-bottom: 16px; }
 .card-header { display: flex; align-items: center; justify-content: space-between; }
 .src { display: flex; align-items: center; gap: 8px; }

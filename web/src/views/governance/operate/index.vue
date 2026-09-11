@@ -32,28 +32,15 @@ watch(activeTab, (name) => {
 
 <style scoped>
 .operate-tabs-page {
-  /* 页签内部各组件自带 .page 内边距，这里去掉外层多余间距 */
-}
-.operate-tabs {
-  width: 100%;
+  padding: 20px 24px 48px;
+  max-width: 1320px;
+  margin: 0 auto;
 }
 .operate-tabs :deep(.el-tabs__header) {
-  margin-bottom: 12px;
-}
-.operate-tabs :deep(.el-tabs__nav-wrap) {
-  padding-left: 12px;
-}
-.operate-tabs :deep(.el-tabs__nav) {
-  display: flex;
-  width: 100%;
+  margin-bottom: 16px;
 }
 .operate-tabs :deep(.el-tabs__item) {
-  flex: 1 1 0;
-  min-width: 0;
-  padding: 0 12px;
   font-size: 15px;
   font-weight: 600;
-  text-align: center;
-  justify-content: center;
 }
 </style>

@@ -22,7 +22,7 @@ export interface TestLLMResult {
   message?: string
 }
 
-export const testLLM = (data: { base_url?: string; api_key?: string; model?: string }) =>
+export const testLLM = (data: { base_url?: string; api_key?: string; model?: string; profile_id?: string }) =>
   request.post<unknown, TestLLMResult>('/settings/test-llm', data)
 
 export interface LlmModelsResult {

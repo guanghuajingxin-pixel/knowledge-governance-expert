@@ -190,7 +190,12 @@ docker exec kge-kb-api sh -c "cd /app/services/kb-api && uv run python ../../scr
 
 # 8. 前端 nginx（8080 端口，反代 /api/v1/faq→8004、/api/v1→8001）
 sudo cp nginx-kge.conf /etc/nginx/sites-enabled/kge && sudo nginx -t && sudo systemctl reload nginx
+
+# 9. 开放防火墙（ufw 只放行前端 8080；宿主机端口默认被 ufw 拦截）
+sudo ufw allow 8080/tcp comment "KGE 前端"
 ```
+
+> **注意 ufw 与 Docker 的交互**：ufw 规则只作用于宿主机进程监听的端口（nginx 8080、kb-sync 80）；Docker 发布的端口（8001/8004/2027/8012/9000-9001/9200/5432/6379）经 iptables PREROUTING/FORWARD 链 DNAT，**会绕过 ufw 直接可访问**。若需限制这些端口，需另行配置 `DOCKER-USER` 链或去掉 compose 的宿主端口映射。
 
 部署文件清单（`deploy/intranet/`）：`docker-compose.infra.yml`（基础设施）、`docker-compose.app.yml`（应用，build context 自动指向上两级 repo root）、`.env.infra.example` / `.env.app.example`（脱敏模板，部署时复制为 `.env.infra` / `.env.app` 填真实密码）、`nginx-kge.conf`（前端反代）。`deploy/intranet/models/` 用于放置物化好的 BGE 模型（勿提交，用 `.gitignore` 忽略）。
 
@@ -439,6 +444,7 @@ docker compose down -v        # 同时删除卷（清空 Dify 数据库与知识
 - **手动刷新**：右上角「刷新」触发后台重新遍历钉钉；结果内存缓存 1 小时，遍历成功后同时落盘快照（`/tmp/kge_dingtalk_files.json`，可用环境变量 `KGE_DINGTALK_SNAPSHOT` 覆盖路径）。进程重启 / 开发环境 `--reload` 后自动从快照预热，无需等待全量遍历。
 - **性能与容错**：钉钉 `wiki/nodes` 接口限流严格（实测 3 并发即批量 403），客户端采用**并发信号量（≤3）+ 全局最小请求间隔节流（0.4s/次，约 2.5 QPS）+ 403/429/5xx/超时指数退避重试**；遍历为后台异步任务（单飞，并发访问不重复遍历），前端按 12s 间隔轮询，全量约 4,500 个节点请求、25–30 分钟；明确无权限的目录自动跳过。
 - **配置**：在「系统配置」页填写钉钉 AppKey / AppSecret / 操作人 UnionId（settings 表持久化，`sync_runtime_config` 每次调用前同步）；未配置时页面显示友好告警。
+- **知识Owner通知（知识缺口）**：知识缺口页钉钉行操作列新增「通知」按钮（仅**快照存在 + 已维护 Owner + 目录无文档**的行可点，其余禁用并以 tooltip 说明原因）；点击弹窗预览正文「你即将通过钉钉发送私聊通知给知识Owner xxx：【库名 / 目录路径】该目录下的知识为空，请尽快补充，谢谢！」，确认后经 `POST /governance/gaps/dingtalk/notify` 走钉钉企业机器人单聊（`v1.0/robot/oToMessages/send`，sampleText）。前置条件：①「系统配置 → 钉钉设置」填写 **机器人 robotCode**（`dingtalk_robot_code`，取值见开放平台「应用详情 → 机器人」，与 AppKey 不同）；②应用开通「企业内机器人发送消息权限」与「通讯录个人信息读权限」；③ Owner 填写的是员工**姓名**（后端按姓名在通讯录精确匹配 userid，无精确匹配返回 400）。发送成功返回 `已通过钉钉私聊通知 {owner}`，错误分类：400 业务校验、502 钉钉 OpenAPI 网络/权限错误。
 
 ### 本地上传知识
 
@@ -464,6 +470,7 @@ docker compose down -v        # 同时删除卷（清空 Dify 数据库与知识
 
 - **数据模型**（迁移 `alembic/versions/0011_add_sync_tables.py`）：`sync_sources`（含 `cron` 字段，不保留独立 jobs 表）、`sync_runs`、`sync_document_mappings`、`sync_failures`、`sync_logs`，模型定义见 [kb_common/models.py](services/kb-common/kb_common/models.py)。
 - **同步引擎**（[services/sync/engine.py](services/kb-api/app/services/sync/engine.py)）：钉钉目录树遍历 → 下载/导出（ALIDOC 与 .able 经 dws CLI）→ Dify 增量上传（元数据指纹 + 内容 hash 判定新增/更新/跳过；`delete_policy=sync` 时同步删除已不存在的 Dify 文档）。同步版 httpx + 同步 ORM，跑在 `ThreadPoolExecutor` 后台线程不阻塞事件循环。
+- **运行兜底与中断语义**（[runtime.py](services/kb-api/app/services/sync/runtime.py)）：单次同步硬超时 `sync_run_timeout_seconds`（默认 **7200 秒 = 2 小时**，超时强杀进程组）；超时/进程崩溃/孤儿收编时保留已完成的同步成果——有成功项则标 `partial`（部分成功，WARNING 日志），仅零成功才标 `failed`（ERROR），日志带「成功 N 个，失败 N 个」计数（与引擎正常路径的 partial 判定一致）。前端「同步源管理」与「同步工作台」对运行中任务每 3 秒轮询，全部结束后自动停止轮询，按钮由「同步中」恢复为「立即同步」可再次触发。
 - **配置读取**：钉钉 AppKey/Secret/操作人、Dify base_url/api_key 复用「系统配置」页；同步参数（`sync_max_depth`、`sync_export_format`、`sync_skip_extensions`、`sync_dify_wait_indexing` 等）与 `dws_bin`/`dws_config_dir` 从 [kb_common/config.py](services/kb-common/kb_common/config.py) 读取，可用 `.env` 覆盖。
 - **依赖**：kb-api 新增 `apscheduler`（cron 调度）与 `psycopg[binary]`（同步引擎的同步 DB 会话，连接同一套库；平台主 ORM 仍为 asyncpg）。
 - **认证**：沿用平台 `require_role("super_admin","admin","editor")`，不保留源项目的 admin/password 哈希登录。
@@ -563,7 +570,7 @@ knowledge-governance-expert/
     └── src/views/
         ├── chat/                # 智能问答（Dify 数据集多选 + Agent）
         ├── hiagent/             # HiAgent智能问答（火山 HiAgent WebSDK iframe 嵌入）
-        ├── governance/          # 知识治理 7 大模块（默认页签为知识缺口；含 model.vue 接入配置；治理标准页实时读取钉钉多维表《杰克知识管理规范》，需应用开通 Notable.Base.Read.All 权限；知识缺口页知识库过滤选项取自知识源管理中已启用的钉钉知识库，选中钉钉知识库后查询读取 dingtalk_folder_stats 快照表（文件夹直属文档数=在线文档+本地上传文件），「刷新数据」按钮触发后台全量遍历并覆盖写入快照（几万文档的大库需数分钟，前端轮询进度）；新增钉钉知识源时自动触发该库快照预热，知识源列表显示「目录获取中」状态）
+        ├── governance/          # 知识治理 7 大模块（默认页签为知识缺口；含 model.vue 接入配置；治理标准页实时读取钉钉多维表《杰克知识管理规范》，需应用开通 Notable.Base.Read.All 权限；知识缺口页知识库过滤选项取自知识源管理中已启用的钉钉知识库，选中钉钉知识库后查询读取 dingtalk_folder_stats 快照表（文件夹直属文档数=在线文档+本地上传文件；「文件夹数量」列=该目录直属子文件夹数，不含目录本身与孙级——钉钉行由快照路径树推导、本地行走 parent_id，CSV 导出同口径），「刷新数据」按钮触发后台全量遍历并覆盖写入快照（几万文档的大库需数分钟，前端轮询进度，刷新保留已维护的 Owner）；知识Owner 支持行内编辑弹窗与批量导入（CSV/XLSX，按目录ID或知识库＋目录路径匹配，本地目录与钉钉文件夹均可），钉钉行另提供「通知」按钮——经钉钉企业机器人向 Owner 发单聊催补提醒（无文档行可点，正文预览见「知识Owner通知」说明）；新增钉钉知识源时自动触发该库快照预热，知识源列表显示「目录获取中」状态）
         └── settings/            # 兼容旧路由的模型配置页（隐藏）
 ```
 

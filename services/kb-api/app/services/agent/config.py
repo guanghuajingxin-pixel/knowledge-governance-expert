@@ -20,13 +20,13 @@ TOOL_CATALOG: list[dict[str, str]] = [
     {"key": "knowledge_search", "name": "知识库检索",
      "desc": "检索企业知识库（Dify 数据集），答案的主要来源"},
     {"key": "dingtalk_search", "name": "钉钉知识库检索",
-     "desc": "检索钉钉文档/知识库中同步的企业资料"},
+     "desc": "知识库证据不足时，通过 DWS 实时检索已授权的企业文档内容"},
     {"key": "dingtalk_read_doc", "name": "钉钉文档读取",
-     "desc": "读取钉钉文档正文，用于引用原文与来源"},
+     "desc": "读取在线 adoc 文档原文；办公文件使用搜索返回的正文片段"},
     {"key": "ask_clarification", "name": "澄清提问",
      "desc": "用户问题模糊时主动反问，确认意图后再作答"},
     {"key": "present_files", "name": "文件展示",
-     "desc": "在回答中以卡片形式展示关联文件/附件"},
+     "desc": "兼容配置：仅供旧版 DeerFlow 服务的文件工具使用"},
 ]
 
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -41,7 +41,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "设备保养流程怎么走？",
         "差旅报销需要哪些审批角色？",
     ],
-    "follow_up_enabled": True,    # 下一步问题建议（回答后生成 3 个追问）
+    "follow_up_enabled": True,    # 下一步问题建议（完整回答后提供原文追问）
     # —— 工具开关（key=DeerFlow 工具名；False=该工具不绑定给智能体）——
     "tools_enabled": {
         "knowledge_search": True,   # 知识库检索（Dify 数据集，答案主要来源）
@@ -53,13 +53,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # —— 高级设置 ——
     "planning_enabled": True,     # 任务规划（TodoList 中间件，复杂问题先拆解计划）
     "subagent_enabled": False,    # 子智能体协作（Lead Agent 按需并行派发 Sub-Agent 调研）
-    "long_memory_enabled": True,  # 长期记忆（跨会话记忆 + 同会话 thread 上下文持久化）
+    "long_memory_enabled": True,  # 长期记忆（当前会话最近八条消息，仅用于消解指代）
     "deep_think_default": False,  # 新会话默认开启深度思考
     # —— 超参维护 ——
-    "temperature": 0.7,           # 生成温度
+    "temperature": 0,           # 生成温度
     "top_p": 0.9,                 # top-p 采样
-    "max_tokens": 2048,           # 单次回答最大 token
-    "top_k": 5,                   # 知识库召回条数（深度思考时自动提升至 ≥10）
+    "max_tokens": 4096,           # 单次回答最大 token
+    "top_k": 8,                   # 知识库召回条数（深度思考时自动提升至 ≥12）
     "max_retrieval_rounds": 2,    # 检索反思轮数（不充分时改写查询重检，DeerFlow Researcher 反思循环）
 }
 
@@ -67,9 +67,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
 _NUM_BOUNDS = {
     "temperature": (0.0, 2.0),
     "top_p": (0.1, 1.0),
-    "max_tokens": (256, 8192),
+    "max_tokens": (3000, 8192),
     "top_k": (1, 20),
-    "max_retrieval_rounds": (1, 4),
+    "max_retrieval_rounds": (1, 2),
 }
 
 

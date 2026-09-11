@@ -104,6 +104,27 @@ export interface DingTalkOption {
   name: string
 }
 
+/** 钉钉团队知识库（实时列表，含根节点 ID） */
+export interface DingTalkWorkspace {
+  id: string
+  name: string
+  root_node_id: string
+}
+
+/** 钉钉目录子节点（实时，按父节点查询） */
+export interface DingTalkNode {
+  node_id: string
+  name: string
+  is_folder: boolean
+  has_children: boolean
+  extension: string | null
+  size: number
+  url: string | null
+  creator_id: string
+  created_at: string | null
+  modified_at: string | null
+}
+
 /** 钉钉文件列表查询结果 */
 export interface DingTalkDocResult {
   items: DingTalkFile[]
@@ -115,4 +136,27 @@ export interface DingTalkDocResult {
   /** 后台正在遍历钉钉知识库时为 true（前端轮询） */
   loading?: boolean
   error?: string | null
+}
+
+/** 知识源登记（企业知识库注册表） */
+export interface KnowledgeSource {
+  id: number
+  name: string
+  source_type: 'dingtalk_workspace' | 'dify_dataset' | 'business_system'
+  external_id: string
+  description: string
+  config: Record<string, any> | null
+  enabled: boolean
+  created_at: string
+  updated_at: string
+}
+
+/** 知识源创建/更新参数 */
+export interface KnowledgeSourcePayload {
+  name: string
+  source_type: KnowledgeSource['source_type']
+  external_id: string
+  description?: string
+  config?: Record<string, any> | null
+  enabled?: boolean
 }

@@ -273,6 +273,11 @@ def write_config(boot: dict[str, Any]) -> None:
                 "name": "dingtalk_read_doc",
                 "group": "kb",
                 "use": "extensions.kb_tools:dingtalk_read_doc_tool",
+            },
+            {
+                "name": "knowledge_context_expand",
+                "group": "kb",
+                "use": "extensions.kb_tools:knowledge_context_expand_tool",
             }
         ],
         "tool_search": {"enabled": False},

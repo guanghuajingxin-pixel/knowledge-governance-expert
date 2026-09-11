@@ -1,0 +1,635 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>钉钉知识库 · Dify 同步管理后台</title>
+<style>
+  :root {
+    --bg:#F5F7FA; --card:#fff; --border:#E5E7EB; --text:#1F2937; --text2:#6B7280; --text3:#9CA3AF;
+    --primary:#2563EB; --primary-hover:#1D4ED8; --primary-soft:#EFF6FF;
+    --success:#16A34A; --success-soft:#F0FDF4; --warning:#D97706; --warning-soft:#FFFBEB;
+    --danger:#DC2626; --danger-soft:#FEF2F2; --radius:10px; --sidebar-w:220px;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; background:var(--bg); color:var(--text); font-size:14px; }
+  button { font-family:inherit; cursor:pointer; }
+  input, select, textarea { font-family:inherit; font-size:14px; }
+  #loginPage { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; z-index:50; background:var(--bg); }
+  .login-card { width:380px; background:var(--card); border:1px solid var(--border); border-radius:14px; padding:40px 36px; box-shadow:0 10px 30px rgba(0,0,0,.06); }
+  .logo { width:48px; height:48px; border-radius:12px; background:var(--primary); color:#fff; display:flex; align-items:center; justify-content:center; font-weight:700; font-size:20px; margin-bottom:16px; }
+  .login-card h1 { font-size:20px; margin-bottom:6px; }
+  .login-card .sub { color:var(--text2); font-size:13px; margin-bottom:24px; }
+  .login-card label { display:block; font-size:13px; color:var(--text2); margin:14px 0 6px; }
+  .login-card input { width:100%; padding:10px 12px; border:1px solid var(--border); border-radius:8px; outline:none; }
+  .login-card input:focus { border-color:var(--primary); }
+  .btn-login { width:100%; margin-top:24px; padding:11px; border:none; background:var(--primary); color:#fff; border-radius:8px; font-size:15px; font-weight:600; }
+  .login-error { color:var(--danger); font-size:13px; margin-top:12px; min-height:18px; }
+  #app { display:none; }
+  .layout { display:flex; min-height:100vh; }
+  .sidebar { width:var(--sidebar-w); background:#111827; color:#D1D5DB; position:fixed; top:0; bottom:0; left:0; display:flex; flex-direction:column; }
+  .brand { padding:18px 20px; display:flex; align-items:center; gap:10px; color:#F9FAFB; font-weight:600; border-bottom:1px solid #1F2937; }
+  .brand .badge { width:30px; height:30px; border-radius:8px; background:var(--primary); color:#fff; display:flex; align-items:center; justify-content:center; font-weight:700; }
+  .nav { padding:12px 10px; flex:1; }
+  .nav-item { display:flex; align-items:center; gap:10px; padding:11px 12px; border-radius:8px; cursor:pointer; margin-bottom:2px; transition:background .15s; }
+  .nav-item:hover { background:#1F2937; color:#F9FAFB; }
+  .nav-item.active { background:var(--primary); color:#fff; }
+  .sidebar .foot { padding:14px 20px; font-size:12px; color:#6B7280; border-top:1px solid #1F2937; }
+  .main { margin-left:var(--sidebar-w); flex:1; min-width:0; }
+  .topbar { height:56px; background:var(--card); border-bottom:1px solid var(--border); display:flex; align-items:center; justify-content:space-between; padding:0 24px; position:sticky; top:0; z-index:10; }
+  .topbar .title { font-size:16px; font-weight:600; }
+  .topbar .right { display:flex; align-items:center; gap:16px; font-size:13px; color:var(--text2); }
+  .btn-link { background:none; border:none; color:var(--text2); font-size:13px; }
+  .btn-link:hover { color:var(--danger); }
+  .content { padding:24px; max-width:1280px; width:100%; }
+  .page { display:none; }
+  .page.active { display:block; }
+  .page-head { display:flex; align-items:center; justify-content:space-between; margin-bottom:18px; }
+  .page-head h2 { font-size:20px; }
+  .page-head .desc { color:var(--text2); font-size:13px; margin-top:4px; }
+  .stat-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:16px; margin-bottom:20px; }
+  .stat { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:18px; }
+  .stat .label { color:var(--text2); font-size:13px; }
+  .stat .num { font-size:28px; font-weight:700; margin-top:8px; }
+  .stat .extra { font-size:12px; color:var(--text3); margin-top:6px; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:20px; margin-bottom:20px; }
+  .card h3 { font-size:15px; margin-bottom:14px; }
+  table { width:100%; border-collapse:collapse; }
+  th, td { text-align:left; padding:10px 12px; border-bottom:1px solid var(--border); font-size:13px; vertical-align:middle; }
+  th { color:var(--text2); font-weight:600; background:#F9FAFB; }
+  tr:hover td { background:#FAFBFC; }
+  .empty { text-align:center; color:var(--text3); padding:36px 0; }
+  .btn { display:inline-flex; align-items:center; gap:6px; padding:8px 14px; border-radius:8px; border:1px solid var(--border); background:#fff; color:var(--text); font-size:13px; font-weight:500; }
+  .btn:hover { background:#F3F4F6; }
+  .btn.primary { background:var(--primary); border-color:var(--primary); color:#fff; }
+  .btn.primary:hover { background:var(--primary-hover); }
+  .btn.danger { color:var(--danger); }
+  .btn.sm { padding:5px 10px; font-size:12px; }
+  .btn.ghost { background:transparent; border-color:transparent; color:var(--primary); }
+  .btn.ghost:hover { background:var(--primary-soft); }
+  .badge { display:inline-block; padding:3px 8px; border-radius:20px; font-size:12px; font-weight:500; }
+  .badge.green { background:var(--success-soft); color:var(--success); }
+  .badge.blue { background:var(--primary-soft); color:var(--primary); }
+  .badge.red { background:var(--danger-soft); color:var(--danger); }
+  .badge.amber { background:var(--warning-soft); color:var(--warning); }
+  .badge.gray { background:#F3F4F6; color:var(--text2); }
+  .switch { position:relative; display:inline-block; width:36px; height:20px; }
+  .switch input { opacity:0; width:0; height:0; }
+  .slider { position:absolute; cursor:pointer; top:0; left:0; right:0; bottom:0; background:#CBD5E1; border-radius:20px; transition:.2s; }
+  .slider:before { content:""; position:absolute; height:14px; width:14px; left:3px; top:3px; background:#fff; border-radius:50%; transition:.2s; }
+  .switch input:checked + .slider { background:var(--success); }
+  .switch input:checked + .slider:before { transform:translateX(16px); }
+  .form-grid { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+  .form-item { display:flex; flex-direction:column; gap:6px; }
+  .form-item.full { grid-column:1 / -1; }
+  .form-item label { font-size:13px; color:var(--text2); }
+  .form-item input, .form-item select, .form-item textarea { padding:9px 11px; border:1px solid var(--border); border-radius:8px; outline:none; background:#fff; }
+  .form-item input:focus, .form-item select:focus, .form-item textarea:focus { border-color:var(--primary); }
+  .form-item .help { font-size:12px; color:var(--text3); }
+  .modal-foot { display:flex; justify-content:flex-end; gap:10px; margin-top:22px; }
+  .modal-mask { position:fixed; inset:0; background:rgba(17,24,39,.45); display:none; align-items:center; justify-content:center; z-index:100; }
+  .modal-mask.show { display:flex; }
+  .modal { width:560px; max-width:92vw; max-height:88vh; overflow:auto; background:#fff; border-radius:14px; padding:22px; }
+  .modal h3 { margin-bottom:16px; font-size:17px; }
+  .kv { font-size:13px; color:var(--text2); }
+  .pre { background:#0F172A; color:#E2E8F0; padding:12px; border-radius:8px; font-size:12px; overflow:auto; max-height:320px; white-space:pre-wrap; word-break:break-all; }
+  #toast { position:fixed; top:18px; right:18px; z-index:200; display:flex; flex-direction:column; gap:8px; }
+  .toast-item { background:#111827; color:#fff; padding:10px 14px; border-radius:8px; font-size:13px; box-shadow:0 6px 20px rgba(0,0,0,.2); }
+  .toast-item.ok { background:#065F46; }
+  .toast-item.err { background:#991B1B; }
+  .tabs { display:flex; gap:8px; margin-bottom:14px; }
+  .tabs .tab { padding:7px 14px; border-radius:8px; border:1px solid var(--border); background:#fff; font-size:13px; }
+  .tabs .tab.active { background:var(--primary); color:#fff; border-color:var(--primary); }
+  @media (max-width:900px) { .stat-grid { grid-template-columns:repeat(2,1fr); } .form-grid { grid-template-columns:1fr; } }
+</style>
+</head>
+<body>
+
+<div id="loginPage">
+  <div class="login-card">
+    <div class="logo">K</div>
+    <h1>知识同步管理后台</h1>
+    <div class="sub">钉钉知识库 → Dify 定时增量同步</div>
+    <label>用户名</label>
+    <input id="loginUser" value="admin" autocomplete="username">
+    <label>密码</label>
+    <input id="loginPass" type="password" value="admin123" autocomplete="current-password">
+    <button class="btn-login" onclick="doLogin()">登 录</button>
+    <div class="login-error" id="loginError"></div>
+  </div>
+</div>
+
+<div id="app">
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="brand"><span class="badge">K</span> 知识同步</div>
+      <nav class="nav">
+        <div class="nav-item active" data-page="dash" onclick="switchPage('dash')">◧ 工作台</div>
+        <div class="nav-item" data-page="sources" onclick="switchPage('sources')">▤ 同步源管理</div>
+        <div class="nav-item" data-page="jobs" onclick="switchPage('jobs')">◷ 定时任务</div>
+        <div class="nav-item" data-page="monitor" onclick="switchPage('monitor')">▣ 运行监控</div>
+        <div class="nav-item" data-page="logs" onclick="switchPage('logs')">☰ 运行日志</div>
+        <div class="nav-item" data-page="settings" onclick="switchPage('settings')">⚙ 设置</div>
+      </nav>
+      <div class="foot">v0.1.0 · FastAPI + SQLite</div>
+    </aside>
+
+    <div class="main">
+      <div class="topbar">
+        <div class="title" id="pageTitle">工作台</div>
+        <div class="right">
+          <span id="serverState">● 服务正常</span>
+          <button class="btn-link" onclick="doLogout()">退出登录</button>
+        </div>
+      </div>
+
+      <div class="content">
+        <section class="page active" id="page-dash">
+          <div class="page-head"><div><h2>工作台</h2><div class="desc">同步服务运行概览</div></div>
+            <button class="btn primary" onclick="switchPage('sources')">＋ 新增同步源</button></div>
+          <div class="stat-grid">
+            <div class="stat"><div class="label">同步源</div><div class="num" id="statSources">-</div><div class="extra">知识库接入数</div></div>
+            <div class="stat"><div class="label">定时任务</div><div class="num" id="statJobs">-</div><div class="extra" id="statJobsExtra">-</div></div>
+            <div class="stat"><div class="label">已同步文档</div><div class="num" id="statDocs">-</div><div class="extra">Dify 文档映射</div></div>
+            <div class="stat"><div class="label">今日运行 / 失败</div><div class="num" id="statRuns">-</div><div class="extra" id="statRunsExtra">-</div></div>
+          </div>
+          <div class="card">
+            <h3>最近一次运行</h3>
+            <div id="lastRunBox" class="empty">加载中…</div>
+          </div>
+        </section>
+
+        <section class="page" id="page-sources">
+          <div class="page-head"><div><h2>同步源管理</h2><div class="desc">配置钉钉知识库到 Dify 知识库的映射</div></div>
+            <button class="btn primary" onclick="openSourceModal()">＋ 新增同步源</button></div>
+          <div class="card" style="padding:0">
+            <table><thead><tr><th>名称</th><th>钉钉知识库</th><th>Dify 数据集</th><th>删除策略</th><th>状态</th><th style="width:280px">操作</th></tr></thead>
+            <tbody id="sourceTbody"></tbody></table>
+          </div>
+        </section>
+
+        <section class="page" id="page-jobs">
+          <div class="page-head"><div><h2>定时任务</h2><div class="desc">按 cron 表达式自动执行同步</div></div>
+            <button class="btn primary" onclick="openJobModal()">＋ 新增任务</button></div>
+          <div class="card" style="padding:0">
+            <table><thead><tr><th>任务名称</th><th>同步源</th><th>cron</th><th>最近运行</th><th>下次运行</th><th>状态</th><th style="width:240px">操作</th></tr></thead>
+            <tbody id="jobTbody"></tbody></table>
+          </div>
+        </section>
+
+        <section class="page" id="page-monitor">
+          <div class="page-head"><div><h2>运行监控</h2><div class="desc">查看每次同步的执行结果</div></div>
+            <button class="btn" onclick="loadRuns()">↻ 刷新</button></div>
+          <div class="card" style="padding:0">
+            <table><thead><tr><th>#</th><th>同步源</th><th>触发方式</th><th>状态</th><th>总数</th><th>新建/更新/删除</th><th>失败</th><th>开始时间</th><th>操作</th></tr></thead>
+            <tbody id="runTbody"></tbody></table>
+          </div>
+        </section>
+
+        <section class="page" id="page-logs">
+          <div class="page-head"><div><h2>运行日志</h2><div class="desc">同步过程日志与失败记录</div></div>
+            <button class="btn" onclick="loadLogsPage()">↻ 刷新</button></div>
+          <div class="tabs">
+            <button class="tab active" id="tabLogsBtn" onclick="switchLogTab('logs')">运行日志</button>
+            <button class="tab" id="tabFailsBtn" onclick="switchLogTab('fails')">失败记录</button>
+          </div>
+          <div class="card" style="padding:0" id="logsPanel">
+            <table><thead><tr><th>运行ID</th><th>级别</th><th>消息</th><th>时间</th></tr></thead>
+            <tbody id="logTbody"></tbody></table>
+          </div>
+          <div class="card" style="padding:0; display:none" id="failsPanel">
+            <table><thead><tr><th>运行ID</th><th>文档</th><th>错误信息</th><th>时间</th></tr></thead>
+            <tbody id="failTbody"></tbody></table>
+          </div>
+        </section>
+
+        <section class="page" id="page-settings">
+          <div class="page-head"><div><h2>设置</h2><div class="desc">服务运行参数，保存后立即生效</div></div></div>
+          <div class="card" style="max-width:760px">
+            <form onsubmit="saveSettings(event)">
+              <div class="form-grid">
+                <div class="form-item full"><label>钉钉群机器人 Webhook</label><input id="setWebhook" placeholder="https://oapi.dingtalk.com/robot/send?access_token=..."><div class="help">留空则不告警</div></div>
+                <div class="form-item"><label>失败告警阈值</label><input id="setThreshold" type="number" min="1"><div class="help">失败数达到该值时发送告警</div></div>
+                <div class="form-item"><label>默认删除策略</label><select id="setDeletePolicy"><option value="keep">keep - 保留 Dify 文档</option><option value="sync">sync - 同步删除</option></select></div>
+                <div class="form-item"><label>在线文档导出格式</label><select id="setExport"><option value="markdown">markdown</option><option value="docx">docx</option><option value="pdf">pdf</option></select></div>
+                <div class="form-item"><label>目录遍历最大深度</label><input id="setMaxDepth" type="number" min="1" max="20"></div>
+                <div class="form-item full"><label>钉钉操作员 unionId</label><input id="setOperator"><div class="help">需具备目标知识库下载/导出权限</div></div>
+                <div class="form-item full"><label><input type="checkbox" id="setWaitIndex" style="width:auto"> 上传后等待 Dify 索引完成（较慢）</label></div>
+              </div>
+              <div class="modal-foot"><button type="submit" class="btn primary">保存设置</button></div>
+            </form>
+          </div>
+        </section>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal-mask" id="modal">
+  <div class="modal" id="modalBody"></div>
+</div>
+<div id="toast"></div>
+
+<script>
+const API = '/api';
+let token = localStorage.getItem('kb_token') || '';
+let sources = [];
+let jobs = [];
+let currentPage = 'dash';
+
+function toast(msg, type = 'ok') {
+  const el = document.createElement('div');
+  el.className = 'toast-item ' + (type === 'err' ? 'err' : 'ok');
+  el.textContent = msg;
+  document.getElementById('toast').appendChild(el);
+  setTimeout(() => el.remove(), 3200);
+}
+function fmtTime(s) {
+  if (!s) return '—';
+  let t = s;
+  if (!/Z$|[+-]\d\d:\d\d$/.test(t)) t += 'Z';
+  const d = new Date(t);
+  if (isNaN(d.getTime())) return s;
+  const p = n => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth()+1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+}
+function sourceName(id) {
+  const s = sources.find(x => x.id === id);
+  return s ? s.name : '#' + id;
+}
+async function api(path, options = {}) {
+  const headers = Object.assign({}, options.headers || {});
+  if (options.body && !(options.body instanceof FormData)) headers['Content-Type'] = 'application/json';
+  if (token) headers['Authorization'] = 'Bearer ' + token;
+  const resp = await fetch(API + path, Object.assign({}, options, { headers }));
+  if (resp.status === 401) { doLogout(); throw new Error('登录已过期'); }
+  let data = null;
+  const text = await resp.text();
+  try { data = text ? JSON.parse(text) : null; } catch (e) { data = text; }
+  if (!resp.ok) {
+    const msg = data && typeof data === 'object' ? (data.detail || data.message || JSON.stringify(data)) : String(data);
+    throw new Error(msg);
+  }
+  return data;
+}
+function openModal(html) {
+  document.getElementById('modalBody').innerHTML = html;
+  document.getElementById('modal').classList.add('show');
+}
+function closeModal() {
+  document.getElementById('modal').classList.remove('show');
+}
+document.getElementById('modal').addEventListener('click', e => {
+  if (e.target.id === 'modal') closeModal();
+});
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+async function doLogin() {
+  const u = document.getElementById('loginUser').value.trim();
+  const p = document.getElementById('loginPass').value;
+  document.getElementById('loginError').textContent = '';
+  try {
+    const data = await api('/auth/login', { method:'POST', body: JSON.stringify({username:u, password:p}) });
+    token = data.token;
+    localStorage.setItem('kb_token', token);
+    document.getElementById('loginPage').style.display = 'none';
+    document.getElementById('app').style.display = 'block';
+    await refreshAll();
+    toast('欢迎回来');
+  } catch (e) {
+    document.getElementById('loginError').textContent = e.message;
+  }
+}
+function doLogout() {
+  token = '';
+  localStorage.removeItem('kb_token');
+  document.getElementById('app').style.display = 'none';
+  document.getElementById('loginPage').style.display = 'flex';
+}
+
+function switchPage(page) {
+  currentPage = page;
+  document.querySelectorAll('.nav-item').forEach(el => el.classList.toggle('active', el.dataset.page === page));
+  document.querySelectorAll('.page').forEach(el => el.classList.remove('active'));
+  document.getElementById('page-' + page).classList.add('active');
+  const titles = {dash:'工作台', sources:'同步源管理', jobs:'定时任务', monitor:'运行监控', logs:'运行日志', settings:'设置'};
+  document.getElementById('pageTitle').textContent = titles[page];
+  if (page === 'dash') loadDash();
+  if (page === 'sources') loadSources();
+  if (page === 'jobs') loadJobs();
+  if (page === 'monitor') loadRuns();
+  if (page === 'logs') loadLogsPage();
+  if (page === 'settings') loadSettings();
+}
+
+async function refreshAll() {
+  try { await Promise.all([loadSources(), loadJobs(), loadDash()]); }
+  catch (e) { toast(e.message, 'err'); }
+}
+
+async function loadDash() {
+  try {
+    const d = await api('/dashboard');
+    document.getElementById('statSources').textContent = d.source_count;
+    document.getElementById('statJobs').textContent = d.job_count;
+    document.getElementById('statJobsExtra').textContent = d.enabled_job_count + ' 个启用';
+    document.getElementById('statDocs').textContent = d.doc_count;
+    document.getElementById('statRuns').textContent = d.run_count_today + ' / ' + d.failed_today;
+    document.getElementById('statRunsExtra').textContent = '运行 / 失败';
+    const box = document.getElementById('lastRunBox');
+    if (d.last_run) {
+      const r = d.last_run;
+      box.innerHTML = '<div class="kv">运行 #' + r.id + ' · 状态：<span class="badge ' + runBadge(r.status) + '">' + runStatus(r.status) + '</span> · 开始：' + fmtTime(r.started_at) + ' · 新建 ' + r.created_count + ' / 更新 ' + r.updated_count + ' / 删除 ' + r.deleted_count + ' / 失败 ' + r.failed_count + '</div>';
+    } else {
+      box.textContent = '暂无运行记录';
+    }
+  } catch (e) { toast(e.message, 'err'); }
+}
+
+/* ---------- 同步源 ---------- */
+async function loadSources() {
+  try {
+    sources = await api('/sources');
+    const tb = document.getElementById('sourceTbody');
+    if (!sources.length) { tb.innerHTML = '<tr><td colspan="6" class="empty">暂无同步源，点击右上角新增</td></tr>'; return; }
+    let html = '';
+    sources.forEach(s => {
+      html += '<tr>';
+      html += '<td><b>' + esc(s.name) + '</b><div class="kv">' + esc(s.dify_dataset_id ? 'DifyID: ' + s.dify_dataset_id : '未绑定数据集') + '</div></td>';
+      html += '<td><div>' + esc(s.workspace_id) + '</div><div class="kv">' + esc(s.root_node_id) + '</div></td>';
+      html += '<td>' + esc(s.dify_dataset_name) + '</td>';
+      html += '<td><span class="badge ' + (s.delete_policy === 'sync' ? 'amber' : 'gray') + '">' + esc(s.delete_policy) + '</span></td>';
+      html += '<td><label class="switch"><input type="checkbox" ' + (s.enabled ? 'checked' : '') + ' onchange="toggleSource(' + s.id + ', this.checked)"><span class="slider"></span></label></td>';
+      html += '<td>';
+      html += '<button class="btn sm ghost" onclick="openSourceModal(' + s.id + ')">编辑</button> ';
+      html += '<button class="btn sm ghost" onclick="testSource(' + s.id + ')">测试连接</button> ';
+      html += '<button class="btn sm ghost" onclick="syncSource(' + s.id + ')">立即同步</button> ';
+      html += '<button class="btn sm danger" onclick="deleteSource(' + s.id + ')">删除</button>';
+      html += '</td></tr>';
+    });
+    tb.innerHTML = html;
+  } catch (e) { toast(e.message, 'err'); }
+}
+function openSourceModal(id) {
+  const s = id ? sources.find(x => x.id === id) : null;
+  let html = '<h3>' + (s ? '编辑同步源' : '新增同步源') + '</h3>';
+  html += '<form onsubmit="saveSource(event, ' + (id || 0) + ')"><div class="form-grid">';
+  html += '<div class="form-item"><label>名称</label><input id="sName" required value="' + esc(s ? s.name : '') + '" placeholder="如：品质流程IT部"></div>';
+  html += '<div class="form-item"><label>Dify 数据集名称</label><input id="sDataset" required value="' + esc(s ? s.dify_dataset_name : '') + '" placeholder="不存在会自动创建"></div>';
+  html += '<div class="form-item"><label>钉钉 workspaceId</label><input id="sWorkspace" required value="' + esc(s ? s.workspace_id : '') + '"></div>';
+  html += '<div class="form-item"><label>起始目录 nodeId（根节点）</label><input id="sRoot" required value="' + esc(s ? s.root_node_id : '') + '"></div>';
+  html += '<div class="form-item"><label>起始目录备注</label><input id="sStartDir" value="' + esc(s ? s.start_dir : '') + '" placeholder="展示用，可选"></div>';
+  html += '<div class="form-item"><label>删除策略</label><select id="sPolicy">';
+  html += '<option value="keep" ' + (s && s.delete_policy === 'keep' ? 'selected' : '') + '>keep - 保留</option>';
+  html += '<option value="sync" ' + (s && s.delete_policy === 'sync' ? 'selected' : '') + '>sync - 同步删除</option>';
+  html += '</select></div>';
+  html += '<div class="form-item full"><label><input type="checkbox" id="sEnabled" ' + (!s || s.enabled ? 'checked' : '') + ' style="width:auto"> 启用该同步源</label></div>';
+  html += '</div><div class="modal-foot"><button type="button" class="btn" onclick="closeModal()">取消</button><button type="submit" class="btn primary">保存</button></div></form>';
+  openModal(html);
+}
+async function saveSource(e, id) {
+  e.preventDefault();
+  const payload = {
+    name: document.getElementById('sName').value.trim(),
+    workspace_id: document.getElementById('sWorkspace').value.trim(),
+    root_node_id: document.getElementById('sRoot').value.trim(),
+    start_dir: document.getElementById('sStartDir').value.trim(),
+    dify_dataset_name: document.getElementById('sDataset').value.trim(),
+    delete_policy: document.getElementById('sPolicy').value,
+    enabled: document.getElementById('sEnabled').checked
+  };
+  try {
+    if (id) await api('/sources/' + id, { method:'PUT', body: JSON.stringify(payload) });
+    else await api('/sources', { method:'POST', body: JSON.stringify(payload) });
+    closeModal(); toast('保存成功'); loadSources(); loadDash();
+  } catch (err) { toast(err.message, 'err'); }
+}
+async function toggleSource(id, enabled) {
+  try { await api('/sources/' + id, { method:'PUT', body: JSON.stringify({enabled}) }); toast(enabled ? '已启用' : '已停用'); loadSources(); }
+  catch (e) { toast(e.message, 'err'); loadSources(); }
+}
+async function deleteSource(id) {
+  if (!confirm('确定删除该同步源？关联的定时任务与映射记录也会删除。')) return;
+  try { await api('/sources/' + id, { method:'DELETE' }); toast('已删除'); loadSources(); loadJobs(); loadDash(); }
+  catch (e) { toast(e.message, 'err'); }
+}
+async function testSource(id) {
+  openModal('<h3>连接测试中…</h3><div class="empty">请稍候</div>');
+  try {
+    const r = await api('/sources/' + id + '/test', { method:'POST' });
+    let html = '<h3>连接测试结果</h3>';
+    html += '<div class="kv">钉钉：' + connBadge(r.dingtalk) + '</div>';
+    html += '<div class="kv" style="margin-top:8px">Dify：' + connBadge(r.dify) + '</div>';
+    html += '<div class="kv" style="margin-top:8px">dws：' + (r.dws && r.dws.ok ? '✅ ' + esc(r.dws.version) : '❌ ' + esc(r.dws ? r.dws.version : '')) + '</div>';
+    html += '<pre class="pre" style="margin-top:12px">' + esc(JSON.stringify(r, null, 2)) + '</pre>';
+    html += '<div class="modal-foot"><button class="btn" onclick="closeModal()">关闭</button></div>';
+    openModal(html);
+  } catch (e) {
+    openModal('<h3>连接测试失败</h3><div class="kv">' + esc(e.message) + '</div><div class="modal-foot"><button class="btn" onclick="closeModal()">关闭</button></div>');
+  }
+}
+function connBadge(o) {
+  if (!o) return '<span class="badge gray">未知</span>';
+  return o.ok ? '<span class="badge green">✅ 正常</span>' : '<span class="badge red">❌ 失败</span> ' + esc(o.error || '');
+}
+async function syncSource(id) {
+  try { await api('/sources/' + id + '/sync', { method:'POST' }); toast('同步已提交，请到运行监控查看'); }
+  catch (e) { toast(e.message, 'err'); }
+}
+
+/* ---------- 定时任务 ---------- */
+async function loadJobs() {
+  try {
+    jobs = await api('/jobs');
+    const tb = document.getElementById('jobTbody');
+    if (!jobs.length) { tb.innerHTML = '<tr><td colspan="7" class="empty">暂无定时任务，点击右上角新增</td></tr>'; return; }
+    let html = '';
+    jobs.forEach(j => {
+      html += '<tr>';
+      html += '<td><b>' + esc(j.name) + '</b><div class="kv">' + esc(j.description) + '</div></td>';
+      html += '<td>' + esc(sourceName(j.source_id)) + '</td>';
+      html += '<td><code>' + esc(j.cron) + '</code></td>';
+      html += '<td>' + fmtTime(j.last_run_at) + '</td>';
+      html += '<td>' + fmtTime(j.next_run_at) + '</td>';
+      html += '<td><label class="switch"><input type="checkbox" ' + (j.enabled ? 'checked' : '') + ' onchange="toggleJob(' + j.id + ')"><span class="slider"></span></label></td>';
+      html += '<td>';
+      html += '<button class="btn sm ghost" onclick="openJobModal(' + j.id + ')">编辑</button> ';
+      html += '<button class="btn sm ghost" onclick="runJob(' + j.id + ')">立即执行</button> ';
+      html += '<button class="btn sm danger" onclick="deleteJob(' + j.id + ')">删除</button>';
+      html += '</td></tr>';
+    });
+    tb.innerHTML = html;
+  } catch (e) { toast(e.message, 'err'); }
+}
+function openJobModal(id) {
+  const j = id ? jobs.find(x => x.id === id) : null;
+  let srcOptions = '<option value="">请选择同步源</option>';
+  sources.forEach(s => { srcOptions += '<option value="' + s.id + '" ' + (j && j.source_id === s.id ? 'selected' : '') + '>' + esc(s.name) + '</option>'; });
+  let html = '<h3>' + (j ? '编辑定时任务' : '新增定时任务') + '</h3>';
+  html += '<form onsubmit="saveJob(event, ' + (id || 0) + ')"><div class="form-grid">';
+  html += '<div class="form-item"><label>任务名称</label><input id="jName" required value="' + esc(j ? j.name : '') + '"></div>';
+  html += '<div class="form-item"><label>同步源</label><select id="jSource" required>' + srcOptions + '</select></div>';
+  html += '<div class="form-item"><label>cron 表达式</label><input id="jCron" required value="' + esc(j ? j.cron : '0 2 * * *') + '" placeholder="分 时 日 月 周"></div>';
+  html += '<div class="form-item"><label>预设</label><select onchange="presetCron(this.value)">';
+  html += '<option value="">自定义</option><option value="0 2 * * *">每天 02:00</option><option value="0 8 * * *">每天 08:00</option>';
+  html += '<option value="0 */6 * * *">每 6 小时</option><option value="0 9 * * 1">每周一 09:00</option></select></div>';
+  html += '<div class="form-item full"><label>说明</label><input id="jDesc" value="' + esc(j ? j.description : '') + '" placeholder="可选"></div>';
+  html += '<div class="form-item full"><label><input type="checkbox" id="jEnabled" ' + (!j || j.enabled ? 'checked' : '') + ' style="width:auto"> 启用该任务</label></div>';
+  html += '</div><div class="modal-foot"><button type="button" class="btn" onclick="closeModal()">取消</button><button type="submit" class="btn primary">保存</button></div></form>';
+  openModal(html);
+}
+function presetCron(v) { if (v) document.getElementById('jCron').value = v; }
+async function saveJob(e, id) {
+  e.preventDefault();
+  const payload = {
+    name: document.getElementById('jName').value.trim(),
+    source_id: parseInt(document.getElementById('jSource').value, 10),
+    cron: document.getElementById('jCron').value.trim(),
+    description: document.getElementById('jDesc').value.trim(),
+    enabled: document.getElementById('jEnabled').checked
+  };
+  if (!payload.source_id) { toast('请选择同步源', 'err'); return; }
+  try {
+    if (id) await api('/jobs/' + id, { method:'PUT', body: JSON.stringify(payload) });
+    else await api('/jobs', { method:'POST', body: JSON.stringify(payload) });
+    closeModal(); toast('保存成功'); loadJobs(); loadDash();
+  } catch (err) { toast(err.message, 'err'); }
+}
+async function toggleJob(id) {
+  try { await api('/jobs/' + id + '/toggle', { method:'POST' }); toast('状态已切换'); loadJobs(); }
+  catch (e) { toast(e.message, 'err'); loadJobs(); }
+}
+async function runJob(id) {
+  try { await api('/jobs/' + id + '/run', { method:'POST' }); toast('任务已提交'); }
+  catch (e) { toast(e.message, 'err'); }
+}
+async function deleteJob(id) {
+  if (!confirm('确定删除该定时任务？')) return;
+  try { await api('/jobs/' + id, { method:'DELETE' }); toast('已删除'); loadJobs(); loadDash(); }
+  catch (e) { toast(e.message, 'err'); }
+}
+
+/* ---------- 运行监控 ---------- */
+function runStatus(s) { return {running:'运行中', success:'成功', partial:'部分成功', failed:'失败'}[s] || s; }
+function runBadge(s) { return {running:'blue', success:'green', partial:'amber', failed:'red'}[s] || 'gray'; }
+async function loadRuns() {
+  try {
+    const runs = await api('/runs?limit=100');
+    const tb = document.getElementById('runTbody');
+    if (!runs.length) { tb.innerHTML = '<tr><td colspan="9" class="empty">暂无运行记录</td></tr>'; return; }
+    let html = '';
+    runs.forEach(r => {
+      html += '<tr>';
+      html += '<td>#' + r.id + '</td>';
+      html += '<td>' + esc(sourceName(r.source_id)) + '</td>';
+      html += '<td>' + (r.trigger === 'schedule' ? '定时' : '手动') + '</td>';
+      html += '<td><span class="badge ' + runBadge(r.status) + '">' + runStatus(r.status) + '</span></td>';
+      html += '<td>' + r.total + '</td>';
+      html += '<td>' + r.created_count + ' / ' + r.updated_count + ' / ' + r.deleted_count + '</td>';
+      html += '<td><span class="badge ' + (r.failed_count ? 'red' : 'gray') + '">' + r.failed_count + '</span></td>';
+      html += '<td>' + fmtTime(r.started_at) + '</td>';
+      html += '<td><button class="btn sm ghost" onclick="openRunDetail(' + r.id + ')">详情</button></td>';
+      html += '</tr>';
+    });
+    tb.innerHTML = html;
+  } catch (e) { toast(e.message, 'err'); }
+}
+async function openRunDetail(id) {
+  openModal('<h3>加载中…</h3>');
+  try {
+    const d = await api('/runs/' + id);
+    const r = d.run;
+    let fails = '';
+    (d.failures || []).forEach(f => { fails += '<div class="kv" style="margin:6px 0">❌ ' + esc(f.name || f.node_id) + '：' + esc(f.error) + '</div>'; });
+    if (!fails) fails = '<div class="kv">无失败</div>';
+    let logs = '';
+    (d.logs || []).slice(-50).forEach(l => { logs += '<div class="kv">[' + esc(l.level) + '] ' + esc(l.message) + ' · ' + fmtTime(l.created_at) + '</div>'; });
+    let html = '<h3>运行详情 #' + r.id + '</h3>';
+    html += '<div class="kv">状态：<span class="badge ' + runBadge(r.status) + '">' + runStatus(r.status) + '</span> · ' + esc(r.message || '') + '</div>';
+    html += '<div class="kv" style="margin-top:6px">总数 ' + r.total + ' · 新建 ' + r.created_count + ' · 更新 ' + r.updated_count + ' · 删除 ' + r.deleted_count + ' · 失败 ' + r.failed_count + '</div>';
+    html += '<div class="kv" style="margin-top:6px">开始 ' + fmtTime(r.started_at) + ' · 结束 ' + fmtTime(r.finished_at) + '</div>';
+    html += '<h3 style="margin-top:18px">失败记录</h3>' + fails;
+    html += '<h3 style="margin-top:18px">日志（最近 50 条）</h3><div style="max-height:260px;overflow:auto">' + (logs || '<div class="kv">无日志</div>') + '</div>';
+    html += '<div class="modal-foot"><button class="btn" onclick="closeModal()">关闭</button></div>';
+    openModal(html);
+  } catch (e) {
+    openModal('<h3>加载失败</h3><div class="kv">' + esc(e.message) + '</div><div class="modal-foot"><button class="btn" onclick="closeModal()">关闭</button></div>');
+  }
+}
+
+/* ---------- 运行日志 ---------- */
+let logTab = 'logs';
+function switchLogTab(tab) {
+  logTab = tab;
+  document.getElementById('tabLogsBtn').classList.toggle('active', tab === 'logs');
+  document.getElementById('tabFailsBtn').classList.toggle('active', tab === 'fails');
+  document.getElementById('logsPanel').style.display = tab === 'logs' ? '' : 'none';
+  document.getElementById('failsPanel').style.display = tab === 'fails' ? '' : 'none';
+  loadLogsPage();
+}
+async function loadLogsPage() {
+  try {
+    if (logTab === 'logs') {
+      const logs = await api('/logs?limit=200');
+      const tb = document.getElementById('logTbody');
+      let html = '';
+      logs.forEach(l => {
+        html += '<tr><td>' + (l.run_id ?? '—') + '</td><td><span class="badge ' + (l.level === 'ERROR' ? 'red' : (l.level === 'WARNING' ? 'amber' : 'blue')) + '">' + esc(l.level) + '</span></td><td>' + esc(l.message) + '</td><td>' + fmtTime(l.created_at) + '</td></tr>';
+      });
+      tb.innerHTML = html || '<tr><td colspan="4" class="empty">暂无日志</td></tr>';
+    } else {
+      const fails = await api('/failures?limit=200');
+      const tb = document.getElementById('failTbody');
+      let html = '';
+      fails.forEach(f => {
+        html += '<tr><td>' + f.run_id + '</td><td>' + esc(f.name || f.node_id || '—') + '</td><td>' + esc(f.error) + '</td><td>' + fmtTime(f.created_at) + '</td></tr>';
+      });
+      tb.innerHTML = html || '<tr><td colspan="4" class="empty">暂无失败记录</td></tr>';
+    }
+  } catch (e) { toast(e.message, 'err'); }
+}
+
+/* ---------- 设置 ---------- */
+async function loadSettings() {
+  try {
+    const s = await api('/settings');
+    document.getElementById('setWebhook').value = s.dingtalk_webhook || '';
+    document.getElementById('setThreshold').value = s.alert_failure_threshold;
+    document.getElementById('setDeletePolicy').value = s.default_delete_policy;
+    document.getElementById('setExport').value = s.export_format;
+    document.getElementById('setMaxDepth').value = s.max_depth;
+    document.getElementById('setOperator').value = s.dingtalk_operator_id || '';
+    document.getElementById('setWaitIndex').checked = !!s.dify_wait_indexing;
+  } catch (e) { toast(e.message, 'err'); }
+}
+async function saveSettings(e) {
+  e.preventDefault();
+  const payload = {
+    dingtalk_webhook: document.getElementById('setWebhook').value.trim(),
+    alert_failure_threshold: parseInt(document.getElementById('setThreshold').value, 10) || 1,
+    default_delete_policy: document.getElementById('setDeletePolicy').value,
+    export_format: document.getElementById('setExport').value,
+    max_depth: parseInt(document.getElementById('setMaxDepth').value, 10) || 10,
+    dingtalk_operator_id: document.getElementById('setOperator').value.trim(),
+    dify_wait_indexing: document.getElementById('setWaitIndex').checked
+  };
+  try { await api('/settings', { method:'PUT', body: JSON.stringify(payload) }); toast('设置已保存'); loadSettings(); }
+  catch (err) { toast(err.message, 'err'); }
+}
+
+/* ---------- 初始化 ---------- */
+document.getElementById('loginPass').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
+if (token) {
+  api('/dashboard').then(() => {
+    document.getElementById('loginPage').style.display = 'none';
+    document.getElementById('app').style.display = 'block';
+    refreshAll();
+  }).catch(() => {});
+} else {
+  document.getElementById('loginPage').style.display = 'flex';
+}
+</script>
+</body>
+</html>

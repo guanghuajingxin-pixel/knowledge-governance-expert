@@ -33,6 +33,9 @@ output/
 services/deerflow/data/
 services/deerflow/backend/data/
 
+# kb-api 运行时数据（同步下载等）
+services/kb-api/data/
+
 # Dify：仅跟踪 docker 部署配置与补丁，忽略上游源码与 volumes 数据
 dify/*
 !dify/docker

@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime, date
-from sqlalchemy import String, Text, Integer, BigInteger, Boolean, DateTime, Date, JSON, ForeignKey, func
+from sqlalchemy import String, Text, Integer, BigInteger, Boolean, DateTime, Date, JSON, ForeignKey, Float, func, UniqueConstraint, text as sa_text
 from sqlalchemy.dialects.postgresql import UUID, ARRAY
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -57,6 +57,7 @@ class Directory(Base):
     kb_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("knowledge_bases.id", ondelete="CASCADE"))
     parent_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("directories.id", ondelete="CASCADE"))
     name: Mapped[str] = mapped_column(String(200))
+    knowledge_owner: Mapped[str] = mapped_column(String(200), default="", server_default="")
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
@@ -225,3 +226,204 @@ class QaFeedback(Base):
     handler_note: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), index=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+# ===== 知识源登记（企业知识库注册表）=====
+# 所有知识库（钉钉知识库 / Dify 知识库 / 业务系统等）统一在此登记。
+# 系统内所有「选择知识库」的地方均从此表取数，同步源等只能引用已登记的知识库。
+# 通过知识库 ID 可进一步获取其下的目录与文档。
+
+class KnowledgeSource(Base):
+    """知识源登记：企业知识库注册表。
+
+    source_type: dingtalk_workspace（钉钉知识库）| dify_dataset（Dify 知识库）|
+                 business_system（业务系统）
+    external_id: 外部系统中的知识库标识（钉钉 workspace_id / Dify dataset_id / 业务系统标识）
+    config: 类型特定配置（JSON），如钉钉 root_node_id、业务系统 base_url 等
+    """
+    __tablename__ = "knowledge_sources"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    source_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    external_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    description: Mapped[str] = mapped_column(Text, server_default="", nullable=False)
+    config: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, server_default=sa_text('true'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class DingtalkFolderStat(Base):
+    """钉钉知识库文件夹统计快照（知识缺口页数据源）。
+
+    由「刷新」按钮触发后台全量遍历写入；查询接口只读快照，不实时调用钉钉。
+    一个文件夹一行，document_count 为该文件夹直属文档数（在线文档+本地上传文件）。
+    """
+    __tablename__ = "dingtalk_folder_stats"
+    __table_args__ = (UniqueConstraint("external_id", "node_id", name="uq_dt_folder_node"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    external_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)  # 知识源 external_id
+    node_id: Mapped[str] = mapped_column(String(128), nullable=False)  # 钉钉文件夹节点 ID
+    path: Mapped[str] = mapped_column(String(1000), server_default="", nullable=False)  # 不带前导斜杠；根为空串
+    document_count: Mapped[int] = mapped_column(Integer, server_default="0", nullable=False)
+    owner: Mapped[str] = mapped_column(String(200), server_default="", nullable=False)  # 手动维护/批量导入，刷新快照时保留
+    fetched_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+
+# ===== 钉钉知识库 → Dify 定时增量同步（合并自 DingDingKonwledgePipeline）=====
+# 每个同步源自带 cron 字段，不保留独立 jobs 表。表结构由 alembic 0011 创建。
+
+class SyncSource(Base):
+    """同步源：一个钉钉知识库目录 → 一个 Dify 数据集，含 cron 定时表达式。"""
+    __tablename__ = "sync_sources"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    workspace_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    root_node_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    start_dir: Mapped[str] = mapped_column(String(500), server_default="", nullable=False)
+    dify_dataset_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    dify_dataset_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    delete_policy: Mapped[str] = mapped_column(String(10), server_default="keep", nullable=False)  # keep | sync
+    cron: Mapped[str] = mapped_column(String(120), server_default="0 2 * * *", nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, server_default=sa_text('true'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class SyncRun(Base):
+    """单次同步运行记录。"""
+    __tablename__ = "sync_runs"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    source_id: Mapped[int] = mapped_column(ForeignKey("sync_sources.id", ondelete="CASCADE"), nullable=False)
+    trigger: Mapped[str] = mapped_column(String(20), server_default="manual", nullable=False)  # manual | schedule
+    status: Mapped[str] = mapped_column(String(20), server_default="running", nullable=False)  # running | success | partial | failed
+    started_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    total: Mapped[int] = mapped_column(Integer, server_default="0", nullable=False)
+    created_count: Mapped[int] = mapped_column(Integer, server_default="0", nullable=False)
+    updated_count: Mapped[int] = mapped_column(Integer, server_default="0", nullable=False)
+    deleted_count: Mapped[int] = mapped_column(Integer, server_default="0", nullable=False)
+    failed_count: Mapped[int] = mapped_column(Integer, server_default="0", nullable=False)
+    message: Mapped[str] = mapped_column(Text, server_default="", nullable=False)
+
+
+class SyncDocumentMapping(Base):
+    """钉钉节点 ↔ Dify 文档映射，用于增量同步。"""
+    __tablename__ = "sync_document_mappings"
+    __table_args__ = (UniqueConstraint("source_id", "node_id", name="uq_sync_source_node"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    source_id: Mapped[int] = mapped_column(ForeignKey("sync_sources.id", ondelete="CASCADE"), nullable=False)
+    node_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    parent_node_id: Mapped[str] = mapped_column(String(128), server_default="", nullable=False)
+    name: Mapped[str] = mapped_column(String(500), nullable=False)
+    relative_path: Mapped[str] = mapped_column(String(1000), server_default="", nullable=False)
+    category: Mapped[str] = mapped_column(String(20), nullable=False)  # DOCUMENT | ALIDOC
+    meta_hash: Mapped[str] = mapped_column(String(128), server_default="", nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(128), server_default="", nullable=False)
+    local_path: Mapped[str] = mapped_column(String(1000), server_default="", nullable=False)
+    dify_document_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    dify_batch: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # 预演页可单独停用某个文档；该状态必须跨后续手动/定时同步保留。
+    enabled: Mapped[bool] = mapped_column(Boolean, server_default=sa_text('true'), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), server_default="pending", nullable=False)  # pending | synced | error
+    error: Mapped[str] = mapped_column(Text, server_default="", nullable=False)
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class SyncFailure(Base):
+    """同步失败项（待重试清单）。"""
+    __tablename__ = "sync_failures"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("sync_runs.id", ondelete="CASCADE"), nullable=False)
+    source_id: Mapped[int] = mapped_column(ForeignKey("sync_sources.id", ondelete="CASCADE"), nullable=False)
+    node_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    name: Mapped[str] = mapped_column(String(500), server_default="", nullable=False)
+    error: Mapped[str] = mapped_column(Text, server_default="", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+
+class CollectionTransfer(Base):
+    """Durable per-document results for manual uploads and selected DingTalk files."""
+    __tablename__ = "collection_transfers"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    kind: Mapped[str] = mapped_column(String(30), nullable=False)
+    name: Mapped[str] = mapped_column(String(500), nullable=False)
+    dataset_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="running")
+    message: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    document_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class SyncLog(Base):
+    """同步运行日志。"""
+    __tablename__ = "sync_logs"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[int | None] = mapped_column(ForeignKey("sync_runs.id", ondelete="CASCADE"), nullable=True)
+    level: Mapped[str] = mapped_column(String(10), server_default="INFO", nullable=False)  # INFO | ERROR | WARNING
+    message: Mapped[str] = mapped_column(Text, server_default="", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+
+# ===== 知识加工：打标/摘要/知识关系 =====
+
+class ProcessedDocument(Base):
+    """文档加工记录：对已进入 Dify 的文档进行 AI 打标与摘要生成。"""
+    __tablename__ = "processed_documents"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    dataset_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    document_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(500), nullable=False)
+    tags: Mapped[list] = mapped_column(ARRAY(String(64)), default=list)
+    summary: Mapped[str] = mapped_column(Text, default="")
+    keywords: Mapped[list] = mapped_column(ARRAY(String(64)), default=list)
+    doc_type: Mapped[str] = mapped_column(String(32), default="")
+    process_status: Mapped[str] = mapped_column(String(16), default="pending")  # pending|processing|completed|failed
+    error_message: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class KnowledgeRelation(Base):
+    """知识关系：文档间的语义关联（引用/相似/因果/包含/并列/前置知识等）。"""
+    __tablename__ = "knowledge_relations"
+    __table_args__ = (UniqueConstraint("source_doc_id", "target_doc_id", "relation_type",
+                                       name="uq_knowledge_relation_triple"),)
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    source_doc_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    target_doc_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    relation_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    weight: Mapped[float] = mapped_column(Float, default=0.0)
+    description: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class KnowledgeTag(Base):
+    """标签库：统一维护系统中使用的标签。"""
+    __tablename__ = "knowledge_tags"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    color: Mapped[str] = mapped_column(String(16), default="#409EFF")
+    count: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class DifyDingtalkDocMapping(Base):
+    """Dify 文档 ↔ 钉钉知识库文档映射。
+
+    钉钉文档同步到 Dify 后记录此映射，检索召回 Dify 分段时据此回填
+    钉钉原始文档链接（alidocs），点击引用来源可跳转钉钉知识库预览。
+    """
+    __tablename__ = "dify_dingtalk_doc_mappings"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    dify_dataset_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    dify_document_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    dingtalk_node_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    dingtalk_url: Mapped[str] = mapped_column(String(500), nullable=False, server_default="")
+    name: Mapped[str] = mapped_column(String(500), nullable=False, server_default="")
+    # file=直接上传原文件；text=大文件经 MinerU 解析后 create-by-text
+    method: Mapped[str] = mapped_column(String(10), nullable=False, server_default="file")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)

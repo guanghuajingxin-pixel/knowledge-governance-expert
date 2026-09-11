@@ -2,9 +2,11 @@ import asyncio
 import json
 import time
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from typing import Literal
+from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from kb_common.database import get_session, SessionLocal
@@ -77,210 +79,163 @@ async def _dispatch(body: SearchIn, rerank: bool) -> list[dict]:
     return await searcher.hybrid(body.kb_ids, body.query, body.top_k, body.filters, rerank=rerank)
 
 
+class HistoryTurn(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(max_length=8000)
+
+
 class ChatIn(BaseModel):
-    query: str
-    kb_ids: list[str] = []                 # 本地 ES 知识库 ID（兼容旧逻辑）
-    dify_dataset_ids: list[str] | None = None  # Dify 数据集 ID；为空时走默认配置
-    top_k: int = 5
-    last_query: str = ""                   # 上一轮改写后的问题（会话上下文）
-    last_answer: str = ""                  # 上一轮回答（会话上下文）
-    history: list[dict] = []               # 多轮记忆 [{"role": "user"/"assistant", "content": ...}]
-    model: str = ""                        # 前端选定的模型（覆盖系统配置默认）
-    llm_profile_id: str = ""               # 模型所属供应商配置 ID（多供应商模型管理）
-    deep_think: bool = False               # 深度思考开关：增大召回 + 更详尽推理
-    session_id: str = ""                   # 前端会话 ID：映射 DeerFlow thread（重新对话时刷新）
-    # 限时探索续跑动作：""=新问题；"continue"=用户选择继续探索；"stop"=先基于已检索内容回答
-    action: str = ""
+    query: str = Field(min_length=1, max_length=2000)
+    kb_ids: list[UUID] = Field(default_factory=list, max_length=12)
+    dify_dataset_ids: list[UUID] | None = Field(default=None, max_length=12)
+    top_k: int | None = Field(default=None, ge=1, le=20)
+    last_query: str = Field(default="", max_length=2000)
+    last_answer: str = Field(default="", max_length=8000)
+    history: list[HistoryTurn] = Field(default_factory=list, max_length=16)
+    model: str = Field(default="", max_length=200)
+    llm_profile_id: str = Field(default="", max_length=100)
+    deep_think: bool = False
+    session_id: str = Field(default="", max_length=100)
+    action: Literal["", "continue", "stop"] = ""
+
+
+async def _prepare_qa(body: ChatIn, user, session):
+    from kb_common.config import get_settings
+    from kb_common.models import Setting, KnowledgeBase, ChatMessage
+    from app.services.agent.config import load_agent_config
+    from app.services.llm_resolver import resolve_llm_config
+    from app.services.agent.enterprise import EnterpriseQA
+    from app.services.agent.enterprise_retrieval import EnterpriseRetriever
+
+    if not body.query.strip():
+        raise HTTPException(422, "问题不能为空")
+    async def effective(key):
+        row = (await session.execute(select(Setting).where(Setting.key == key))).scalar_one_or_none()
+        return (row.value if row else None) or getattr(get_settings(), key, "")
+
+    cfg = await load_agent_config(session)
+    llm = await resolve_llm_config(session, body.llm_profile_id, body.model)
+    defaults = [d.strip() for d in (await effective("dify_dataset_ids")).split(",") if d.strip()]
+    datasets = defaults if body.dify_dataset_ids is None else [str(d) for d in body.dify_dataset_ids]
+    datasets = list(dict.fromkeys(datasets))
+    if len(datasets) > 12:
+        raise HTTPException(422, "单次最多检索12个数据集，请缩小范围")
+    if user.role not in {"admin", "super_admin"} and set(datasets) - set(defaults):
+        raise HTTPException(403, "无权检索未向企业问答开放的数据集")
+    local_ids = [str(k) for k in body.kb_ids]
+    if local_ids:
+        query = select(KnowledgeBase).where(KnowledgeBase.id.in_(body.kb_ids))
+        if user.role not in {"admin", "super_admin"}:
+            query = query.where(KnowledgeBase.owner_id == user.id)
+        rows = (await session.execute(query)).scalars().all()
+        if {str(r.id) for r in rows} != set(local_ids):
+            raise HTTPException(403, "无权检索指定知识库")
+    history = [turn.model_dump() for turn in body.history]
+    if body.session_id:
+        from app.routes.chat_session_route import _get_owned
+        owned = await _get_owned(body.session_id, user, session)
+        rows = (await session.execute(select(ChatMessage).where(ChatMessage.session_id == owned.id)
+                                     .order_by(ChatMessage.created_at.desc()).limit(8))).scalars().all()
+        history = [{"role": r.role, "content": r.content[:8000]} for r in reversed(rows)]
+    elif not history and body.last_query:
+        history = [{"role": "user", "content": body.last_query}]
+    if not cfg.get("long_memory_enabled", True):
+        history = []
+    if not (cfg.get("tools_enabled") or {}).get("knowledge_search", True):
+        datasets, local_ids = [], []
+    dify = {"base_url": await effective("dify_base_url"), "api_key": await effective("dify_api_key")}
+    top_k = body.top_k if body.top_k is not None else int(cfg.get("top_k", 8))
+    retriever = EnterpriseRetriever(dify, datasets, local_ids, max(top_k, 12) if body.deep_think else top_k)
+    return EnterpriseQA(query=body.query, history=history, llm_config=llm, agent_config=cfg,
+                        retriever=retriever, user_id=str(user.id), role=user.role)
+
+
+# Cancellation is scoped by authenticated user and session. Disconnect also cancels the generator.
+_ACTIVE_QA: dict[tuple[str, str], asyncio.Task] = {}
+
+
+async def _qa_events(qa):
+    if not qa.llm_config.get("api_key"):
+        yield {"type": "config_error", "code": "llm_not_configured", "message": "请先在系统配置中配置问答模型。"}
+        return
+    try:
+        async with asyncio.timeout(300):
+            async for event in qa.stream():
+                yield event
+    except asyncio.TimeoutError:
+        yield {"type": "final", "result": qa.result("检索或核验超时，尚未形成可靠答案，请稍后重试或缩小问题范围。", status="insufficient")}
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception("Enterprise QA failed")
+        yield {"type": "config_error", "code": "agent_failed", "message": "问答服务暂不可用，请稍后重试。"}
 
 
 @router.post("/chat")
 async def chat(body: ChatIn, u=Depends(get_principal), s: AsyncSession = Depends(get_session)):
-    # 优先使用 Dify Agent（指定了数据集或配置了默认数据集）
-    from kb_common.config import get_settings
-    from kb_common.models import Setting
-    from sqlalchemy import select
-
-    async def _effective(key: str) -> str:
-        row = (await s.execute(select(Setting).where(Setting.key == key))).scalar_one_or_none()
-        return (row.value if row else None) or getattr(get_settings(), key)
-
-    dify_api_key = await _effective("dify_api_key")
-    if body.dify_dataset_ids is not None or dify_api_key:
-        from app.services.agent import run_agent
-        from app.services.llm_resolver import resolve_llm_config
-        llm_config = await resolve_llm_config(s, body.llm_profile_id, body.model)
-        dify_config = {
-            "base_url": await _effective("dify_base_url"),
-            "api_key": dify_api_key,
-        }
-        from app.services.agent.config import load_agent_config
-        agent_cfg = await load_agent_config(s)
-        result = await run_agent(
-            body.query,
-            dataset_ids=body.dify_dataset_ids,
-            last_query=body.last_query,
-            last_answer=body.last_answer,
-            history=body.history,
-            top_k=body.top_k,
-            deep_think=body.deep_think,
-            llm_config=llm_config,
-            dify_config=dify_config,
-            agent_config=agent_cfg,
-        )
-        # 埋点
-        cites = result.get("citations") or []
-        titles = [c.get("document_title") or c.get("title") or "" for c in cites if isinstance(c, dict)]
-        _log_usage(getattr(u, "id", None), "chat", body.query, len(cites), [], titles)
-        return result
-
-    # 回退：本地 ES 知识库问答
-    from app.services.chat import answer
-    result = await answer(body.query, body.kb_ids, body.top_k, s)
-    cites = result.get("citations") or []
-    titles = [c.get("document_title") or c.get("title") or "" for c in cites if isinstance(c, dict)]
-    _log_usage(s, getattr(u, "id", None), "chat", body.query, len(cites), [], titles)
-    return result
+    qa = await _prepare_qa(body, u, s)
+    async for event in _qa_events(qa):
+        if event["type"] == "final":
+            result = event["result"]
+            cites = result.get("citations") or []
+            _log_usage(u.id, "chat", body.query, len(cites),
+                       [c.get("document_id", "") for c in cites], [c.get("document_title", "") for c in cites])
+            return result
+        if event["type"] == "config_error":
+            return {"answer": event["message"], "citations": [], "config_error": event["code"]}
 
 
 @router.post("/chat/stream")
 async def chat_stream(body: ChatIn, u=Depends(get_principal), s: AsyncSession = Depends(get_session)):
-    """智能问答流式端点（SSE）：逐节点推送 Agent 步骤进度，最终推送完整结果。
-
-    事件格式（每行 `data: {json}\\n\\n`）：
-      {"type":"step","node":"classify","title":"🔍 问题分类","detail":"正在分析问题类型…","data":{...}}
-      {"type":"final","result":{"answer":...,"citations":[...],...}}
-      {"type":"config_error","code":"llm_not_configured","message":"..."}
-    """
-    from kb_common.config import get_settings
-    from kb_common.models import Setting
-    from sqlalchemy import select
-
-    async def _effective(key: str) -> str:
-        row = (await s.execute(select(Setting).where(Setting.key == key))).scalar_one_or_none()
-        return (row.value if row else None) or getattr(get_settings(), key)
-
-    dify_api_key = await _effective("dify_api_key")
-    has_dify = body.dify_dataset_ids is not None or dify_api_key
-
-    if not has_dify:
-        # 无 Dify 时不走流式 Agent，直接返回配置引导
-        async def _no_dify():
-            yield _sse({"type": "config_error", "code": "dify_not_configured",
-                        "message": "尚未配置 Dify 知识库，请前往「系统配置」配置。"})
-        return StreamingResponse(_no_dify(), media_type="text/event-stream")
-
-    from app.services.agent import run_agent_stream
-    from app.services.llm_resolver import resolve_llm_config
-    llm_config = await resolve_llm_config(s, body.llm_profile_id, body.model)
-    dify_config = {
-        "base_url": await _effective("dify_base_url"),
-        "api_key": dify_api_key,
-    }
-
-    from app.services.agent.config import load_agent_config
-    agent_cfg = await load_agent_config(s)
-
-    # DeerFlow 2.0 thread：同一会话（session_id）共享长期记忆与上下文
-    import uuid as _uuid
-    uid = getattr(u, "id", None) or "anon"
-    sid = body.session_id.strip() or _uuid.uuid4().hex
-    thread_id = f"kge-u{uid}-{sid}"
-
-    async def _gen():
+    qa = await _prepare_qa(body, u, s)
+    key = (str(u.id), body.session_id)
+    async def generate():
+        task = asyncio.current_task()
+        if body.session_id:
+            previous = _ACTIVE_QA.get(key)
+            if previous and previous is not task:
+                previous.cancel()
+            _ACTIVE_QA[key] = task
+        queue = asyncio.Queue()
+        async def produce():
+            try:
+                async for event in _qa_events(qa):
+                    await queue.put(event)
+            finally:
+                await queue.put(None)
+        worker = asyncio.create_task(produce())
         try:
-            # 1) 优先 DeerFlow 2.0 sidecar（工具调用循环 + 子智能体 + 长期记忆）
-            try:
-                from app.services.agent.deerflow_runner import DeerflowUnavailable, is_deerflow_alive, run_deerflow_stream
-
-                if await is_deerflow_alive():
-                    # 工具开关：tools_enabled 中为 False 的工具不下发给智能体
-                    tools_enabled = agent_cfg.get("tools_enabled") or {}
-                    disabled_tools = [k for k, on in tools_enabled.items() if not on]
-                    async for evt in run_deerflow_stream(
-                        body.query,
-                        thread_id=thread_id,
-                        dataset_ids=body.dify_dataset_ids,
-                        top_k=max(int(body.top_k or 5), int(agent_cfg.get("top_k") or 8)),
-                        deep_think=body.deep_think,
-                        plan_mode=bool(agent_cfg.get("planning_enabled", True)),
-                        subagent_enabled=bool(agent_cfg.get("subagent_enabled", False)),
-                        disabled_tools=disabled_tools,
-                        llm_config=llm_config,
-                        agent_config=agent_cfg,
-                        action=body.action,
-                    ):
-                        yield _sse(evt)
-                        if evt.get("type") == "final":
-                            cites = (evt.get("result") or {}).get("citations") or []
-                            titles = [c.get("document_title") or c.get("title") or ""
-                                      for c in cites if isinstance(c, dict)]
-                            _log_usage(uid, "chat", body.query, len(cites), [], titles)
-                    return
-            except DeerflowUnavailable:
-                pass  # sidecar 未就绪，回退内置工作流
-            except Exception as e:
-                import logging
-                logging.getLogger(__name__).warning("deerflow stream error, fallback: %s", e)
-
-            # 2) 回退：内置 LangGraph 工作流
-            try:
-                async for evt in run_agent_stream(
-                    body.query,
-                    dataset_ids=body.dify_dataset_ids,
-                    last_query=body.last_query,
-                    last_answer=body.last_answer,
-                    history=body.history,
-                    top_k=body.top_k,
-                    deep_think=body.deep_think,
-                    llm_config=llm_config,
-                    dify_config=dify_config,
-                    agent_config=agent_cfg,
-                ):
-                    yield _sse(evt)
-                    # 最终结果埋点
-                    if evt.get("type") == "final":
-                        cites = (evt.get("result") or {}).get("citations") or []
-                        titles = [c.get("document_title") or c.get("title") or ""
-                                  for c in cites if isinstance(c, dict)]
-                        _log_usage(uid, "chat", body.query,
-                                    len(cites), [], titles)
-            except Exception as e:
-                yield _sse({"type": "config_error", "code": "agent_failed",
-                            "message": f"🤖 智能问答执行失败（{e.__class__.__name__}）。"})
+            while True:
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=15)
+                except asyncio.TimeoutError:
+                    yield ": keep-alive\n\n"
+                    continue
+                if event is None:
+                    break
+                if event["type"] == "final":
+                    cites = event["result"].get("citations") or []
+                    _log_usage(u.id, "chat", body.query, len(cites),
+                               [c.get("document_id", "") for c in cites], [c.get("document_title", "") for c in cites])
+                yield _sse(event)
         finally:
-            # 用户点停止/关闭页面/切换会话导致客户端断连时，通知 sidecar 中断
-            # agent 执行（未开始的模型调用不再发起，停止空转耗 token）；
-            # 正常结束时该调用为 no-op（thread 状态已清理）。
-            try:
-                from app.services.agent.deerflow_runner import cancel_deerflow_stream
-                await cancel_deerflow_stream(thread_id)
-            except Exception:
-                pass
-
-    return StreamingResponse(_gen(), media_type="text/event-stream")
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
+            if _ACTIVE_QA.get(key) is task:
+                _ACTIVE_QA.pop(key, None)
+    return StreamingResponse(generate(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 class ChatCancelIn(BaseModel):
-    session_id: str = ""
+    session_id: str = Field(default="", max_length=100)
 
 
 @router.post("/chat/cancel")
 async def chat_cancel(body: ChatCancelIn, u=Depends(get_principal)):
-    """中断进行中的流式回答（用户点停止按钮）：通知 sidecar 停止 agent 执行。
-
-    thread_id 规则与 chat_stream 一致（kge-u{uid}-{session_id}）。
-    前端在 abort SSE 连接之外额外调用本端点，确保取消信号确定性到达
-    （不依赖断连检测时机）；正常结束时为 no-op。
-    """
-    import uuid as _uuid
-    uid = getattr(u, "id", None) or "anon"
-    sid = (body.session_id or "").strip() or _uuid.uuid4().hex
-    thread_id = f"kge-u{uid}-{sid}"
-    from app.services.agent.deerflow_runner import cancel_deerflow_stream
-    await cancel_deerflow_stream(thread_id)
-    return {"cancelled": True}
+    task = _ACTIVE_QA.get((str(u.id), body.session_id))
+    if task:
+        task.cancel()
+    return {"cancelled": bool(task)}
 
 
 def _sse(obj: dict) -> str:
-    """SSE 单条消息：`data: {json}\\n\\n`"""
     return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n"

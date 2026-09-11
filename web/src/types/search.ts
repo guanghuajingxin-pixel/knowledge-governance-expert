@@ -13,6 +13,11 @@ export interface SearchRequest {
 }
 
 export interface SearchResult {
+  citation_id?: number
+  evidence_id?: string
+  source?: string
+  quote?: string
+  partial?: boolean
   chunk_id: string
   text: string
   score: number

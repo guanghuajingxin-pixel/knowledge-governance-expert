@@ -131,7 +131,9 @@ async function testLlmDlg() {
     d.testResult = await testLLM({
       base_url: d.base_url,
       api_key: d.api_key,
-      model: d.models.find((m) => m.enabled)?.name || '',
+      // 默认模型优先，其次第一个生效模型；均留空时后端回退该 profile 已保存值
+      model: d.models.find((m) => m.is_default && m.enabled)?.name || d.models.find((m) => m.enabled)?.name || '',
+      profile_id: d.editingId,
     })
   } catch (e: any) {
     d.testResult = { ok: false, message: e?.message || '请求失败' }

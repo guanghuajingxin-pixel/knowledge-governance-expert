@@ -1,5 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # 仓库根目录（config.py 在 services/kb-common/kb_common/config.py，上三级为仓库根）下的 .env
@@ -8,6 +9,8 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 _ENV_FILE = _REPO_ROOT / ".env"
 
 class Settings(BaseSettings):
+    # Enterprise QA: CLI credentials stay with DWS; mapping binds web users to DWS identities.
+    qa_dws_user_profiles: str = "{}"
     model_config = SettingsConfigDict(env_file=str(_ENV_FILE), extra="ignore")
 
     # 基础设施
@@ -57,6 +60,27 @@ class Settings(BaseSettings):
     dingtalk_app_key: str = ""
     dingtalk_app_secret: str = ""
     dingtalk_operator_union_id: str = ""   # 调用知识库 API 的操作人 unionId
+    dingtalk_robot_code: str = ""          # 企业内机器人编码（知识缺口通知发单聊消息）
+
+    # 钉钉知识库 → Dify 定时增量同步（合并自 DingDingKonwledgePipeline）
+    # dws CLI（导出 ALIDOC/.able 在线文档所需）
+    dws_bin: str = "dws"
+    dws_config_dir: str = ""   # 空则启动时回退到 services/kb-api/data/.dws
+    # 同步引擎参数
+    sync_local_storage_dir: str = ""   # 空则回退到 services/kb-api/data/sync_downloads
+    sync_max_depth: int = 10
+    sync_max_results_per_page: int = 50
+    sync_export_format: str = "markdown"   # markdown | docx | pdf
+    sync_skip_extensions: str = ".jpg,.jpeg,.png,.gif,.mp4,.mp3,.zip,.rar,.7z"
+    sync_dify_wait_indexing: bool = True
+    sync_run_timeout_seconds: int = Field(default=7200, ge=1)  # 2 小时兜底：超时强杀进程，已完成部分保留为 partial
+    sync_export_timeout_seconds: int = Field(default=360, ge=1)
+    sync_indexing_timeout_seconds: int = Field(default=600, ge=1)
+    sync_default_delete_policy: str = "keep"   # keep | sync
+
+    @property
+    def sync_skip_ext_list(self) -> list[str]:
+        return [e.strip().lower() for e in self.sync_skip_extensions.split(",") if e.strip()]
 
 @lru_cache
 def get_settings() -> Settings:

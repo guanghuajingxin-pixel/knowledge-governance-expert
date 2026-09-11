@@ -29,6 +29,11 @@ export const uploadDifyDocument = (datasetId: string, file: File) => {
   const fd = new FormData()
   fd.append('file', file)
   return request.post<unknown, DifyUploadResult>(`/dify/datasets/${datasetId}/documents`, fd, {
-    timeout: 180000,
+    timeout: 240000,
   })
 }
+
+export const syncDingTalkFile = (datasetId: string, data: { node_id: string; name: string; size?: number }) =>
+  request.post<unknown, DifyUploadResult>(`/dify/datasets/${datasetId}/sync-dingtalk`, data, {
+    timeout: 600000,
+  })

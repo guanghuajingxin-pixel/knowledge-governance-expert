@@ -1,0 +1,19 @@
+﻿[Unit]
+Description=钉钉知识库-Dify 定时增量同步服务
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kb-sync
+Group=kb-sync
+WorkingDirectory=/opt/kb-sync-service
+EnvironmentFile=/opt/kb-sync-service/.env
+ExecStart=/opt/kb-sync-service/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
+Restart=on-failure
+RestartSec=5
+# 建议按需调整
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

@@ -59,9 +59,11 @@ async def _throttle() -> None:
 
 # =====《杰克知识管理规范》AI 多维表坐标 =====
 # baseId / sheetId 来自该多维表 URL；如需更换规范表，可通过 .env 的
-# DINGTALK_STANDARDS_BASE_ID / DINGTALK_STANDARDS_SHEET_ID 覆盖，或改此处常量。
-STANDARDS_BASE_ID = ""
-STANDARDS_SHEET_ID = ""
+# DINGTALK_STANDARDS_BASE_ID / DINGTALK_STANDARDS_SHEET_ID 覆盖。
+# 这些是平台默认的《杰克知识管理规范》多维表坐标；不能留空，否则治理
+# 标准页在每次刷新时都会在请求钉钉之前失败。
+STANDARDS_BASE_ID = "N7dx2rn0JbNoBXLeuNw2ONvPJMGjLRb3"
+STANDARDS_SHEET_ID = "29Wa4h3"
 
 # 运行时注入的配置（来自 DB settings 表，优先级高于 .env）
 _injected: dict[str, str] = {}
@@ -73,7 +75,8 @@ _walk_info: dict[str, int] = {"requests": 0, "failed_folders": 0}
 
 
 # ===================== 配置 =====================
-def configure(app_key: str = "", app_secret: str = "", operator_union_id: str = "") -> None:
+def configure(app_key: str = "", app_secret: str = "", operator_union_id: str = "",
+              robot_code: str = "") -> None:
     """注入钉钉配置（来自 DB settings 表，覆盖 .env）。空值不覆盖。"""
     if app_key:
         _injected["dingtalk_app_key"] = app_key
@@ -81,6 +84,8 @@ def configure(app_key: str = "", app_secret: str = "", operator_union_id: str = 
         _injected["dingtalk_app_secret"] = app_secret
     if operator_union_id:
         _injected["dingtalk_operator_union_id"] = operator_union_id
+    if robot_code:
+        _injected["dingtalk_robot_code"] = robot_code
 
 
 async def sync_runtime_config() -> None:
@@ -90,17 +95,20 @@ async def sync_runtime_config() -> None:
     from kb_common.database import SessionLocal
     from kb_common.models import Setting
 
-    keys = ["dingtalk_app_key", "dingtalk_app_secret", "dingtalk_operator_union_id"]
+    keys = ["dingtalk_app_key", "dingtalk_app_secret", "dingtalk_operator_union_id",
+            "dingtalk_robot_code"]
     vals: dict[str, str] = {}
     async with SessionLocal() as s:
         for k in keys:
             row = (await s.execute(select(Setting).where(Setting.key == k))).scalar_one_or_none()
             vals[k] = row.value if row and row.value else ""
-    configure(vals["dingtalk_app_key"], vals["dingtalk_app_secret"], vals["dingtalk_operator_union_id"])
+    configure(vals["dingtalk_app_key"], vals["dingtalk_app_secret"],
+              vals["dingtalk_operator_union_id"], vals["dingtalk_robot_code"])
 
     import os
-    STANDARDS_BASE_ID = os.getenv("DINGTALK_STANDARDS_BASE_ID", STANDARDS_BASE_ID)
-    STANDARDS_SHEET_ID = os.getenv("DINGTALK_STANDARDS_SHEET_ID", STANDARDS_SHEET_ID)
+    # 空环境变量不应覆盖内置默认表；这样 .env.example 中保留的空配置也安全。
+    STANDARDS_BASE_ID = os.getenv("DINGTALK_STANDARDS_BASE_ID", "").strip() or STANDARDS_BASE_ID
+    STANDARDS_SHEET_ID = os.getenv("DINGTALK_STANDARDS_SHEET_ID", "").strip() or STANDARDS_SHEET_ID
 
 
 def _cfg(key: str) -> str:
@@ -117,6 +125,10 @@ def _app_secret() -> str:
 
 def _operator_id() -> str:
     return _cfg("dingtalk_operator_union_id")
+
+
+def _robot_code() -> str:
+    return _cfg("dingtalk_robot_code")
 
 
 def is_configured() -> bool:
@@ -228,6 +240,111 @@ async def list_nodes(parent_node_id: str) -> list[dict[str, Any]]:
                 break
             params["nextToken"] = nxt
     return out
+
+
+async def walk_workspace_folders(root_node_id: str, max_folders: int = 5000,
+                                 on_progress=None) -> list[dict[str, Any]]:
+    """递归遍历钉钉知识库，返回全部文件夹及各文件夹直属文档数量。
+
+    直属文档 = 文件夹直接子节点中的非文件夹节点，包含在线文档（钉钉在线编辑）
+    和本地上传到知识库的文件两类。返回行字段：
+    - node_id: 文件夹节点 ID（根节点也作为一行返回，path 为 ""）
+    - path: 从根开始的文件夹路径（不带前导斜杠），如 "规章制度/研发流程"；根为 ""
+    - document_count: 该文件夹直属文档数（不含子文件夹内的文档）
+    max_folders 为安全上限；on_progress(done: int) 在每完成一个文件夹后回调（用于进度展示）。
+    """
+    folders: list[dict[str, Any]] = []
+    sem = asyncio.Semaphore(5)
+
+    async def walk(node_id: str, path: str) -> None:
+        if len(folders) >= max_folders:
+            return
+        async with sem:
+            try:
+                nodes = await list_nodes(node_id)
+            except Exception as e:
+                logger.warning("钉钉获取节点失败 %s: %s（该文件夹文档数记为 0）", path or "/", e)
+                nodes = []
+        doc_count = 0
+        child_folders: list[tuple[str, str]] = []
+        for n in nodes:
+            if n.get("type") == "FOLDER":
+                child_folders.append((n.get("nodeId") or "", n.get("name") or ""))
+            else:
+                doc_count += 1
+        folders.append({"node_id": node_id, "path": path, "document_count": doc_count})
+        if on_progress:
+            try:
+                on_progress(len(folders))
+            except Exception:
+                pass
+        # 并发遍历子文件夹（信号量限流），否则大知识库顺序递归过慢
+        if child_folders:
+            await asyncio.gather(*[
+                walk(fid, f"{path}/{fname}" if path else fname)
+                for fid, fname in child_folders if fid
+            ])
+
+    await walk(root_node_id, "")
+    return folders
+
+
+async def download_document(node_id: str) -> tuple[bytes, str]:
+    """按 wiki 节点 ID 下载文件原始内容，返回 (内容 bytes, 文件名)。
+
+    钉钉 wiki 节点的 url 字段是在线预览页（alidocs.dingtalk.com），直接 HTTP 下载
+    会拿到 HTML；必须走 queryDentryId → downloadInfos/query → OSS 直链才能取到原文件。
+    """
+    operator = _operator_id()
+    if not operator:
+        raise RuntimeError("钉钉操作人 UnionId 未配置")
+    token = await _get_access_token()
+    headers = _headers(token)
+
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        # 1. wiki 节点 → dentry（spaceId + dentryId）
+        await _throttle()
+        d1 = await _request_with_retry(
+            "GET", f"{API_BASE}/v2.0/doc/dentries/{node_id}/queryDentryId",
+            client=client, params={"operatorId": operator}, headers=headers,
+        )
+        d1.raise_for_status()
+        d1_data = d1.json()
+        space_id = d1_data.get("spaceId")
+        dentry_id = d1_data.get("dentryId")
+        if not space_id or not dentry_id:
+            raise RuntimeError(f"queryDentryId 缺少 spaceId/dentryId: {d1_data}")
+
+        # 2. 换取 OSS 下载地址与签名头
+        await _throttle()
+        d2 = await _request_with_retry(
+            "POST",
+            f"{API_BASE}/v1.0/storage/spaces/{space_id}/dentries/{dentry_id}/downloadInfos/query",
+            client=client, params={"unionId": operator},
+            json={"option": {"preferIntranet": False}}, headers=headers,
+        )
+        d2.raise_for_status()
+        d2_data = d2.json()
+        header_info = d2_data.get("headerSignatureInfo") or {}
+        urls = header_info.get("resourceUrls") or []
+        if not urls:
+            raise RuntimeError(f"downloadInfos/query 未返回下载地址: {d2_data}")
+        dl_headers = dict(header_info.get("headers") or {})
+
+        # 3. 从 OSS 下载文件内容
+        resp = await client.get(urls[0], headers=dl_headers, timeout=120.0)
+        resp.raise_for_status()
+        content = resp.content
+
+    # 从 OSS 路径解析文件名
+    filename = ""
+    try:
+        from urllib.parse import urlparse, unquote
+        path = urlparse(urls[0]).path
+        filename = unquote(path.rsplit("/", 1)[-1])
+    except Exception:
+        filename = ""
+    return content, filename
 
 
 async def _walk_workspace_files(workspace: dict, sem: asyncio.Semaphore) -> list[dict]:
@@ -509,6 +626,64 @@ async def get_user_name_map(user_ids: list[str]) -> dict[str, str]:
     return {u: _name_cache.get(u, u) for u in user_ids if u}
 
 
+async def search_users_by_name(query: str) -> list[dict]:
+    """按姓名关键词搜索企业通讯录，返回 [{userid, name}]（按 topapi 反查姓名）。
+
+    用于「知识 Owner 姓名 → 可收通知的 userid」解析；需应用开通
+    「通讯录个人信息读权限」。候选为空时返回 []，由调用方决定错误提示。
+    """
+    token = await _get_access_token()
+    url = f"{API_BASE}/v1.0/contact/users/search"
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        await _throttle()
+        resp = await _request_with_retry("POST", url, client=client, headers=_headers(token),
+                                         json={"queryWord": query, "offset": 0, "limit": 20})
+        if resp.status_code != 200:
+            raise RuntimeError(f"钉钉通讯录搜索失败({resp.status_code})：{(resp.text or '')[:200]}")
+        data = resp.json() or {}
+    # 官方字段 userIdList；兼容 result 包装的历史变体
+    ids = (data.get("userIdList") or data.get("useridList")
+           or (data.get("result") or {}).get("userIdList") or [])
+    ids = [i for i in ids if i]
+    if not ids:
+        return []
+    name_map = await get_user_name_map(ids)
+    return [{"userid": i, "name": name_map.get(i, "")} for i in ids]
+
+
+# ===================== 企业内机器人消息 =====================
+async def send_text_message(user_ids: list[str], content: str) -> dict:
+    """企业内部机器人向员工发送单聊文本消息（msgKey=sampleText）。
+
+    需在钉钉开放平台为应用开通「企业内机器人发送消息权限」，并在系统配置中
+    填写 robotCode（dingtalk_robot_code）。返回钉钉响应（含 processQueryKey）。
+    """
+    import json as _json
+    robot = _robot_code()
+    if not robot:
+        raise RuntimeError("钉钉 robotCode 未配置（系统配置 → 钉钉设置）")
+    if not user_ids:
+        raise RuntimeError("收件人为空，无法发送")
+    token = await _get_access_token()
+    url = f"{API_BASE}/v1.0/robot/oToMessages/send"
+    body = {"robotCode": robot, "userIds": user_ids, "msgKey": "sampleText",
+            "msgParam": _json.dumps({"content": content}, ensure_ascii=False)}
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        await _throttle()
+        resp = await _request_with_retry("POST", url, client=client, headers=_headers(token), json=body)
+        if resp.status_code != 200:
+            # 钉钉新版错误 body：{"code": "...", "message": "无权限访问robot(不属于当前应用)"}
+            try:
+                msg = (resp.json() or {}).get("message") or (resp.text or "")
+            except Exception:
+                msg = resp.text or ""
+            raise RuntimeError(f"钉钉机器人发送失败({resp.status_code})：{(msg or '')[:200]}")
+        try:
+            return resp.json() or {}
+        except Exception:
+            return {}
+
+
 # ===================== AI 表格（多维表） =====================
 async def list_aitable_records(base_id: str, sheet_id: str) -> list[dict]:
     """读取 AI 表格（多维表）指定数据表的全部记录，自动分页。
@@ -516,7 +691,10 @@ async def list_aitable_records(base_id: str, sheet_id: str) -> list[dict]:
     返回 [{id, fields: {字段名: 值, ...}}, ...]。需「AI 表格应用读权限」。
     """
     if not base_id or not sheet_id:
-        raise RuntimeError("规范表 baseId/sheetId 未配置（STANDARDS_BASE_ID / STANDARDS_SHEET_ID）")
+        raise RuntimeError(
+            "规范表 baseId/sheetId 未配置（请设置 DINGTALK_STANDARDS_BASE_ID / "
+            "DINGTALK_STANDARDS_SHEET_ID）"
+        )
     operator = _operator_id()
     token = await _get_access_token()
     url = f"{API_BASE}/v1.0/notable/bases/{base_id}/sheets/{sheet_id}/records/list"

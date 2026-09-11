@@ -1,0 +1,35 @@
+# 知识缺口
+
+入口：知识治理 → 知识缺口。
+
+## 数据口径
+
+- 当前统计本地文档知识库的目录（knowledge_bases / directories / documents），不统计 FAQ 或未同步到本地目录表的钉钉目录。
+- 管理员和超级管理员可查看全部文档知识库；其他用户只可查看自己创建的知识库。当前无知识库成员授权模型，后续引入时应扩展 `visible_kbs`。
+- 文档数量仅统计直接挂载在当前目录下且未删除的文档，不包含子目录文档；不以解析/索引状态排除文档。
+- 默认筛选无文档，可切换全部、有文档；知识库、Owner、文档状态可组合筛选。
+- CSV 导出包含当前筛选的全部结果，不受分页限制。
+
+## Owner 维护
+
+管理员、超级管理员、编辑者可在权限范围内导入或修改目录 Owner；查看者只能查询、导出。
+
+1. 下载导入模板，模板包含当前可见的全部目录。
+2. 填写“知识Owner”；也可将钉钉多维表导出文件整理为同样的列名。
+3. 导入 UTF-8 CSV 或 XLSX（第一张工作表），最多 5MB / 10000 行。
+
+匹配方式优先使用“目录ID”；无 ID 时按“知识库”名称和“目录路径”精确匹配。目录路径格式为 `父目录/子目录`。必填“知识Owner”，最长 200 字。重复导入更新原值，不会创建目录。
+
+存在重复目录、空 Owner、目录匹配不唯一或无权限等错误时，整批不保存并提示行号。清除 Owner 使用单条“维护 Owner”弹窗留空保存。暂不自动连接钉钉获取 Owner。
+
+## 部署与验证
+
+应用数据库迁移 `0015_directory_knowledge_owner` 后启动后端。
+
+```bash
+services/kb-api/.venv/bin/alembic -c alembic.ini upgrade head
+cd services/kb-api
+.venv/bin/python -m unittest discover -s tests -p 'test_knowledge_gaps.py' -v
+```
+
+前端运行 `pnpm --dir web build`。

@@ -87,6 +87,10 @@ def knowledge_search_tool(query: str, top_k: int = 8, config: RunnableConfig = N
             "page_number": h.get("page_number"),
             "score": round(float(h.get("score") or 0.0), 3),
             "content": (h.get("content") or "")[:1200],
+            # 同步自钉钉知识库的文档带原始链接，引用来源可跳回钉钉预览
+            "url": h.get("url") or "",
+            "node_id": h.get("node_id") or "",
+            "source": h.get("source") or "",
         }
         for i, h in enumerate(hits)
     ]
@@ -291,3 +295,46 @@ def dingtalk_read_doc_tool(node_id: str, title: str = "", extension: str = "", c
         ensure_ascii=False,
         indent=1,
     )
+
+
+@tool("knowledge_context_expand", parse_docstring=True)
+def knowledge_context_expand_tool(document_ids: str, query: str = "", max_related: int = 3,
+                                   config: RunnableConfig = None) -> str:
+    """扩展知识检索上下文：根据已命中的文档 ID，获取这些文档的摘要、关联文档和标签聚合。
+
+    当 knowledge_search 返回的片段不足以回答问题，或需要更全面理解文档全貌时，
+    调用本工具获取：① 命中文档的摘要（理解文档核心内容）；② 语义关联文档（深度探索）；
+    ③ 标签聚合（辅助判断主题范围）。
+
+    使用规则：
+    - document_ids 来自 knowledge_search 返回的 results[].document_id，多个用逗号分隔；
+    - 优先传入 2-5 个最相关的文档 ID，避免上下文过长；
+    - 返回的 related 文档可进一步用 knowledge_search 检索其内容；
+    - 若命中文档尚未加工（无摘要/关联），返回为空，属正常情况。
+
+    Args:
+        document_ids: 命中文档 ID，多个用英文逗号分隔。
+        query: 用户原始问题，用于辅助关联排序，可选。
+        max_related: 最多返回的关联文档数，默认 3。
+    """
+    payload: dict[str, Any] = {
+        "document_ids": [d.strip() for d in (document_ids or "").split(",") if d.strip()],
+        "query": query or "",
+        "max_related": min(max(int(max_related or 3), 1), 10),
+    }
+    try:
+        with httpx.Client(timeout=30.0) as client:
+            resp = client.post(
+                f"{_kb_api_url()}/api/v1/internal/process/context-expand",
+                json=payload,
+                headers=_headers(),
+            )
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("knowledge_context_expand failed: %s", e)
+        return json.dumps(
+            {"error": f"上下文扩展失败：{e.__class__.__name__}", "summaries": [], "related": [], "tags": []},
+            ensure_ascii=False,
+        )
+    return json.dumps(data, ensure_ascii=False, indent=1)

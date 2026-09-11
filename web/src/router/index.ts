@@ -63,6 +63,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '知识中心', icon: 'Reading', group: 'feature' },
       },
       {
+        path: 'knowledge-sources',
+        name: 'KnowledgeSources',
+        component: () => import('@/views/knowledge-sources/index.vue'),
+        meta: { title: '知识源管理', icon: 'Connection', group: 'feature', parent: '/knowledge-center', roles: ['super_admin', 'admin', 'editor'] },
+      },
+      {
         path: 'model',
         name: 'Model',
         component: () => import('@/views/governance/model.vue'),

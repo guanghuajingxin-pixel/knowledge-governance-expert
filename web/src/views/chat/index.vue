@@ -5,11 +5,12 @@ import { MagicStick, Search, User, ArrowUp, RefreshLeft, CopyDocument, EditPen, 
 import { ElMessage } from 'element-plus'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
-import { streamChat, cancelChat, type StreamEvent, type TokenUsage } from '@/api/chat'
+import { streamChat, cancelChat, type StreamEvent, type TokenUsage, type ChatResponse } from '@/api/chat'
 import { listDifyDatasets, type DifyDataset } from '@/api/dify'
 import { listEnabledLlmModels } from '@/api/settings'
 import { getGreeting } from '@/api/agent'
 import type { SearchResult } from '@/types/search'
+import { citationUrl, linkEvidence } from '@/utils/chat-evidence'
 import {
   listChatSessions, createChatSession, renameChatSession, deleteChatSession,
   getSessionMessages, saveChatTurn, type ChatSession,
@@ -34,52 +35,16 @@ let _lastMd = ''
 let _lastHtml = ''
 let _lastT = 0
 
-/** 标题归一化：去前缀/扩展名/标点/空白/版本号，用于《文档名》与引用标题的模糊匹配 */
-function _normTitle(s: string): string {
-  return (s || '')
-    .replace(/^\[钉钉\]\s*/, '')
-    .toLowerCase()
-    .replace(/\.(pptx?|docx?|xlsx?|pdf|md|txt|adoc)\s*$/g, '')
-    .replace(/[\s_\-—·（）()【】\[\]《》「」,.，。:：;；!！?？'’"“”]/g, '')
-    .replace(/v\d+(\.\d+)*$/g, '')
-}
-
-/** 把答案中《文档名》替换为引用文档链接（模糊匹配：归一化后双向包含，命中才转链） */
-function linkifyDocMentions(md: string, citations?: SearchResult[]): string {
-  if (!citations || citations.length === 0) return md
-  const docs = citations
-    .map((c) => {
-      const cc = c as any
-      return { title: (c.document_title || '').replace(/^\[钉钉\]\s*/, ''), url: cc.url || '' }
-    })
-    .filter((d) => d.title && d.url && /^https?:\/\//.test(d.url))
-  if (docs.length === 0) return md
-  const normed = docs.map((d) => ({ ...d, norm: _normTitle(d.title) }))
-  // 按代码围栏切分，仅处理非代码段，避免破坏代码块
-  return md
-    .split(/(```[\s\S]*?```)/g)
-    .map((seg) => {
-      if (seg.startsWith('```')) return seg
-      return seg.replace(/《([^《》\n]{2,80})》/g, (whole, name: string) => {
-        const n = _normTitle(name)
-        if (n.length < 4) return whole
-        const hit = normed.find((d) => d.norm && (d.norm.includes(n) || n.includes(d.norm)))
-        return hit ? `[《${name}》](${hit.url})` : whole
-      })
-    })
-    .join('')
-}
-
 function renderMd(md: string, citations?: SearchResult[]): string {
   if (!md) return ''
   // 节流：100ms 内且文本未变时返回缓存
-  const cacheKey = `${md}§${citations?.length || 0}`
+  const cacheKey = `${md}§${JSON.stringify(citations?.map(c => [c.citation_id, citationUrl(c)]))}`
   const now = Date.now()
   if (cacheKey === _lastMd && now - _lastT < 100) return _lastHtml
   _lastMd = cacheKey
   _lastT = now
   // 预处理：修复 AI 常见的无空格标题（###标题 → ### 标题），不破坏代码块
-  const fixed = linkifyDocMentions(md, citations).replace(/^#{1,6}(?=[^\s#])/gm, '$& ')
+  const fixed = linkEvidence(md, citations).replace(/^#{1,6}(?=[^\s#])/gm, '$& ')
   // 链接一律新窗口打开（文档预览链接 + 模型输出的外链）
   _lastHtml = DOMPurify.sanitize(marked.parse(fixed) as string, _purifyConfig)
     .replace(/<a /g, '<a target="_blank" rel="noopener"')
@@ -98,6 +63,9 @@ const selectedProfileId = ref('')
 
 // 用户上次手动选择的模型（本地记忆，优先于默认模型）
 const MODEL_PREF_KEY = 'chat.selectedModel'
+
+// 智能体配置中已配置的模型（非空时问答页只能从中选择，不展示系统全部模型）
+const agentModels = ref<string[]>([])
 
 function pickModel(modelName: string) {
   const opt = modelOptions.value.find((o) => o.model === modelName)
@@ -138,6 +106,8 @@ interface ChatMsg {
   role: 'user' | 'assistant'
   content: string
   citations?: SearchResult[]
+  quality?: ChatResponse['quality']
+  answerStatus?: string
   meta?: string
   noResult?: boolean
   configError?: string
@@ -209,7 +179,7 @@ function scrollToBottom() {
 // 会话上下文（用于多轮改写）已按会话隔离：见 sessionCtx（多会话并行时互不污染）
 
 onMounted(async () => {
-  await Promise.all([loadDatasets(), loadModels(), loadGreeting(), loadSessions()])
+  await Promise.all([loadDatasets(), (async () => { await loadGreeting(); await loadModels() })(), loadSessions()])
 })
 
 // 离开页面：中断所有进行中的回答（后端感知断连后停止 agent，避免空转耗 token）
@@ -298,13 +268,15 @@ async function selectSession(id: string, needCheck = true) {
       meta: m.meta || undefined,
       dbId: m.role === 'assistant' ? m.id : undefined,
       steps: m.detail?.steps as any,
+      quality: m.detail?.quality,
+      answerStatus: m.detail?.answer_status,
       citations: m.citations
         ? m.citations.map((t) => {
             // 新格式：JSON 字符串（含 url/node_id/extension）；旧格式：纯标题
             try {
               const o = JSON.parse(t)
               if (o && typeof o === 'object' && o.t) {
-                return { document_title: o.t, url: o.u || '', node_id: o.n || '', extension: o.e || '' } as any
+                return { ...o, document_title: o.t, url: o.u || '', node_id: o.n || '', extension: o.e || '' } as SearchResult
               }
             } catch { /* 纯标题，走默认 */ }
             return { document_title: t } as SearchResult
@@ -351,16 +323,28 @@ async function renameSession(s: ChatSession) {
 async function loadGreeting() {
   try {
     const g = await getGreeting()
-    if (g.greeting_enabled && g.greeting) greetingText.value = g.greeting
+    greetingText.value = g.greeting_enabled ? (g.greeting || '你好！我是企业知识问答助手。') : ''
     suggestions.value = g.suggested_questions || []
     followUpEnabled.value = g.follow_up_enabled
     longMemoryEnabled.value = g.long_memory_enabled
     deepThink.value = !!g.deep_think_default
-    // 智能体配置的模型列表优先于系统模型管理
+    // 问答页模型下拉仅展示智能体配置中已配置的模型；
+    // 用系统生效模型补全 profile 信息与「默认」标记，便于识别
     if (g.models && g.models.length) {
-      modelOptions.value = g.models.map((name: string) => ({ model: name, profile_id: '', profile_name: '', is_default: false }))
+      agentModels.value = g.models
+      let sys: Array<{ profile_id: string; profile_name: string; model: string; is_default: boolean }> = []
+      try {
+        sys = (await listEnabledLlmModels()).models || []
+      } catch {
+        /* 系统模型信息拉取失败时仅显示模型名 */
+      }
+      modelOptions.value = g.models.map((name: string) => {
+        const hit = sys.find((o) => o.model === name)
+        return { model: name, profile_id: hit?.profile_id || '', profile_name: hit?.profile_name || '', is_default: !!hit?.is_default }
+      })
       const pref = localStorage.getItem(MODEL_PREF_KEY)
-      const target = (pref && g.models.includes(pref)) ? pref : g.models[0]
+      const target = (pref && g.models.includes(pref)) ? pref
+        : modelOptions.value.find((o) => o.is_default)?.model || g.models[0]
       pickModel(target)
     }
   } catch {
@@ -369,6 +353,8 @@ async function loadGreeting() {
 }
 
 async function loadModels() {
+  // 智能体已配置模型时，问答页只能从中选择，不回退到系统全部模型
+  if (agentModels.value.length) return
   try {
     const res = await listEnabledLlmModels()
     const opts = res.models || []
@@ -527,8 +513,7 @@ async function askQuestion(q: string, action: '' | 'continue' | 'stop' = '') {
   abortCurrent = streamChat(
     {
       query: q,
-      dify_dataset_ids: kbSearch.value ? selectedDatasetIds.value : null,
-      top_k: 5,
+      dify_dataset_ids: kbSearch.value ? (selectedDatasetIds.value.length ? selectedDatasetIds.value : null) : [],
       last_query: ctx.q,
       last_answer: ctx.a,
       history,
@@ -577,18 +562,20 @@ async function askQuestion(q: string, action: '' | 'continue' | 'stop' = '') {
         if (msg.steps && msg.steps.length) msg.steps[msg.steps.length - 1].done = true
         const citations = res.citations || []
         const configError = res.config_error || ''
-        const noResult = citations.length === 0 && !configError && !res.answer
+        const noResult = res.answer_status === 'insufficient'
         const thinkTag = deepThink.value ? '深度思考 · ' : ''
         if (res.usage && res.usage.total_tokens > 0) msg.usage = res.usage
         if (citations.length > 0) {
-          msg.meta = `${thinkTag}🦌 DeerFlow · 引用 ${citations.length} 篇文档 · ${run.model}`
+          msg.meta = `${thinkTag}企业知识问答 · ${citations.length} 条原文依据 · ${run.model}`
         } else if (res.answer) {
-          msg.meta = `${thinkTag}🦌 DeerFlow · 智能体直答 · ${run.model}`
+          msg.meta = `${thinkTag}企业知识问答 · ${run.model}`
         } else {
           msg.meta = `${thinkTag}未在知识库找到相关内容 · ${run.model}`
         }
         if (res.answer) msg.content = res.answer
         else if (!msg.content) msg.content = '（未生成回答）'
+        msg.quality = res.quality
+        msg.answerStatus = res.answer_status
         msg.citations = citations
         msg.noResult = noResult
         msg.configError = configError
@@ -596,7 +583,7 @@ async function askQuestion(q: string, action: '' | 'continue' | 'stop' = '') {
         if (!configError) {
           if (res.last_query) ctx.q = res.last_query
           else if (res.rewritten_query) ctx.q = res.rewritten_query
-          ctx.a = res.last_answer || res.answer || ''
+          ctx.a = res.last_answer ?? ''
         }
         // 运行结束：出注册表；绿点提示（查看该会话时立即清除）
         if (isRun(sid, run)) runs.delete(sid)
@@ -662,12 +649,8 @@ async function askQuestion(q: string, action: '' | 'continue' | 'stop' = '') {
         answer: persistAnswer,
         citations: (finalMsg.citations || [])
           .map((c) => {
-            // 携带 url 的引用存为 JSON（历史会话可恢复文档跳转链接）；其余存纯标题
-            const cc = c as any
-            if (cc.url) {
-              return JSON.stringify({ t: c.document_title, u: cc.url, n: cc.node_id || '', e: cc.extension || '' })
-            }
-            return c.document_title || (cc as any).title || ''
+            return JSON.stringify({ ...c, t: c.document_title, u: c.url || c.preview_url || '',
+              n: c.node_id || '', e: c.extension || '' })
           })
           .filter(Boolean),
         meta: finalMsg.meta || '',
@@ -675,6 +658,8 @@ async function askQuestion(q: string, action: '' | 'continue' | 'stop' = '') {
         last_answer: ctx.a,
         // 回答链路 + 召回片段快照，供「问答明细」展示
         detail: {
+          quality: finalMsg.quality,
+          answer_status: finalMsg.answerStatus,
           steps: (finalMsg.steps || []).map((s) => ({ title: s.title, detail: s.detail, done: s.done })),
           retrieval: (finalMsg.citations || []).map((c) => ({
             document_title: c.document_title,
@@ -895,7 +880,7 @@ async function submitCorrection() {
       <div ref="scrollRef" class="chat-scroll">
         <!-- 欢迎空状态 -->
         <div v-if="!hasAsked" class="welcome">
-          <h1 class="welcome-title">{{ greetingText }}</h1>
+          <h1 v-if="greetingText" class="welcome-title">{{ greetingText }}</h1>
           <p class="welcome-subtitle">我可以基于企业知识库回答问题，答案附带引用溯源。</p>
           <div v-if="datasetsError" class="warn-tip">
             ⚠️ Dify 知识库加载失败：{{ datasetsError }}，请到「系统配置」页配置 Dify 服务地址与 API Key。
@@ -1004,16 +989,16 @@ async function submitCorrection() {
                       </div>
                     </div>
                   </template>
-                  <template v-else-if="m.noResult">
-                    抱歉，当前知识库中未检索到相关内容。<br>
-                    <b>这不是模型问题，是知识缺口</b>。<br><br>
-                    🤖 <b>AI 建议：</b>发起知识征集，指派相关 Owner 补齐知识包。
-                    <div class="gap-actions">
-                      <el-button type="primary" size="small" @click="feedback('notfound', m)">✓ 提交缺口征集</el-button>
-                      <el-button size="small" @click="feedback('correct', m)">⚑ 找人解答</el-button>
-                    </div>
-                  </template>
                   <template v-else-if="m.content">
+                    <div v-if="m.answerStatus" class="evidence-status" role="status">
+                      <el-tag v-if="m.answerStatus === 'answered'" type="success">已通过证据核验</el-tag>
+                      <el-tag v-else-if="m.answerStatus === 'partial'" type="warning">部分有依据 · 尚有缺口</el-tag>
+                      <el-tag v-else-if="m.answerStatus === 'insufficient'" type="warning">证据不足</el-tag>
+                      <el-tag v-else-if="m.answerStatus === 'clarification'" type="info">需要补充信息</el-tag>
+                      <el-tag v-if="m.quality?.dws === 'hit'" type="info">已补查钉钉知识</el-tag>
+                    </div>
+                    <el-alert v-for="warning in m.quality?.warnings || []" :key="warning"
+                      :title="warning" type="warning" :closable="false" show-icon class="evidence-warning" />
                     <div
                       class="ans-text md-body"
                       v-html="renderMd(m.content, m.citations)"
@@ -1034,11 +1019,16 @@ async function submitCorrection() {
                         v-for="(c, ci) in (expandedRefs.has(i) ? m.citations : m.citations.slice(0, MAX_REFS))"
                         :key="ci" class="ref"
                       >
-                        <span class="cite">[{{ ci + 1 }}]</span>
-                        <a v-if="c.url || c.preview_url" class="ref-title ref-link" :href="c.url || c.preview_url" target="_blank" rel="noopener">{{ c.document_title || '未知文档' }}</a>
-                        <span v-else class="ref-title">{{ c.document_title || '未知文档' }}</span>
+                        <span class="cite">[{{ c.citation_id || ci + 1 }}]</span>
+                        <a v-if="citationUrl(c)" class="ref-title ref-link" :href="citationUrl(c)" :title="c.document_title" target="_blank" rel="noopener">{{ c.document_title || '未知文档' }}</a>
+                        <span v-else class="ref-title" :title="c.document_title">{{ c.document_title || '未知文档' }}</span>
+                        <el-popover v-if="c.quote || c.text" trigger="click" :width="420" placement="top">
+                          <template #reference><el-button link type="primary" size="small">查看依据</el-button></template>
+                          <div class="evidence-excerpt">{{ c.quote || c.text }}</div>
+                          <small v-if="c.partial">此处为原文片段，请结合源文档核对适用范围。</small>
+                        </el-popover>
                         <span v-if="c.page_number" class="ref-page">第 {{ c.page_number }} 页</span>
-                        <span class="doc-tag">文档</span>
+                        <span class="doc-tag">{{ c.source === 'dws' ? '钉钉' : '知识库' }}</span>
                         <el-tooltip content="对这条知识纠错" placement="top">
                           <span class="ref-correct" @click="feedback('correct', m, c)">👎 纠错</span>
                         </el-tooltip>
@@ -1114,6 +1104,7 @@ async function submitCorrection() {
             placement="top-start"
             :width="280"
             :show-arrow="false"
+            popper-class="kb-ds-popover"
             @show="kbSearch = true"
           >
             <template #reference>
@@ -1565,9 +1556,10 @@ async function submitCorrection() {
 .refs-title { font-weight: 600; margin-bottom: 6px; color: var(--ink); }
 .refs-toggle { margin-left: 8px; color: var(--brand); cursor: pointer; font-size: 12px; font-weight: 400; }
 .ref { display: flex; align-items: center; gap: 6px; padding: 3px 0; }
+.ref > :not(.ref-title) { flex-shrink: 0; }
 .cite { display: inline-block; background: color-mix(in srgb, var(--brand) 12%, #fff); color: var(--brand); border-radius: 4px; padding: 0 5px; font-size: 11px; }
-.ref-title { color: var(--ink); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ref-page { color: var(--ink-3); font-size: 11px; }
+.ref-title { flex: 1; color: var(--ink); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ref-page { flex-shrink: 0; color: var(--ink-3); font-size: 11px; }
 .doc-tag { display: inline-block; background: color-mix(in srgb, var(--brand) 10%, #fff); color: var(--brand); border-radius: 4px; padding: 0 6px; font-size: 11px; line-height: 18px; }
 .gap-actions { margin-top: 12px; display: flex; gap: 8px; }
 .cfg-tip { background: #fff7e6; border: 1px solid #ffd591; border-radius: 10px; padding: 12px 14px; }
@@ -1653,10 +1645,11 @@ async function submitCorrection() {
 /* ===== Element Plus 主色统一为品牌紫（限本页） ===== */
 .input-tools :deep(.el-select .el-input.is-focus .el-input__wrapper),
 .input-tools :deep(.el-select .el-input__wrapper.is-focus) { box-shadow: 0 0 0 1px var(--brand) inset; }
-.input-tools :deep(.el-checkbox__input.is-checked .el-checkbox__inner),
-.ds-pop :deep(.el-checkbox__input.is-checked .el-checkbox__inner) { background: var(--brand); border-color: var(--brand); }
-.input-tools :deep(.el-checkbox__input.is-checked + .el-checkbox__label),
-.ds-pop :deep(.el-checkbox__input.is-checked + .el-checkbox__label) { color: var(--brand); }
+/* 复选框：完全遵循 Element Plus 原生样式，仅通过主题变量 --el-color-primary 控制主色，
+   不覆盖 background/border/::after 等内部结构，避免破坏 hover/focus/过渡/indeterminate 横线等原生交互。
+   注意：.ds-pop 在 el-popover teleport 后脱离组件，--brand 未定义，故不在此设变量，
+   由全局 .kb-ds-popover 统一设置 Element Plus 主题变量 */
+.input-tools { --el-color-primary: var(--brand); }
 .bubble--ai :deep(.el-button--primary),
 .cfg-tip :deep(.el-button--primary) { background: var(--brand); border-color: var(--brand); }
 .bubble--ai :deep(.el-button--primary:hover),
@@ -1692,4 +1685,24 @@ async function submitCorrection() {
 .md-body :deep(img) { max-width: 100%; border-radius: 8px; margin: 0.4em 0; }
 .md-body :deep(video) { max-width: 100%; border-radius: 8px; margin: 0.4em 0; }
 .md-body :deep(iframe) { width: 100%; min-height: 200px; border: none; border-radius: 8px; margin: 0.4em 0; }
+.evidence-status { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.evidence-warning { margin-bottom: 8px; }
+.evidence-excerpt { white-space: pre-wrap; max-height: 300px; overflow: auto; line-height: 1.7; overflow-wrap: anywhere; }
+</style>
+
+<!-- el-popover teleport 到 body，脱离组件 scoped 作用域；
+     仅设置 Element Plus 主题变量，让复选框原生样式（对勾/横线/hover/focus/过渡）完整生效 -->
+<style>
+.kb-ds-popover {
+  --el-color-primary: #6157ff;
+  --el-color-primary-light-3: #8a83ff;
+  --el-color-primary-light-5: #b3aeff;
+  --el-color-primary-light-7: #dcd9ff;
+  --el-color-primary-light-8: #eae8ff;
+  --el-color-primary-light-9: #f4f3ff;
+  --el-color-primary-dark-2: #4e46cc;
+  --el-checkbox-checked-bg-color: var(--el-color-primary);
+  --el-checkbox-checked-input-border-color: var(--el-color-primary);
+  --el-checkbox-input-border-color-hover: var(--el-color-primary);
+}
 </style>

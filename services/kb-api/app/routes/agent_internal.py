@@ -56,9 +56,14 @@ class RetrieveIn(BaseModel):
 
 @router.post("/internal/kb/retrieve", dependencies=[Depends(_verify_internal_token)])
 async def internal_kb_retrieve(body: RetrieveIn, s: AsyncSession = Depends(get_session)):
-    """企业知识库检索：供 DeerFlow knowledge_search 工具调用。"""
+    """企业知识库检索：供 DeerFlow knowledge_search 工具调用。
+
+    检索结果会自动附带知识加工元数据（文档摘要、标签、文档类型），
+    帮助智能体理解命中文档的全貌，而不仅仅是片段内容。
+    """
     from kb_common.clients import dify_client
     from kb_common.config import get_settings
+    from kb_common.models import ProcessedDocument
 
     settings = get_settings()
     # 运行时写入 lru_cached settings（与问答链路一致）
@@ -74,7 +79,67 @@ async def internal_kb_retrieve(body: RetrieveIn, s: AsyncSession = Depends(get_s
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"dify retrieve failed: {e.__class__.__name__}: {e}") from e
 
+    # 富化：为命中的文档附加加工元数据（摘要/标签/类型）
+    doc_ids = list({h.get("document_id") for h in hits if h.get("document_id")})
+    enriched_meta: dict[str, dict] = {}
+    dt_map: dict = {}
+    if doc_ids:
+        rows = (await s.execute(
+            select(ProcessedDocument).where(ProcessedDocument.document_id.in_(doc_ids))
+        )).scalars().all()
+        for r in rows:
+            enriched_meta[r.document_id] = {
+                "summary": r.summary,
+                "tags": r.tags,
+                "doc_type": r.doc_type,
+            }
+
+        # 钉钉来源回填：同步自钉钉知识库的 Dify 文档，附上钉钉原始文档链接与节点 ID，
+        # 使智能体引用来源可直接跳转钉钉知识库预览（而非独立预览组件）。
+        # 覆盖两个来源：手动同步（dify_dingtalk_doc_mappings）与定时同步引擎（sync_document_mappings）。
+        from kb_common.models import DifyDingtalkDocMapping, SyncDocumentMapping
+        dt_map = {}
+        manual = (await s.execute(
+            select(DifyDingtalkDocMapping).where(DifyDingtalkDocMapping.dify_document_id.in_(doc_ids))
+        )).scalars().all()
+        for r in manual:
+            dt_map[r.dify_document_id] = (r.dingtalk_node_id, r.dingtalk_url)
+        # 定时同步引擎已记录但手动表缺失的，用 node_id 拼 alidocs 链接补齐
+        missing = [d for d in doc_ids if d not in dt_map]
+        if missing:
+            cron_rows = (await s.execute(
+                select(SyncDocumentMapping)
+                .where(SyncDocumentMapping.dify_document_id.in_(missing))
+                .where(SyncDocumentMapping.node_id.isnot(None))
+            )).scalars().all()
+            for r in cron_rows:
+                if r.dify_document_id and r.node_id:
+                    dt_map[r.dify_document_id] = (r.node_id, f"https://alidocs.dingtalk.com/i/nodes/{r.node_id}")
+
+    for h in hits:
+        did = h.get("document_id")
+        if did and did in enriched_meta:
+            h["doc_meta"] = enriched_meta[did]
+        mapping = dt_map.get(did) if did else None
+        if mapping:
+            h["url"] = mapping[1]
+            h["node_id"] = mapping[0]
+            h["source"] = "dingtalk"
+
     return {"results": hits, "total": len(hits)}
+
+
+@router.post("/internal/process/context-expand", dependencies=[Depends(_verify_internal_token)])
+async def internal_context_expand(body: dict, s: AsyncSession = Depends(get_session)):
+    """上下文扩展：供 DeerFlow 智能体调用，根据命中文档 ID 获取摘要+关联文档+标签。
+
+    body: {"document_ids": [...], "query": "...", "max_related": 3}
+    """
+    from app.services.processing import expand_context
+    document_ids = body.get("document_ids") or []
+    query = body.get("query") or ""
+    max_related = int(body.get("max_related") or 3)
+    return await expand_context(s, document_ids, query, max_related)
 
 
 class DingTalkSearchIn(BaseModel):

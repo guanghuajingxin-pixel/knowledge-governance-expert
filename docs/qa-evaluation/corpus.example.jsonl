@@ -1,0 +1,2 @@
+{"id":"policy-001","category":"流程与角色","question":"请填写业务专家提供的真实问题","answerable":true,"expected_answer":"填写经确认的标准答案，包含条件、例外、角色和数值","reference_ids":[],"must_include":[],"must_not_include":[],"dify_dataset_ids":[]}
+{"id":"missing-001","category":"知识缺口","question":"请填写已经确认在授权知识中没有答案的问题","answerable":false,"expected_answer":"应说明依据不足，不编造结论","reference_ids":[],"must_include":[],"must_not_include":[],"dify_dataset_ids":[]}

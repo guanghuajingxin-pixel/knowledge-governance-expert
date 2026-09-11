@@ -28,6 +28,7 @@ KEYS = {
     "dingtalk_app_key": ("钉钉 AppKey", False),
     "dingtalk_app_secret": ("钉钉 AppSecret", True),
     "dingtalk_operator_union_id": ("钉钉操作人 UnionId", False),
+    "dingtalk_robot_code": ("钉钉机器人 robotCode（发知识缺口通知）", False),
 }
 
 
@@ -79,6 +80,7 @@ class TestLLMIn(BaseModel):
     base_url: str = ""
     api_key: str = ""
     model: str = ""
+    profile_id: str = ""   # 编辑弹窗未重填 Key 时，回退该 llm_profile 已保存的 Key
 
 
 @router.post("/test-llm")
@@ -86,11 +88,33 @@ async def test_llm_api(body: TestLLMIn, u=Depends(require_role("super_admin", "a
                        s: AsyncSession = Depends(get_session)):
     """LLM 连通性测试：用弹窗中填写的参数发一次最小请求。
 
-    api_key 留空时回退到已配置的密钥（密钥不回显，测试无需重复输入）。
+    编辑模型配置弹窗带 profile_id：api_key/model 留空时回退到该配置
+    已保存的 Key 与默认模型（密钥不回显，测试无需重复输入）。
+    无 profile_id 时回退到旧 settings 中的全局 LLM 密钥。
     """
-    base_url = (body.base_url or getattr(get_settings(), "llm_base_url", "")).strip()
-    model = (body.model or getattr(get_settings(), "llm_model", "")).strip()
     api_key = body.api_key.strip()
+    base_url = body.base_url.strip()
+    model = body.model.strip()
+
+    profile = None
+    if body.profile_id.strip():
+        try:
+            profile = await s.get(LLMProfile, uuid.UUID(body.profile_id.strip()))
+        except (ValueError, TypeError):
+            profile = None
+    if profile is not None:
+        if not api_key:
+            api_key = profile.api_key
+        if not base_url:
+            base_url = (profile.base_url or "").strip()
+        if not model:
+            # 默认模型优先，其次第一个生效模型
+            entries = [m for m in _parse_models(profile.models) if m.get("enabled")]
+            default_entry = next((m for m in entries if m.get("is_default")), None)
+            model = ((default_entry or (entries[0] if entries else {})).get("name") or "")
+
+    base_url = (base_url or getattr(get_settings(), "llm_base_url", "")).strip()
+    model = (model or getattr(get_settings(), "llm_model", "")).strip()
     if not api_key:
         row = (await s.execute(select(Setting).where(Setting.key == "llm_api_key"))).scalar_one_or_none()
         api_key = (row.value if row else "") or getattr(get_settings(), "llm_api_key", "")

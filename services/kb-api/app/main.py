@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routes import auth, users, internal, knowledge_base, directory, document, search, settings_route, knowledge_center, dify_route, operate, governance, agent_route, agent_internal, chat_session_route, qa_route
+from app.routes import auth, users, internal, knowledge_base, directory, document, search, settings_route, knowledge_center, dify_route, operate, governance, agent_route, agent_internal, chat_session_route, qa_route, sync_route, process_route, knowledge_gaps
 
 
 @asynccontextmanager
@@ -40,7 +40,24 @@ async def lifespan(app: FastAPI):
     from app.routes import operate
     operate.start_operate_scheduler()
 
-    yield
+    # 钉钉知识库 → Dify 定时增量同步调度器（按各同步源 cron 字段注册任务）
+    try:
+        from app.services.sync.scheduler import start_sync_scheduler
+        start_sync_scheduler()
+    except Exception as e:
+        # 同步调度器启动失败不应影响主服务（如依赖缺失/表未建）
+        import logging
+        logging.getLogger(__name__).warning("同步调度器启动失败: %s", e)
+
+    try:
+        yield
+    finally:
+        # 关闭应用（含开发热重载）时停止后台线程，避免遗留调度任务。
+        try:
+            from app.services.sync.scheduler import shutdown_sync_scheduler
+            shutdown_sync_scheduler()
+        except Exception:
+            pass
 
 
 app = FastAPI(title="KB API", lifespan=lifespan)
@@ -58,10 +75,13 @@ app.include_router(knowledge_center.router)
 app.include_router(dify_route.router)
 app.include_router(operate.router)
 app.include_router(governance.router)
+app.include_router(knowledge_gaps.router)
 app.include_router(agent_route.router)
 app.include_router(agent_internal.router)
 app.include_router(chat_session_route.router)
 app.include_router(qa_route.router)
+app.include_router(sync_route.router)
+app.include_router(process_route.router)
 
 @app.get("/health")
 def health(): return {"status": "ok"}

@@ -7,7 +7,7 @@ import {
   getAgentTools, listSkills, saveSkillDoc as putSkillDoc, deleteSkillDoc, importSkillDoc,
   type AgentConfig, type AgentTool, type SkillDoc,
 } from '@/api/agent'
-import { listLlmModels } from '@/api/settings'
+import { listEnabledLlmModels } from '@/api/settings'
 
 const loading = ref(false)
 const saving = ref(false)
@@ -27,17 +27,18 @@ const form = reactive<AgentConfig>({
   subagent_enabled: false,
   long_memory_enabled: true,
   deep_think_default: false,
-  temperature: 0.7,
+  temperature: 0,
   top_p: 0.9,
-  max_tokens: 2048,
-  top_k: 5,
+  max_tokens: 4096,
+  top_k: 8,
   max_retrieval_rounds: 2,
 })
 
 // 工具目录（名称/描述来自后端 /agent/tools，开关状态保存于 form.tools_enabled）
 const toolCatalog = ref<AgentTool[]>([])
 
-const modelOptions = ref<string[]>([])
+// 仅可选择系统已接入（生效）的模型；is_default 为系统配置里的默认模型
+const modelOptions = ref<Array<{ model: string; profile_id: string; profile_name: string; is_default: boolean }>>([])
 
 async function load() {
   loading.value = true
@@ -54,16 +55,33 @@ async function load() {
   } finally {
     loading.value = false
   }
-  // 拉取供应商可用模型作为「添加模型」的候选
+  // 拉取系统已接入（生效）的模型作为候选，仅可选择、不允许手输模型名
   try {
-    const res = await listLlmModels({})
-    if (res.ok) modelOptions.value = res.models
+    const res = await listEnabledLlmModels()
+    const seen = new Map<string, { model: string; profile_id: string; profile_name: string; is_default: boolean }>()
+    for (const m of res.models || []) {
+      const prev = seen.get(m.model)
+      // 同名模型跨配置去重，优先保留带默认标记的条目
+      if (!prev || (!prev.is_default && m.is_default)) {
+        seen.set(m.model, { model: m.model, profile_id: m.profile_id, profile_name: m.profile_name, is_default: !!m.is_default })
+      }
+    }
+    modelOptions.value = [...seen.values()]
+    // 未配置过模型时，默认选中系统配置里的默认模型
+    if (!form.models.length && modelOptions.value.length) {
+      const def = modelOptions.value.find((m) => m.is_default) || modelOptions.value[0]
+      form.models = [def.model]
+    }
   } catch {
     /* 未配置 LLM 时忽略 */
   }
 }
 
 async function save() {
+  if (form.models.length > 10) {
+    ElMessage.error('模型最多选择 10 个')
+    return
+  }
   saving.value = true
   try {
     await updateAgentConfig({ ...form })
@@ -119,7 +137,7 @@ async function savePersonaDoc() {
     const res = await savePersona({ content: persona.content })
     persona.saved = persona.content
     persona.custom = res.custom
-    ElMessage.success('人格已保存，新对话即时生效')
+    ElMessage.success('人格已保存至兼容服务')
   } catch (e: any) {
     ElMessage.error(e?.response?.data?.detail || '保存失败')
   } finally {
@@ -153,7 +171,7 @@ async function saveSkillDoc() {
     const res = await saveSkill({ content: skill.content })
     skill.saved = skill.content
     skill.custom = res.custom
-    ElMessage.success('技能已保存，新对话即时生效')
+    ElMessage.success('技能已保存至兼容服务')
   } catch (e: any) {
     ElMessage.error(e?.response?.data?.detail || '保存失败')
   } finally {
@@ -259,7 +277,7 @@ async function saveSkillForm() {
       content: skillForm.content,
       enabled: skillForm.enabled,
     })
-    ElMessage.success('技能已保存，新对话即时生效')
+    ElMessage.success('技能已保存至兼容服务')
     skillDialogVisible.value = false
     await loadSkills()
   } catch (e: any) {
@@ -321,7 +339,7 @@ async function onImportFile(e: Event) {
     <div class="page-head">
       <div>
         <h2 class="page-title">智能体配置</h2>
-        <p class="page-sub">配置「杰克百晓生」问答智能体的模型、知识库调用策略、开场白与运行超参（参考 DeerFlow 规划-检索-反思-报告架构）</p>
+        <p class="page-sub">配置企业知识检索、钉钉补查与会话上下文；回答须通过原文依据核验。</p>
       </div>
       <el-button type="primary" :loading="saving" @click="save">保存配置</el-button>
     </div>
@@ -334,22 +352,27 @@ async function onImportFile(e: Event) {
           <el-collapse-item name="model">
             <template #title>
               <span class="card-title"><span class="card-ico ico-model">🧊</span> 模型
-                <span class="card-hint">参与调度的模型（最多 10 个），问答页可切换；为空则使用系统配置的默认模型</span>
+                <span class="card-hint">仅可选择系统已接入的模型（最多 10 个）；问答页模型下拉仅展示此列表</span>
               </span>
             </template>
             <el-select
               v-model="form.models"
               multiple
               filterable
-              allow-create
-              default-first-option
               :reserve-keyword="false"
-              placeholder="输入或选择模型名后回车添加，最多 10 个"
+              placeholder="选择系统已接入的模型，最多 10 个"
               class="full-width"
             >
-              <el-option v-for="m in modelOptions" :key="m" :label="m" :value="m" />
+              <el-option
+                v-for="m in modelOptions"
+                :key="`${m.profile_id}-${m.model}`"
+                :label="m.profile_name ? `${m.model}（${m.profile_name}）` : m.model"
+                :value="m.model"
+              >
+                <span>{{ m.model }}</span>
+                <span v-if="m.is_default" style="float: right; color: #409eff; font-size: 12px">默认</span>
+              </el-option>
             </el-select>
-            <div class="card-foot">＋ 添加 {{ form.models.length }}/10</div>
           </el-collapse-item>
 
           <!-- 知识库 -->
@@ -364,7 +387,7 @@ async function onImportFile(e: Event) {
             </template>
             <div class="mode-desc">
               <p><b>强制调用</b>：每个问题（含问候寒暄）都检索知识库后再回答，答案严格来自知识库。</p>
-              <p><b>智能调用</b>：由分类器判断——闲聊问候直接应答不检索，业务问题才走知识库；资料不足时自动换角度重检（反思循环，轮数见「高级设置 → 超参维护」）。</p>
+              <p><b>智能调用</b>：闲聊问候直接应答，业务问题先检索知识库；原文不能覆盖问题时补查，仍不足则尝试钉钉 DWS。</p>
             </div>
           </el-collapse-item>
 
@@ -381,7 +404,7 @@ async function onImportFile(e: Event) {
                   <span class="tool-name">{{ t.name }}</span>
                   <span class="tool-desc">{{ t.desc }}</span>
                 </div>
-                <el-switch v-model="form.tools_enabled[t.key]" />
+                <el-switch v-model="form.tools_enabled[t.key]" :disabled="t.key === 'present_files'" :aria-label="t.name" />
               </div>
             </div>
           </el-collapse-item>
@@ -421,7 +444,7 @@ async function onImportFile(e: Event) {
               </span>
             </template>
             <div class="mode-desc">
-              <p>每次回答完成后，由模型生成 3 个「你可能还想问」的追问问题，点击即可直接提问。</p>
+              <p>完整回答通过核验后，提供查看原文依据的追问入口，点击即可提问。</p>
             </div>
           </el-collapse-item>
         </el-collapse>
@@ -433,36 +456,36 @@ async function onImportFile(e: Event) {
           <!-- 任务规划 -->
           <el-collapse-item name="planning">
             <template #title>
-              <span class="card-title"><span class="card-ico ico-plan">📋</span> 任务规划
+              <span class="card-title"><span class="card-ico ico-plan">📋</span> 补查规划
                 <el-switch v-model="form.planning_enabled" class="title-switch" @click.stop />
               </span>
             </template>
             <div class="mode-desc">
-              <p>复杂问题或深度思考时，先由规划器拆解为 3-5 个可检索的子任务计划（DeerFlow Planner），再逐步检索回答。</p>
+              <p>问题始终会拆分为最多 3 个检索查询。开启此项且检索轮数为 2 时，利用标签、摘要和文档关系补查缺失要点；关闭后仍保留钉钉兜底和答案核验。</p>
             </div>
           </el-collapse-item>
 
           <!-- 子智能体协作 -->
           <el-collapse-item name="subagent">
             <template #title>
-              <span class="card-title"><span class="card-ico ico-plan">🧩</span> 子智能体协作
-                <el-switch v-model="form.subagent_enabled" class="title-switch" @click.stop />
+              <span class="card-title"><span class="card-ico ico-plan">🧩</span> 子智能体协作（兼容配置）
+                <el-switch v-model="form.subagent_enabled" disabled class="title-switch" @click.stop />
               </span>
             </template>
             <div class="mode-desc">
-              <p>开启后，DeerFlow Lead Agent 可将复杂问题并行派发给多个 Sub-Agent 分头调研（各自独立检索与推理），再汇总综合作答。回答更全面但耗时与 Token 消耗更高，建议仅在深度研究场景开启。</p>
+              <p>此设置仅供旧版 DeerFlow 服务使用。当前问答执行固定的检索、补查与核验流程，不受此开关影响。</p>
             </div>
           </el-collapse-item>
 
           <!-- 长期记忆 -->
           <el-collapse-item name="memory">
             <template #title>
-              <span class="card-title"><span class="card-ico ico-mem">🧠</span> 长期记忆
+              <span class="card-title"><span class="card-ico ico-mem">🧠</span> 会话上下文
                 <el-switch v-model="form.long_memory_enabled" class="title-switch" @click.stop />
               </span>
             </template>
             <div class="mode-desc">
-              <p>提问时携带最近多轮对话参与问题改写与答案生成，支持「它/那个/上一条」等指代追问；关闭则每轮独立。</p>
+              <p>使用当前会话最近 8 条消息理解「它/那个/上一条」等指代，事实仍需重新检索原文。关闭后每轮独立，不共享其他会话的记忆。</p>
             </div>
           </el-collapse-item>
 
@@ -474,7 +497,7 @@ async function onImportFile(e: Event) {
               </span>
             </template>
             <div class="mode-desc">
-              <p>新会话默认开启深度思考：召回条数提升至 ≥10，生成温度调高，并要求分步拆解、逐一引证的详尽回答。</p>
+              <p>新会话默认扩大检索范围，召回条数至少为 12；事实生成温度保持为 0，回答中的事实仍须逐项核验。</p>
             </div>
           </el-collapse-item>
 
@@ -485,8 +508,8 @@ async function onImportFile(e: Event) {
             </template>
             <div class="hyper-grid">
               <div class="hyper-item">
-                <div class="hyper-label">温度 Temperature <b>{{ form.temperature.toFixed(1) }}</b></div>
-                <el-slider v-model="form.temperature" :min="0" :max="2" :step="0.1" />
+                <div class="hyper-label">事实生成温度 <b>0（固定）</b></div>
+                <el-slider :model-value="0" :min="0" :max="2" :step="0.1" disabled />
               </div>
               <div class="hyper-item">
                 <div class="hyper-label">Top-P <b>{{ form.top_p.toFixed(2) }}</b></div>
@@ -497,12 +520,12 @@ async function onImportFile(e: Event) {
                 <el-slider v-model="form.top_k" :min="1" :max="20" :step="1" />
               </div>
               <div class="hyper-item">
-                <div class="hyper-label">检索反思轮数 <b>{{ form.max_retrieval_rounds }}</b></div>
-                <el-slider v-model="form.max_retrieval_rounds" :min="1" :max="4" :step="1" />
+                <div class="hyper-label">企业知识检索轮数 <b>{{ form.max_retrieval_rounds }}</b></div>
+                <el-slider v-model="form.max_retrieval_rounds" :min="1" :max="2" :step="1" />
               </div>
               <div class="hyper-item hyper-item--input">
-                <div class="hyper-label">最大输出 Tokens</div>
-                <el-input-number v-model="form.max_tokens" :min="256" :max="8192" :step="256" />
+                <div class="hyper-label">单次生成 / 核验 Tokens 上限</div>
+                <el-input-number v-model="form.max_tokens" :min="3000" :max="8192" :step="256" />
               </div>
             </div>
           </el-collapse-item>
@@ -510,7 +533,8 @@ async function onImportFile(e: Event) {
       </el-tab-pane>
 
       <!-- ============ 人格与技能（DeerFlow SOUL / SKILL 提示词） ============ -->
-      <el-tab-pane label="人格与技能" name="prompt">
+      <el-tab-pane label="人格与技能（兼容）" name="prompt">
+        <el-alert title="以下设置仅作用于旧版 DeerFlow 服务。当前企业问答的检索与核验规则由程序维护。" type="info" :closable="false" show-icon />
         <div v-loading="promptLoading">
           <!-- 人格 SOUL.md -->
           <div class="prompt-card">
@@ -528,7 +552,7 @@ async function onImportFile(e: Event) {
             </div>
             <p class="prompt-desc">
               定义智能体的身份、职责与行为准则（DeerFlow 系统提示词）。例如：双源检索策略、
-              答案风格、引用规范。修改后<strong>新对话即时生效</strong>，进行中的会话不受影响；自定义内容持久化，服务重启不丢失。
+              答案风格、引用规范。修改后<strong>在旧版服务的新对话中生效</strong>，进行中的会话不受影响；自定义内容持久化，服务重启不丢失。
             </p>
             <el-input
               v-model="persona.content"
@@ -556,7 +580,7 @@ async function onImportFile(e: Event) {
             <p class="prompt-desc">
               定义「企业知识库问答」技能的工作流指令（DeerFlow Skill）：意图判断、检索策略、
               作答规范、引用来源等。<strong>头部 frontmatter（name/description/version）需保留</strong>；
-              修改后新对话即时生效，自定义内容持久化。
+              修改后在旧版服务的新对话中生效，自定义内容持久化。
             </p>
             <el-input
               v-model="skill.content"
@@ -570,12 +594,12 @@ async function onImportFile(e: Event) {
       </el-tab-pane>
 
       <!-- ============ 技能库（ClawHub 通用 SKILL.md 结构） ============ -->
-      <el-tab-pane label="技能库" name="skills">
+      <el-tab-pane label="技能库（兼容）" name="skills">
         <div class="skill-page" v-loading="skillsLoading">
           <div class="skill-toolbar">
             <div class="skill-toolbar-hint">
               兼容 ClawHub 通用技能结构：每个技能为一个目录 + <code>SKILL.md</code>（含 name/description frontmatter）。
-              启用后智能体在新对话中自动按需调用。
+              仅供旧版 DeerFlow 服务按需调用，当前企业问答不加载这些自定义技能。
             </div>
             <div class="skill-toolbar-ops">
               <input
@@ -752,12 +776,6 @@ async function onImportFile(e: Event) {
 }
 .full-width {
   width: 100%;
-}
-.card-foot {
-  margin-top: 10px;
-  font-size: 13px;
-  color: #2b6bff;
-  font-weight: 600;
 }
 .sub-label {
   margin: 14px 0 8px;

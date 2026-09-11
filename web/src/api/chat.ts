@@ -29,6 +29,9 @@ export interface TokenUsage {
 }
 
 export interface ChatResponse {
+  answer_status?: 'answered' | 'partial' | 'insufficient' | 'clarification' | 'greeting'
+  engine?: string
+  quality?: { verification: string; dws: string; warnings: string[] }
   answer: string
   citations: SearchResult[]
   /** 下一步问题建议（智能体配置开启时返回） */

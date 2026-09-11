@@ -1,0 +1,7 @@
+# This workspace also contains local diagnostics and generated artifacts.
+# Keep the repository limited to the two application projects.
+/*
+!/.gitignore
+!/DEPLOYMENT.md
+!/kb-sync-service/
+!/kb-sync-web/

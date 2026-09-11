@@ -11,9 +11,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select, func, case, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 from kb_common.database import get_session
-from kb_common.models import KnowledgeBase, Directory, Document, User
+from kb_common.models import KnowledgeBase, Directory, Document, User, KnowledgeSource
 from kb_common.clients import es_client
-from app.schemas import DirOut, KcDocumentOut, TrashItemOut, TaskStatsOut
+from app.schemas import (
+    DirOut, KcDocumentOut, TrashItemOut, TaskStatsOut,
+    KnowledgeSourceCreate, KnowledgeSourceOut, KnowledgeSourceUpdate,
+)
 from app.deps import get_current_user, require_role
 
 logger = logging.getLogger(__name__)
@@ -298,6 +301,67 @@ async def list_uploaders(
         q = q.where(KnowledgeBase.kb_type == kb_type)
     rows = (await s.execute(q)).all()
     return [{"id": str(r.id), "name": r.username} for r in rows]
+
+
+@router.get("/dingtalk/workspaces")
+async def list_dingtalk_workspaces(u=Depends(get_current_user)):
+    """实时列出操作人可见的钉钉团队知识库（单次 API 调用，含根节点 ID）。"""
+    from kb_common.clients import dingtalk_client
+
+    try:
+        await dingtalk_client.sync_runtime_config()
+    except Exception as e:
+        return {"items": [], "error": f"钉钉配置加载失败：{e}"}
+    if not dingtalk_client.is_configured():
+        return {"items": [], "error": "钉钉 AppKey/AppSecret/操作人 未配置，请在「系统配置」中填写后重试"}
+    try:
+        workspaces = await dingtalk_client.list_workspaces()
+    except Exception as e:
+        return {"items": [], "error": f"获取钉钉知识库列表失败：{e}"}
+    items = [
+        {"id": w.get("workspaceId"), "name": w.get("name") or "", "root_node_id": w.get("rootNodeId") or ""}
+        for w in workspaces
+        if w.get("workspaceId") and w.get("type") != "PERSONAL"
+    ]
+    items.sort(key=lambda x: x["name"])
+    return {"items": items, "error": None}
+
+
+@router.get("/dingtalk/nodes")
+async def list_dingtalk_child_nodes(
+    parent_node_id: str = Query(..., description="父节点 ID（知识库根节点或目录节点）"),
+    u=Depends(get_current_user),
+):
+    """实时列出某父节点下的直接子节点（单次 API 调用，用于按目录查询文档）。"""
+    from kb_common.clients import dingtalk_client
+
+    if not parent_node_id.strip():
+        raise HTTPException(400, "parent_node_id 不能为空")
+    try:
+        await dingtalk_client.sync_runtime_config()
+        if not dingtalk_client.is_configured():
+            raise HTTPException(400, "钉钉 AppKey/AppSecret/操作人 未配置，请在「系统配置」中填写后重试")
+        nodes = await dingtalk_client.list_nodes(parent_node_id.strip())
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, f"获取钉钉目录内容失败：{e}")
+    items = []
+    for n in nodes:
+        is_folder = n.get("type") == "FOLDER"
+        items.append({
+            "node_id": n.get("nodeId"),
+            "name": n.get("name") or "",
+            "is_folder": is_folder,
+            "has_children": bool(n.get("hasChildren")),
+            "extension": n.get("extension"),
+            "size": int(n.get("size") or 0),
+            "url": n.get("url"),
+            "creator_id": n.get("creatorId") or "",
+            "created_at": n.get("createTime"),
+            "modified_at": n.get("modifiedTime"),
+        })
+    return {"items": items}
 
 
 @router.get("/dingtalk/documents")
@@ -589,3 +653,140 @@ async def get_task_stats(
         "completed": row.completed or 0,
         "failed": row.failed or 0,
     }
+
+
+# ========== 知识源登记（企业知识库注册表）==========
+
+@router.get("/knowledge-sources", response_model=list[KnowledgeSourceOut])
+async def list_knowledge_sources(
+    source_type: str | None = Query(None, description="按类型筛选：dingtalk_workspace | dify_dataset | business_system"),
+    enabled_only: bool = Query(False, description="只返回已启用的知识库"),
+    u=Depends(get_current_user),
+    s: AsyncSession = Depends(get_session),
+):
+    """知识库列表：系统内所有「选择知识库」的地方均从此接口取数。"""
+    q = select(KnowledgeSource)
+    if source_type:
+        q = q.where(KnowledgeSource.source_type == source_type)
+    if enabled_only:
+        q = q.where(KnowledgeSource.enabled == True)
+    q = q.order_by(KnowledgeSource.source_type, KnowledgeSource.id.desc())
+    rows = (await s.execute(q)).scalars().all()
+    return rows
+
+
+@router.post("/knowledge-sources", response_model=KnowledgeSourceOut,
+             dependencies=[Depends(require_role("super_admin", "admin"))])
+async def create_knowledge_source(
+    payload: KnowledgeSourceCreate,
+    u=Depends(get_current_user),
+    s: AsyncSession = Depends(get_session),
+):
+    """新增知识库登记。钉钉知识库登记后自动触发知识缺口页的目录快照刷新。"""
+    if not payload.name.strip():
+        raise HTTPException(422, "知识库名称不能为空")
+    if not payload.external_id.strip():
+        raise HTTPException(422, "知识库 ID（external_id）不能为空")
+    source = KnowledgeSource(**payload.model_dump())
+    s.add(source)
+    await s.commit()
+    await s.refresh(source)
+    # 钉钉知识库：登记后立即后台拉取文件夹快照（知识缺口页数据源），
+    # 避免用户首次进入该页时还要手动点刷新。
+    if source.source_type == "dingtalk_workspace":
+        import asyncio
+        from app.routes.knowledge_gaps import start_dingtalk_refresh
+        start_dingtalk_refresh(asyncio.get_running_loop(), source)
+    return source
+
+
+@router.put("/knowledge-sources/{source_id}", response_model=KnowledgeSourceOut,
+            dependencies=[Depends(require_role("super_admin", "admin"))])
+async def update_knowledge_source(
+    source_id: int,
+    payload: KnowledgeSourceUpdate,
+    u=Depends(get_current_user),
+    s: AsyncSession = Depends(get_session),
+):
+    """更新知识库登记。"""
+    source = await s.get(KnowledgeSource, source_id)
+    if source is None:
+        raise HTTPException(404, "知识库不存在")
+    for key, value in payload.model_dump(exclude_unset=True).items():
+        setattr(source, key, value)
+    await s.commit()
+    await s.refresh(source)
+    return source
+
+
+@router.delete("/knowledge-sources/{source_id}",
+               dependencies=[Depends(require_role("super_admin", "admin"))])
+async def delete_knowledge_source(
+    source_id: int,
+    u=Depends(get_current_user),
+    s: AsyncSession = Depends(get_session),
+):
+    """删除知识库登记。"""
+    source = await s.get(KnowledgeSource, source_id)
+    if source is None:
+        raise HTTPException(404, "知识库不存在")
+    await s.delete(source)
+    await s.commit()
+    return {"ok": True}
+
+
+@router.get("/knowledge-sources/{source_id}/directories")
+async def get_knowledge_source_directories(
+    source_id: int,
+    parent_node_id: str | None = Query(None, description="父节点 ID，不传则从知识库根目录开始"),
+    u=Depends(get_current_user),
+    s: AsyncSession = Depends(get_session),
+):
+    """获取某知识库下的目录（供其它模块通过知识库 ID 获取目录结构）。
+
+    目前支持：
+    - dingtalk_workspace：调用钉钉开放平台列出子节点
+    - dify_dataset：返回 Dify 数据集内文档（简化为平铺列表）
+    - business_system：返回空列表（待实现）
+    """
+    source = await s.get(KnowledgeSource, source_id)
+    if source is None:
+        raise HTTPException(404, "知识库不存在")
+    if not source.enabled:
+        raise HTTPException(400, "该知识库已停用")
+
+    if source.source_type == "dingtalk_workspace":
+        from kb_common.clients import dingtalk_client
+        try:
+            await dingtalk_client.sync_runtime_config()
+            if not dingtalk_client.is_configured():
+                raise HTTPException(400, "钉钉配置未就绪")
+            # 优先用 config.root_node_id，否则用 external_id 作为 workspace 根
+            root = (source.config or {}).get("root_node_id") or source.external_id
+            nodes = await dingtalk_client.list_nodes(root)
+            return {
+                "source_type": source.source_type,
+                "root_node_id": root,
+                "items": [
+                    {
+                        "node_id": n.get("nodeId"),
+                        "name": n.get("name") or "",
+                        "is_folder": n.get("type") == "FOLDER",
+                        "has_children": bool(n.get("hasChildren")),
+                        "extension": n.get("extension"),
+                        "url": n.get("url"),
+                    }
+                    for n in nodes
+                ],
+            }
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(502, f"获取钉钉目录失败：{e}")
+
+    if source.source_type == "dify_dataset":
+        # Dify 数据集本身就是一层文档集合，无多级目录
+        return {"source_type": source.source_type, "root_node_id": source.external_id, "items": []}
+
+    # business_system：暂未实现，返回空
+    return {"source_type": source.source_type, "root_node_id": source.external_id, "items": []}

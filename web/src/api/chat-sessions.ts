@@ -18,6 +18,8 @@ export interface ChatSessionMessage {
   citations: string[]
   meta: string
   detail?: {
+    quality?: { verification: string; dws: string; warnings: string[] }
+    answer_status?: string
     steps?: { title?: string; detail?: string; done?: boolean }[]
     retrieval?: Record<string, unknown>[]
     model?: string
