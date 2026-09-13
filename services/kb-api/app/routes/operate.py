@@ -13,9 +13,8 @@ from datetime import datetime, date, timedelta
 
 from fastapi import APIRouter, Depends
 from sqlalchemy import select, delete
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from kb_common.database import get_session, SessionLocal
+from kb_common.database import SessionLocal
 from app.deps import require_role
 
 logger = logging.getLogger(__name__)
@@ -25,6 +24,7 @@ router = APIRouter(prefix="/api/v1/operate", tags=["operate"])
 # ===== 配置 =====
 _HOT_CATEGORIES = {"DOCUMENT", "ALIDOC"}   # 热门统计只算知识文档（上传文档 + 在线文档）
 _RECORD_RETENTION_DAYS = 180               # 流水保留天数
+_HOT_SCAN_CONCURRENCY = 3                  # 热门扫描并发 worker 数（钉钉限流约束，再高只会换来 403 重试）
 
 # 遍历原始数据缓存（供热门扫描取候选清单；TTL 1 小时）
 _stats_cache: dict = {"data": None, "expire_at": 0.0, "error": None, "walk_info": None}
@@ -101,17 +101,23 @@ def _is_stale() -> bool:
 
 
 # ===== 全量统计任务 =====
-def _start_job(trigger: str) -> bool:
-    """启动全量统计（已有任务在跑则忽略）。"""
+def _start_job(trigger: str, include_hot: bool = True) -> bool:
+    """启动全量统计（已有任务在跑则忽略）。
+
+    include_hot=False 时跳过「热门知识 Top20」扫描：该阶段要逐个文档 fork 一个
+    dws CLI 子进程（实测 11037 个文档、约 25 分钟），期间整机 CPU 被打满、
+    所有接口间歇性 3~50 秒——只能由每日 0 点定时任务和用户手动刷新触发，
+    不能因为「服务重启补统计」或「有人打开运营页」就跑。
+    """
     if _job["running"]:
         return False
     _job["running"] = True
     _job["phase"] = "storage"
-    asyncio.create_task(_run_full_stats(trigger))
+    asyncio.create_task(_run_full_stats(trigger, include_hot=include_hot))
     return True
 
 
-async def _run_full_stats(trigger: str) -> None:
+async def _run_full_stats(trigger: str, include_hot: bool = True) -> None:
     """全量统计：存储总量 → 知识数量/分布（全量遍历）→ 热门 Top20，各完成即落库并更新快照。"""
     from kb_common.clients import dingtalk_client as dt
     try:
@@ -174,10 +180,14 @@ async def _run_full_stats(trigger: str) -> None:
             await _save_metric_record("storage", sv, trigger)
             _snapshot["storage"] = {**sv, "created_at": _now_str()}
 
-        # ---- 3) 热门知识 Top20（逐文档统计，约 30 分钟） ----
-        if data:
+        # ---- 3) 热门知识 Top20（逐文档 fork dws CLI 统计，万级文档约 25 分钟） ----
+        # 只在每日定时任务与手动刷新时跑：启动补统计/打开运营页都不触发，
+        # 否则整机 CPU 被子进程吃满，整站点击都会卡几秒到几十秒。
+        if data and include_hot:
             _job["phase"] = "hot"
             await _scan_hot_docs(trigger)
+        elif data:
+            logger.info("本次统计跳过热门知识扫描（trigger=%s），沿用上一次落库结果", trigger)
 
         logger.info("运营指标全量统计完成（trigger=%s）", trigger)
     except Exception as e:
@@ -212,18 +222,30 @@ async def _scan_hot_docs(trigger: str) -> None:
     _hot_cache["total"] = len(candidates)
     _hot_cache["scores"] = {}
     _hot_cache["scanned"] = 0
-    sem = asyncio.Semaphore(3)
 
-    async def worker(f: dict) -> None:
-        async with sem:
+    # 固定 3 个 worker 从队列取任务：原先一次性 gather 上万个协程
+    # （实测 11037 个文档 = 11037 个协程同时挂在事件循环上），内存与调度开销都很大。
+    # 并发度仍为 3——受钉钉侧限流约束，再高只会换来 403 重试。
+    queue: asyncio.Queue = asyncio.Queue()
+    for f in candidates:
+        queue.put_nowait(f)
+
+    async def worker() -> None:
+        while True:
+            try:
+                f = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return
             try:
                 st = await dt.get_node_stats_via_cli(f["node_id"])
+                _hot_cache["scores"][f["node_id"]] = st
+                _hot_cache["scanned"] += 1
+                if _hot_cache["scanned"] % 500 == 0:
+                    logger.info("热门知识扫描进度：%d/%d", _hot_cache["scanned"], _hot_cache["total"])
             except Exception:
-                return  # 单节点失败跳过，不中断整体
-            _hot_cache["scores"][f["node_id"]] = st
-            _hot_cache["scanned"] += 1
+                pass  # 单节点失败跳过，不中断整体
 
-    await asyncio.gather(*(worker(f) for f in candidates))
+    await asyncio.gather(*(worker() for _ in range(_HOT_SCAN_CONCURRENCY)))
     hd: dict = {"items": _top_hot_docs(20), "total": _hot_cache["total"],
                 "scanned": _hot_cache["scanned"]}
     if _hot_cache["scanned"] < _hot_cache["total"]:
@@ -280,8 +302,9 @@ def start_operate_scheduler() -> None:
         except Exception as e:
             logger.warning("运营指标快照恢复失败: %s", e)
         if _is_stale():
-            logger.info("运营指标缺少今日数据，启动补统计")
-            _start_job("daily")
+            # 只补存储/知识数量；热门扫描留给每日 0 点任务或手动刷新
+            logger.info("运营指标缺少今日数据，启动补统计（不含热门知识扫描）")
+            _start_job("startup", include_hot=False)
 
     asyncio.create_task(_bootstrap())
     asyncio.create_task(_daily_scheduler())
@@ -289,16 +312,16 @@ def start_operate_scheduler() -> None:
 
 # ===== 接口 =====
 @router.get("/overview")
-async def overview(u=Depends(require_role("super_admin", "admin", "editor", "viewer")),
-                   s: AsyncSession = Depends(get_session)):
+async def overview(u=Depends(require_role("super_admin", "admin", "editor", "viewer"))):
     """顶部核心指标：取流水表最新记录展示（内存快照镜像）。"""
     from kb_common.clients import dingtalk_client as dt
     await dt.sync_runtime_config()
     await _hydrate_snapshot()
 
-    # 今天还没有数据（如 0 点服务重启错过定时任务）→ 兜底触发补统计
-    if dt.is_configured() and _is_stale() and not _job["running"]:
-        _start_job("daily")
+    # 读接口不再自动触发全量统计：一次统计要遍历钉钉 + 逐文档扫描，长达 25 分钟，
+    # 期间整机 CPU 被打满、所有接口间歇性卡 3~50 秒。
+    # 数据过期时返回 stale 标记，由前端提示用户点「刷新」（或等每日 0 点定时任务）。
+    stale = bool(dt.is_configured()) and _is_stale()
 
     sv = _snapshot.get("storage") or {}
     kc = _snapshot.get("knowledge_count") or {}
@@ -317,6 +340,7 @@ async def overview(u=Depends(require_role("super_admin", "admin", "editor", "vie
         },
         "dingtalk_configured": dt.is_configured(),
         "job": {"running": _job["running"], "phase": _job["phase"]},
+        "stale": stale,
     }
 
 
@@ -324,7 +348,6 @@ async def overview(u=Depends(require_role("super_admin", "admin", "editor", "vie
 async def knowledge_distribution(
     top_n: int | None = None,
     u=Depends(require_role("super_admin", "admin", "editor", "viewer")),
-    s: AsyncSession = Depends(get_session),
 ):
     """企业知识数量分布：取最新流水中的分布数据（饼图）。"""
     from kb_common.clients import dingtalk_client as dt
@@ -342,14 +365,14 @@ async def knowledge_distribution(
 
 
 @router.get("/hot-documents")
-async def hot_documents(u=Depends(require_role("super_admin", "admin", "editor", "viewer")),
-                        s: AsyncSession = Depends(get_session)):
+async def hot_documents(u=Depends(require_role("super_admin", "admin", "editor", "viewer"))):
     """热门知识 Top20：展示最新流水记录；扫描进行中时返回实时进度与部分排名。"""
     from kb_common.clients import dingtalk_client as dt
     await dt.sync_runtime_config()
     await _hydrate_snapshot()
-    if dt.is_configured() and _is_stale() and not _job["running"]:
-        _start_job("daily")
+    # 同 /overview：读接口不再自动触发全量统计（热门扫描要 fork 上万个 dws 子进程，
+    # 实测跑 25 分钟、期间整机 CPU 打满、所有接口间歇性卡 3~50 秒）。
+    stale = bool(dt.is_configured()) and _is_stale()
 
     hot_phase = _job["running"] and _job["phase"] == "hot"
     hd = _snapshot.get("hot_docs") or {}
@@ -365,13 +388,13 @@ async def hot_documents(u=Depends(require_role("super_admin", "admin", "editor",
         "total": total,
         "loading": bool(hot_phase),
         "error": None,
+        "stale": stale,
         "updated_at": hd.get("created_at"),
     }
 
 
 @router.post("/refresh-dingtalk")
-async def refresh_dingtalk(u=Depends(require_role("super_admin", "admin")),
-                           s: AsyncSession = Depends(get_session)):
+async def refresh_dingtalk(u=Depends(require_role("super_admin", "admin"))):
     """手动刷新：立即重新全量统计（存储 → 数量 → 热门），结果写流水并更新展示。"""
     from kb_common.clients import dingtalk_client as dt
     await dt.sync_runtime_config()

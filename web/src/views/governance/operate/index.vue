@@ -1,5 +1,5 @@
 <template>
-  <div class="operate-tabs-page">
+  <div class="kge-page">
     <el-tabs v-model="activeTab" class="operate-tabs">
       <el-tab-pane label="运营看板" name="dashboard">
         <Dashboard v-if="loaded.dashboard" />
@@ -31,11 +31,6 @@ watch(activeTab, (name) => {
 </script>
 
 <style scoped>
-.operate-tabs-page {
-  padding: 20px 24px 48px;
-  max-width: 1320px;
-  margin: 0 auto;
-}
 .operate-tabs :deep(.el-tabs__header) {
   margin-bottom: 16px;
 }

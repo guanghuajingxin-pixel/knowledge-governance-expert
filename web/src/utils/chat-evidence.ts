@@ -17,7 +17,9 @@ export function linkEvidence(markdown: string, citations: SearchResult[] = []): 
     if (part.startsWith('`')) return part
     return part.replace(/\[(\d+)\](?![([])/g, (whole, id: string) => {
       const citation = byId.get(Number(id))
-      const url = citation ? citationUrl(citation) : ''
+      // 悬空标记（无对应引用：模型自编或历史遗留）直接清除，不留孤立 [n]
+      if (!citation) return ''
+      const url = citationUrl(citation)
       return url ? `[${id}](<${url.replace(/>/g, '%3E')}>)` : whole
     })
   }).join('')

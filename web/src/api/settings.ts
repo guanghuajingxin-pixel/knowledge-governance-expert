@@ -14,6 +14,14 @@ export const getSettings = () => request.get<unknown, SettingsResponse>('/settin
 export const setSetting = (data: { key: string; value: string }) =>
   request.put<unknown, { ok: boolean }>('/settings', data)
 
+/** 站点外观（侧边栏 Logo 名称与图标，所有登录用户可读） */
+export interface SiteBranding {
+  site_name: string
+  site_logo: string
+}
+
+export const getSiteBranding = () => request.get<unknown, SiteBranding>('/settings/site')
+
 export interface TestLLMResult {
   ok: boolean
   latency_ms?: number
@@ -135,3 +143,25 @@ export interface TestMinerUResult {
 
 export const testMineru = (data: { api_key?: string }) =>
   request.post<unknown, TestMinerUResult>('/settings/test-mineru', data)
+
+// ============ 菜单显示配置（侧边栏功能区菜单显隐） ============
+
+export const getMenuVisibility = () =>
+  request.get<unknown, { hidden: string[] }>('/settings/menu-visibility')
+
+export const setMenuVisibility = (data: { hidden: string[] }) =>
+  request.put<unknown, { ok: boolean; hidden: string[] }>('/settings/menu-visibility', data)
+
+// ============ 钉钉机器人运行状态（系统配置页展示） ============
+
+export interface DingtalkBotStatus {
+  enabled: boolean
+  running: boolean
+  connected: boolean
+  last_error: string
+  started_at: string | null
+  qa_concurrency: number
+}
+
+export const getDingtalkBotStatus = () =>
+  request.get<unknown, DingtalkBotStatus>('/settings/dingtalk-bot-status')

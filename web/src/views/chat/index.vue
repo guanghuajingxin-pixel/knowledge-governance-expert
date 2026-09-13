@@ -1,16 +1,29 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted, onBeforeUnmount, computed, nextTick } from 'vue'
-import { useRouter } from 'vue-router'
-import { MagicStick, Search, User, ArrowUp, RefreshLeft, CopyDocument, EditPen, Delete } from '@element-plus/icons-vue'
+import { useRoute, useRouter } from 'vue-router'
+import { MagicStick, Search, User, ArrowUp, RefreshLeft, CopyDocument, EditPen, Delete, FullScreen, Operation } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import { streamChat, cancelChat, type StreamEvent, type TokenUsage, type ChatResponse } from '@/api/chat'
-import { listDifyDatasets, type DifyDataset } from '@/api/dify'
+import { listKnowledgeLibraries, type KnowledgeLibrary } from '@/api/knowledge-library'
 import { listEnabledLlmModels } from '@/api/settings'
 import { getGreeting } from '@/api/agent'
+import { getDingtalkConfig, dingtalkLogin } from '@/api/auth'
+import { useUserStore } from '@/stores/user'
 import type { SearchResult } from '@/types/search'
 import { citationUrl, linkEvidence } from '@/utils/chat-evidence'
+import { updateStep, settleSteps, evidenceLabel, type StepItem } from '@/utils/chat-progress'
+
+/** 引用来源标签：如实显示知识来源平台（与后端 citations.source 取值对应） */
+const SOURCE_LABELS: Record<string, string> = {
+  dingtalk: '钉钉',
+  dws: '钉钉', // 历史标记兼容
+  dify: 'DIFY',
+  ragflow: 'RagFlow',
+  local: '本地库',
+}
+const sourceLabel = (s?: string) => (s && SOURCE_LABELS[s]) || '知识库'
 import {
   listChatSessions, createChatSession, renameChatSession, deleteChatSession,
   getSessionMessages, saveChatTurn, type ChatSession,
@@ -19,6 +32,42 @@ import { submitFeedback, ERROR_TYPES as QA_ERROR_TYPES } from '@/api/qa'
 import { ElMessageBox } from 'element-plus'
 
 const router = useRouter()
+const route = useRoute()
+const userStore = useUserStore()
+
+// 独立页模式（/qa 顶层路由）：全屏高度 + 顶栏 + 移动端抽屉
+const standalone = computed(() => !!route.meta.standalone)
+const mobileSessionOpen = ref(false)
+
+function openStandalone() {
+  window.open(router.resolve('/qa').href, '_blank')
+}
+
+/** 钉钉内免登：authCode → JWT；失败/非钉钉环境回退账号登录页。返回是否已登录可继续初始化。 */
+async function tryDingtalkAutoLogin(): Promise<boolean> {
+  if (userStore.token) return true
+  if (!/DingTalk/i.test(navigator.userAgent)) {
+    router.replace(`/login?redirect=${encodeURIComponent(route.fullPath)}`)
+    return false
+  }
+  try {
+    const cfg = await getDingtalkConfig()
+    if (!cfg.auto_login_enabled) {
+      router.replace(`/login?redirect=${encodeURIComponent(route.fullPath)}`)
+      return false
+    }
+    const dd = (await import('dingtalk-jsapi')).default
+    const auth = await dd.runtime.permission.requestAuthCode({ corpId: cfg.corp_id })
+    const res = await dingtalkLogin(auth.code)
+    userStore.setToken(res.access_token)
+    await userStore.fetchUserInfo()
+    return true
+  } catch {
+    // 免登失败（authCode 无效/应用未授权/网络）：回退账号登录，不静默
+    router.replace(`/login?redirect=${encodeURIComponent(route.fullPath)}`)
+    return false
+  }
+}
 
 // Markdown 渲染：marked 解析 + DOMPurify 消毒（允许图片/视频标签）
 marked.setOptions({ breaks: true, gfm: true })
@@ -35,12 +84,14 @@ let _lastMd = ''
 let _lastHtml = ''
 let _lastT = 0
 
-function renderMd(md: string, citations?: SearchResult[]): string {
+function renderMd(md: string, citations?: SearchResult[], live = false): string {
   if (!md) return ''
   // 节流：100ms 内且文本未变时返回缓存
   const cacheKey = `${md}§${JSON.stringify(citations?.map(c => [c.citation_id, citationUrl(c)]))}`
   const now = Date.now()
   if (cacheKey === _lastMd && now - _lastT < 100) return _lastHtml
+  // 流式节流：增量期间最多每 120ms 解析一次 markdown，收尾（live=false）立即全量解析
+  if (live && _lastHtml && now - _lastT < 120) return _lastHtml
   _lastMd = cacheKey
   _lastT = now
   // 预处理：修复 AI 常见的无空格标题（###标题 → ### 标题），不破坏代码块
@@ -53,8 +104,9 @@ function renderMd(md: string, citations?: SearchResult[]): string {
 
 // 状态
 const query = ref('')
-const datasets = ref<DifyDataset[]>([])
-const selectedDatasetIds = ref<string[]>([])
+// 可检索知识库 = 知识库抽象层（知识应用 → 知识库）里启用的镜像库（RAGFlow / DIFY）
+const kbSources = ref<KnowledgeLibrary[]>([])
+const selectedLibraryIds = ref<number[]>([])
 const datasetsError = ref('')
 // 仅展示系统配置中「生效」的模型；is_default 为新会话默认模型
 const modelOptions = ref<Array<{ model: string; profile_id: string; profile_name: string; is_default: boolean }>>([])
@@ -73,23 +125,54 @@ function pickModel(modelName: string) {
   selectedProfileId.value = opt?.profile_id || ''
   if (opt) localStorage.setItem(MODEL_PREF_KEY, modelName)
 }
-const deepThink = ref(false)
 const kbSearch = ref(true)
 const dsPopoverVisible = ref(false)
 // 当前流式请求的中断句柄（streamChat 返回的 abort 函数）；运行中点停止按钮调用
 let abortCurrent: (() => void) | null = null
 
-// 数据集全选 / 半选状态
+// 按平台分组（DIFY / RagFlow）；空分组不展示
+const kbGroups = computed(() => {
+  const defs: Array<{ engine: string; label: string; platform: KnowledgeLibrary['platform'] }> = [
+    { engine: 'dify', label: 'DIFY 知识库', platform: 'dify' },
+    { engine: 'ragflow', label: 'RagFlow 知识库', platform: 'ragflow' },
+  ]
+  return defs
+    .map((d) => ({ ...d, items: kbSources.value.filter((s) => s.platform === d.platform) }))
+    .filter((g) => g.items.length > 0)
+})
+
+// 全选 / 半选状态（跨全部已登记检索库）
 const isAllSelected = computed(
-  () => datasets.value.length > 0 && selectedDatasetIds.value.length === datasets.value.length,
+  () => kbSources.value.length > 0 && selectedLibraryIds.value.length === kbSources.value.length,
 )
 const isIndeterminate = computed(
   () =>
-    selectedDatasetIds.value.length > 0 &&
-    selectedDatasetIds.value.length < datasets.value.length,
+    selectedLibraryIds.value.length > 0 &&
+    selectedLibraryIds.value.length < kbSources.value.length,
 )
-function toggleAllDatasets(val: any) {
-  selectedDatasetIds.value = val ? datasets.value.map((d) => d.id) : []
+function toggleAllSources(val: any) {
+  selectedLibraryIds.value = val ? kbSources.value.map((s) => s.id) : []
+}
+// 单库勾选（不用 el-checkbox-group：多个分组共享同一 v-model 会互相覆盖选择）
+function toggleSource(id: number, val: any) {
+  if (val) {
+    if (!selectedLibraryIds.value.includes(id)) selectedLibraryIds.value = [...selectedLibraryIds.value, id]
+  } else {
+    selectedLibraryIds.value = selectedLibraryIds.value.filter((x) => x !== id)
+  }
+}
+// 组内全选/取消：切换该引擎分组下所有库
+function isGroupAllSelected(group: { items: KnowledgeLibrary[] }): boolean {
+  return group.items.length > 0 && group.items.every((s) => selectedLibraryIds.value.includes(s.id))
+}
+function isGroupIndeterminate(group: { items: KnowledgeLibrary[] }): boolean {
+  const n = group.items.filter((s) => selectedLibraryIds.value.includes(s.id)).length
+  return n > 0 && n < group.items.length
+}
+function toggleGroup(group: { items: KnowledgeLibrary[] }, val: any) {
+  const ids = group.items.map((s) => s.id)
+  const rest = selectedLibraryIds.value.filter((id) => !ids.includes(id))
+  selectedLibraryIds.value = val ? [...rest, ...ids] : rest
 }
 function closeKbSearch() {
   kbSearch.value = false
@@ -97,11 +180,6 @@ function closeKbSearch() {
 }
 
 // 对话
-interface StepItem {
-  title: string
-  detail: string
-  done: boolean
-}
 interface ChatMsg {
   role: 'user' | 'assistant'
   content: string
@@ -119,13 +197,26 @@ interface ChatMsg {
   /** 步骤是否展开（运行中/完成后均可点击切换） */
   stepsExpanded?: boolean
   /** 限时探索确认卡片：智能体暂停等待用户点选「继续探索/先这样回答」 */
-  choice?: { question: string; options: string[]; answered: boolean }
+  assessment?: { confidence: number; reason: string }
+  choice?: {
+    question: string
+    options: string[]
+    answered: boolean
+    /** 确认截止时刻（ms）：超过仍未点选则自动按「继续探索」续跑 */
+    autoContinueAt?: number
+    /** 剩余秒数（按钮与提示展示用，每秒 tick 更新） */
+    countdown?: number
+    /** 是否由超时自动续跑（卡片展示「已自动继续探索」） */
+    autoContinued?: boolean
+  }
   /** 本轮 Token 消耗（模型接口 usage） */
   usage?: TokenUsage
   /** 持久化后的助手消息 ID（用于点赞/纠错反馈关联） */
   dbId?: string
   /** 已提交的反馈：helpful | correct | notfound */
   feedback?: 'helpful' | 'correct' | 'notfound'
+  /** 答案是否收到过流式增量（未流式时 final 用打字机效果渲染） */
+  streamed?: boolean
 }
 const messages = ref<ChatMsg[]>([])
 const hasAsked = ref(false)
@@ -164,22 +255,63 @@ const loading = computed(() => !!currentSession.value && runs.get(currentSession
 
 // 智能体配置（开场白/建议词/开关，来自 /agent/greeting）
 const greetingText = ref('你好！我是杰克百晓生，公司知识问答助手。')
+const botAvatar = ref('')  // 机器人头像（智能体配置；空=默认图标）
 const suggestions = ref<string[]>([])
 const followUpEnabled = ref(true)
 const longMemoryEnabled = ref(true)
 
 // 新消息 / 流式步骤追加时滚动到底部（第一条消息仍从顶部开始）
+let _scrollRaf = 0
 function scrollToBottom() {
-  nextTick(() => {
-    const el = scrollRef.value
-    if (el) el.scrollTop = el.scrollHeight
+  if (_scrollRaf) return
+  _scrollRaf = requestAnimationFrame(() => {
+    _scrollRaf = 0
+    nextTick(() => {
+      const el = scrollRef.value
+      if (el) el.scrollTop = el.scrollHeight
+    })
   })
+}
+
+// ---------------------------------------------------------------------------
+// 打字机效果：答案未经流式增量、整段随 final 到达时，前端逐字渲染
+// 时长按文本长度自适应（1.2s ~ 4s），rAF 驱动，视图切换不影响后台消息
+// ---------------------------------------------------------------------------
+const typewriters = new Map<ChatMsg, () => void>()
+
+/** sid 用于判断该消息所在会话是否处于当前视图，仅在前台时跟随滚动 */
+function typewriterReveal(msg: ChatMsg, full: string, sid: string) {
+  typewriters.get(msg)?.()
+  const total = full.length
+  const duration = Math.min(4000, Math.max(1200, total * 12))
+  const t0 = performance.now()
+  let shown = 0
+  let raf = 0
+  const tick = (now: number) => {
+    const p = Math.min(1, (now - t0) / duration)
+    const target = Math.floor(total * p)
+    if (target !== shown) {
+      shown = target
+      msg.content = full.slice(0, shown)
+      if (currentSession.value?.id === sid) scrollToBottom()
+    }
+    if (p < 1) raf = requestAnimationFrame(tick)
+    else finish()
+  }
+  const finish = () => {
+    cancelAnimationFrame(raf)
+    msg.content = full
+    typewriters.delete(msg)
+  }
+  typewriters.set(msg, finish)
+  raf = requestAnimationFrame(tick)
 }
 
 // 会话上下文（用于多轮改写）已按会话隔离：见 sessionCtx（多会话并行时互不污染）
 
 onMounted(async () => {
-  await Promise.all([loadDatasets(), (async () => { await loadGreeting(); await loadModels() })(), loadSessions()])
+  if (standalone.value && !(await tryDingtalkAutoLogin())) return
+  await Promise.all([loadKbSources(), (async () => { await loadGreeting(); await loadModels() })(), loadSessions()])
 })
 
 // 离开页面：中断所有进行中的回答（后端感知断连后停止 agent，避免空转耗 token）
@@ -233,7 +365,7 @@ function stopRun(sid?: string) {
   run.abort?.()
   const m = run.msg
   m.done = true
-  if (m.steps && m.steps.length) m.steps[m.steps.length - 1].done = true
+  settleSteps(m.steps, 'cancelled')
   if (m.choice) m.choice.answered = true
   if (!m.content && !m.choice) m.content = '（已中断本次回答）'
   m.meta = `⏹ 已中断 · ${run.model}`
@@ -242,6 +374,7 @@ function stopRun(sid?: string) {
 
 async function selectSession(id: string, needCheck = true) {
   if (currentSession.value?.id === id && needCheck) return
+  mobileSessionOpen.value = false
   // 切换会话**不中断**运行中的回答（runs 注册表继续持有 SSE 连接与消息对象）
   // 有进行中/新完成回答的会话：优先展示内存消息数组（含流式交互态），不被 DB 记录覆盖
   const live = liveArrays.get(id)
@@ -260,29 +393,34 @@ async function selectSession(id: string, needCheck = true) {
   try {
     const res = await getSessionMessages(id)
     currentSession.value = res.session
-    messages.value = res.messages.map((m) => ({
-      role: m.role as 'user' | 'assistant',
-      content: m.content,
-      done: true,
-      time: m.created_at ? m.created_at.slice(11, 16) : '',
-      meta: m.meta || undefined,
-      dbId: m.role === 'assistant' ? m.id : undefined,
-      steps: m.detail?.steps as any,
-      quality: m.detail?.quality,
-      answerStatus: m.detail?.answer_status,
-      citations: m.citations
-        ? m.citations.map((t) => {
-            // 新格式：JSON 字符串（含 url/node_id/extension）；旧格式：纯标题
-            try {
-              const o = JSON.parse(t)
-              if (o && typeof o === 'object' && o.t) {
-                return { ...o, document_title: o.t, url: o.u || '', node_id: o.n || '', extension: o.e || '' } as SearchResult
-              }
-            } catch { /* 纯标题，走默认 */ }
-            return { document_title: t } as SearchResult
-          })
-        : undefined,
-    }))
+    messages.value = res.messages
+      // 续跑轮（选项原文）的用户消息不在会话展示，历史重载保持一致
+      .filter((m) => !(m.role === 'user' && CHOICE_OPTION_TEXTS.has(m.content)))
+      .map((m) => ({
+        role: m.role as 'user' | 'assistant',
+        content: m.content,
+        done: true,
+        time: m.created_at ? m.created_at.slice(11, 16) : '',
+        meta: m.meta || undefined,
+        dbId: m.role === 'assistant' ? m.id : undefined,
+        steps: m.detail?.steps as any,
+        quality: m.detail?.quality,
+        answerStatus: m.detail?.answer_status,
+        assessment: m.detail?.assessment,
+        choice: m.detail?.choice ? { ...m.detail.choice, answered: m.detail.choice.answered || m.id !== res.messages[res.messages.length - 1]?.id } : undefined,
+        citations: m.citations
+          ? m.citations.map((t) => {
+              // 新格式：JSON 字符串（含 url/node_id/extension）；旧格式：纯标题
+              try {
+                const o = JSON.parse(t)
+                if (o && typeof o === 'object' && o.t) {
+                  return { ...o, document_title: o.t, url: o.u || '', node_id: o.n || '', extension: o.e || '' } as SearchResult
+                }
+              } catch { /* 纯标题，走默认 */ }
+              return { document_title: t } as SearchResult
+            })
+          : undefined,
+      }))
     hasAsked.value = messages.value.length > 0
     sessionCtx.set(id, { q: res.session.last_query || '', a: res.session.last_answer || '' })
     query.value = ''
@@ -323,11 +461,11 @@ async function renameSession(s: ChatSession) {
 async function loadGreeting() {
   try {
     const g = await getGreeting()
+    botAvatar.value = g.bot_avatar || ''
     greetingText.value = g.greeting_enabled ? (g.greeting || '你好！我是企业知识问答助手。') : ''
     suggestions.value = g.suggested_questions || []
     followUpEnabled.value = g.follow_up_enabled
     longMemoryEnabled.value = g.long_memory_enabled
-    deepThink.value = !!g.deep_think_default
     // 问答页模型下拉仅展示智能体配置中已配置的模型；
     // 用系统生效模型补全 profile 信息与「默认」标记，便于识别
     if (g.models && g.models.length) {
@@ -344,6 +482,7 @@ async function loadGreeting() {
       })
       const pref = localStorage.getItem(MODEL_PREF_KEY)
       const target = (pref && g.models.includes(pref)) ? pref
+        : (g.default_model && g.models.includes(g.default_model)) ? g.default_model
         : modelOptions.value.find((o) => o.is_default)?.model || g.models[0]
       pickModel(target)
     }
@@ -384,17 +523,17 @@ async function loadModels() {
   }
 }
 
-async function loadDatasets() {
+async function loadKbSources() {
   datasetsError.value = ''
   try {
-    const res = await listDifyDatasets()
-    datasets.value = res.items || []
-    if (res.error) datasetsError.value = res.error
-    // 默认全选，用户可在下拉中按需取消
-    selectedDatasetIds.value = datasets.value.map((d) => d.id)
+    // 只取知识库抽象层里启用的库（RAGFlow / DIFY 镜像，登记于「知识应用 → 知识库」）
+    const all = await listKnowledgeLibraries(true)
+    kbSources.value = all
+    // 默认全选，用户可在弹窗中按组/按需取消
+    selectedLibraryIds.value = kbSources.value.map((s) => s.id)
   } catch (e: any) {
     datasetsError.value = e?.message || '加载失败'
-    datasets.value = []
+    kbSources.value = []
   }
 }
 
@@ -423,8 +562,8 @@ function handleSendClick() {
 function handleAsk() {
   const q = query.value.trim()
   if (!q) return
-  if (kbSearch.value && selectedDatasetIds.value.length === 0 && datasets.value.length) {
-    ElMessage.warning('请至少选择一个 Dify 数据集')
+  if (kbSearch.value && selectedLibraryIds.value.length === 0 && kbSources.value.length) {
+    ElMessage.warning('请至少选择一个知识库')
     return
   }
   query.value = ''
@@ -438,6 +577,16 @@ function fmtTok(n?: number): string {
   return v >= 1000 ? `${(v / 1000).toFixed(1)}k` : String(v)
 }
 
+/** 限时探索确认卡片超时秒数：用户未点选时自动按「继续探索」续跑 */
+const CHOICE_AUTO_CONTINUE_SECONDS = 10
+
+/** 续跑轮的用户消息文字（选项原文）：会话中不上屏，历史重载时同样隐藏 */
+const CHOICE_OPTION_TEXTS = new Set(['继续从钉钉知识库探索', '基于知识库内容回答',
+  '继续探索（再给我一些时间）',
+  '继续探索',
+  '先基于已检索内容回答',
+])
+
 /** 限时探索确认按钮：点选后以用户消息续跑（continue/stop） */
 function chooseOption(msgIdx: number, opt: string) {
   const msg = messages.value[msgIdx]
@@ -447,9 +596,50 @@ function chooseOption(msgIdx: number, opt: string) {
   askQuestion(opt, action)
 }
 
-async function askQuestion(q: string, action: '' | 'continue' | 'stop' = '') {
-  if (!action && kbSearch.value && selectedDatasetIds.value.length === 0 && datasets.value.length) {
-    ElMessage.warning('请至少选择一个 Dify 数据集')
+/** 确认按钮展示文案：去掉选项中的括号补充说明（如「继续探索（再给我一些时间）」→「继续探索」），
+ * 按钮保持简洁、不叠加倒计时；实际续跑仍提交原始选项文字，倒计时仅在卡片提示行展示。 */
+function choiceLabel(opt: string): string {
+  return opt.replace(/（[^）]*）/g, '').trim() || opt
+}
+
+/** 确认超时自动续跑：等效用户点「继续探索」。
+ * 支持后台会话的确认态（用户切到了别的会话）：续跑消息写入该会话自己的
+ * 内存消息数组，不污染当前查看的会话。 */
+function autoContinueChoice(sid: string) {
+  const run = runs.get(sid)
+  if (!run || run.status !== 'choice') return
+  const ch = run.msg.choice
+  if (!ch || ch.answered || !ch.autoContinueAt) return
+  ch.answered = true
+  ch.autoContinued = true
+  const opt = ch.options.find((o) => o.includes('继续')) || ch.options[0] || '继续探索'
+  void askQuestion(opt, 'continue', { sessionId: sid, msgArray: liveArrays.get(sid) || messages.value })
+}
+
+// 确认倒计时 tick：到点自动继续探索；用户手动点选/中断会置 answered 使其自然失效
+const _choiceTicker = setInterval(() => {
+  const now = Date.now()
+  for (const [sid, run] of runs) {
+    if (run.status !== 'choice') continue
+    const ch = run.msg.choice
+    if (!ch || ch.answered || !ch.autoContinueAt) continue
+    const remain = Math.ceil((ch.autoContinueAt - now) / 1000)
+    if (remain <= 0) autoContinueChoice(sid)
+    else if (ch.countdown !== remain) ch.countdown = remain
+  }
+}, 1000)
+onBeforeUnmount(() => clearInterval(_choiceTicker))
+
+/** 续跑目标：后台会话的确认自动续跑需指定会话与其内存消息数组，
+ * 缺省为当前查看的会话（手动提问/点选路径）。 */
+interface AskTarget {
+  sessionId?: string
+  msgArray?: ChatMsg[]
+}
+
+async function askQuestion(q: string, action: '' | 'continue' | 'stop' = '', target?: AskTarget) {
+  if (!action && kbSearch.value && selectedLibraryIds.value.length === 0 && kbSources.value.length) {
+    ElMessage.warning('请至少选择一个知识库')
     return
   }
   // 并发上限：最多 5 个会话同时问答（choice 等待确认不占后端并发）
@@ -463,11 +653,14 @@ async function askQuestion(q: string, action: '' | 'continue' | 'stop' = '') {
     ElMessage.warning('当前会话正在回答中，可点击停止按钮中断后再发送')
     return
   }
-  hasAsked.value = true
-  messages.value.push({ role: 'user', content: q, time: nowTime() })
+  // 消息落点：默认当前查看会话；后台续跑为目标会话的内存数组
+  const targetArray = target?.msgArray || messages.value
+  if (targetArray === messages.value) hasAsked.value = true
+  // 点选/超时自动续跑：选项文字不作为用户消息上屏，直接执行续跑
+  if (!action) targetArray.push({ role: 'user', content: q, time: nowTime() })
 
   // 首问时创建 DB 会话：会话 UUID 同时作为 DeerFlow thread 隔离键与记忆文档归属
-  if (!currentSession.value) {
+  if (!target?.sessionId && !currentSession.value) {
     try {
       currentSession.value = await createChatSession('新会话')
       sessions.value.unshift(currentSession.value)
@@ -486,9 +679,9 @@ async function askQuestion(q: string, action: '' | 'continue' | 'stop' = '') {
     steps: [],
     time: nowTime(),
   })
-  messages.value.push(assistantMsg)
+  targetArray.push(assistantMsg)
   // 捕获本轮会话 ID：中断后即使切换了会话，持久化仍写入本轮所属会话
-  const sid = currentSession.value?.id || ''
+  const sid = target?.sessionId || currentSession.value?.id || ''
   const persistSessionId = sid
   // 多轮改写上下文按会话隔离（并行会话互不污染）
   const ctx = sessionCtx.get(sid) || { q: '', a: '' }
@@ -497,14 +690,14 @@ async function askQuestion(q: string, action: '' | 'continue' | 'stop' = '') {
   const run: RunState = { msg: assistantMsg, abort: () => {}, status: 'running', model: selectedModel.value }
   if (sid) {
     runs.set(sid, run)
-    liveArrays.set(sid, messages.value)
+    liveArrays.set(sid, targetArray)
   }
   const viewActive = () => currentSession.value?.id === sid
-  scrollToBottom()
+  if (viewActive()) scrollToBottom()
 
   // 长期记忆：携带最近 3 轮问答（开启时）
   const history = longMemoryEnabled.value
-    ? messages.value
+    ? targetArray
         .filter((m) => m.content)
         .slice(-6)
         .map((m) => ({ role: m.role, content: m.content }))
@@ -513,13 +706,12 @@ async function askQuestion(q: string, action: '' | 'continue' | 'stop' = '') {
   abortCurrent = streamChat(
     {
       query: q,
-      dify_dataset_ids: kbSearch.value ? (selectedDatasetIds.value.length ? selectedDatasetIds.value : null) : [],
+      library_ids: kbSearch.value ? (selectedLibraryIds.value.length ? selectedLibraryIds.value : null) : [],
       last_query: ctx.q,
       last_answer: ctx.a,
       history,
       model: selectedModel.value,
       llm_profile_id: selectedProfileId.value,
-      deep_think: deepThink.value,
       session_id: sid,
       action,
     },
@@ -527,16 +719,21 @@ async function askQuestion(q: string, action: '' | 'continue' | 'stop' = '') {
       onStep: (e: StreamEvent) => {
         const msg = assistantMsg
         if (!msg.steps) msg.steps = []
-        // 标记上一步为完成
-        if (msg.steps.length) msg.steps[msg.steps.length - 1].done = true
-        msg.steps.push({ title: e.title || e.node || '', detail: e.detail || '', done: false })
+        updateStep(msg.steps, e)
         // 执行中实时展示步骤流（首个步骤到达即显示）
         if (viewActive()) scrollToBottom()
       },
-      onDelta: (delta) => {
+      onDelta: (delta, reset) => {
         const msg = assistantMsg
-        msg.content = (msg.content || '') + delta
+        // reset=true：该模型轮被判定为工具过渡轮，清空已流出的临时文本
+        msg.streamed = true
+        msg.content = reset ? '' : (msg.content || '') + delta
         if (viewActive()) scrollToBottom()
+      },
+      onCitations: (list) => {
+        // 引用来源随检索命中实时上屏；final 到达后替换为答案真正引用的过滤列表
+        const msg = assistantMsg
+        if (!msg.done) msg.citations = list
       },
       onChoice: (question, options) => {
         // 确认按钮卡片先渲染（流可能还在收尾），暂停落定前按钮不可点
@@ -544,35 +741,52 @@ async function askQuestion(q: string, action: '' | 'continue' | 'stop' = '') {
         msg.choice = { question, options: options.length ? options : ['继续探索', '先基于已检索内容回答'], answered: false }
         if (viewActive()) scrollToBottom()
       },
-      onChoicePause: (question, options, usage) => {
+      onChoicePause: (question, options, usage, assessment) => {
         const msg = assistantMsg
         msg.done = true
-        if (msg.steps && msg.steps.length) msg.steps[msg.steps.length - 1].done = true
-        msg.choice = { question, options: options.length ? options : ['继续探索', '先基于已检索内容回答'], answered: false }
+        settleSteps(msg.steps, 'paused')
+        msg.choice = {
+          question,
+          options: options.length ? options : ['继续探索', '先基于已检索内容回答'],
+          answered: false,
+          // 钉钉首次授权及普通澄清必须等待明确选择；仅延时探索沿用倒计时。
+          autoContinueAt: assessment?.choice_kind === 'exploration_timeout' ? Date.now() + CHOICE_AUTO_CONTINUE_SECONDS * 1000 : undefined,
+          countdown: assessment?.choice_kind === 'exploration_timeout' ? CHOICE_AUTO_CONTINUE_SECONDS : undefined,
+        }
+        if (assessment?.choice_kind === 'dingtalk_opt_in') {
+          msg.content = assessment.evidence_summary || '当前知识库未检索到可用依据。'
+          msg.assessment = { confidence: assessment.confidence ?? 0, reason: assessment.confidence_reason || '' }
+          msg.answerStatus = 'awaiting_choice'
+          if (assessment.citations) msg.citations = assessment.citations
+        }
         if (usage && usage.total_tokens > 0) msg.usage = usage
         msg.meta = `🦌 DeerFlow · 等待确认 · ${run.model}`
         // 流已结束：转为「等待确认」态（不占后端并发），用户点选后发起新请求续跑
-        if (runs.get(sid) === run) run.status = 'choice'
+        // 注意 runs 为 reactive Map，get 返回代理，须用 isRun（toRaw 归一）判断身份
+        if (isRun(sid, run)) runs.get(sid)!.status = 'choice'
         if (viewActive()) scrollToBottom()
       },
       onFinal: (res) => {
         const msg = assistantMsg
         msg.done = true
         // 完成：最后一步标记完成，过程条自动收起（用户可点击展开）
-        if (msg.steps && msg.steps.length) msg.steps[msg.steps.length - 1].done = true
+        settleSteps(msg.steps, 'failed')
         const citations = res.citations || []
         const configError = res.config_error || ''
         const noResult = res.answer_status === 'insufficient'
-        const thinkTag = deepThink.value ? '深度思考 · ' : ''
         if (res.usage && res.usage.total_tokens > 0) msg.usage = res.usage
         if (citations.length > 0) {
-          msg.meta = `${thinkTag}企业知识问答 · ${citations.length} 条原文依据 · ${run.model}`
+          msg.meta = `企业知识问答 · ${citations.length} 条原文依据 · ${run.model}`
         } else if (res.answer) {
-          msg.meta = `${thinkTag}企业知识问答 · ${run.model}`
+          msg.meta = `企业知识问答 · ${run.model}`
         } else {
-          msg.meta = `${thinkTag}未在知识库找到相关内容 · ${run.model}`
+          msg.meta = `未在知识库找到相关内容 · ${run.model}`
         }
-        if (res.answer) msg.content = res.answer
+        if (res.answer) {
+          // 未收到任何流式增量（答案整段生成）→ 打字机效果逐字渲染；已流式过则直接落定
+          if (!msg.streamed && res.answer.length > 24) typewriterReveal(msg, res.answer, sid)
+          else msg.content = res.answer
+        }
         else if (!msg.content) msg.content = '（未生成回答）'
         msg.quality = res.quality
         msg.answerStatus = res.answer_status
@@ -593,7 +807,7 @@ async function askQuestion(q: string, action: '' | 'continue' | 'stop' = '') {
       onError: (code, message) => {
         const msg = assistantMsg
         msg.done = true
-        if (msg.steps && msg.steps.length) msg.steps[msg.steps.length - 1].done = true
+        settleSteps(msg.steps, 'failed')
         msg.configError = code
         msg.meta = code === 'llm_not_configured' || code === 'dify_not_configured'
           ? '需要先完成系统配置'
@@ -608,7 +822,7 @@ async function askQuestion(q: string, action: '' | 'continue' | 'stop' = '') {
         const msg = assistantMsg
         if (!msg.done && !msg.configError) {
           msg.done = true
-          if (msg.steps && msg.steps.length) msg.steps[msg.steps.length - 1].done = true
+          settleSteps(msg.steps, 'failed')
           if (!msg.content && !msg.choice) msg.content = '（连接中断，回答未完成）'
           msg.meta = `⚠️ 连接中断 · ${run.model}`
         }
@@ -660,7 +874,9 @@ async function askQuestion(q: string, action: '' | 'continue' | 'stop' = '') {
         detail: {
           quality: finalMsg.quality,
           answer_status: finalMsg.answerStatus,
-          steps: (finalMsg.steps || []).map((s) => ({ title: s.title, detail: s.detail, done: s.done })),
+          assessment: finalMsg.assessment,
+          choice: finalMsg.choice ? { question: finalMsg.choice.question, options: finalMsg.choice.options, answered: finalMsg.choice.answered } : undefined,
+          steps: (finalMsg.steps || []).map((s) => ({ ...s })),
           retrieval: (finalMsg.citations || []).map((c) => ({
             document_title: c.document_title,
             text: (c as any).text || '',
@@ -820,7 +1036,17 @@ async function submitCorrection() {
 </script>
 
 <template>
-  <div class="chat-page">
+  <div class="chat-page" :class="{ 'chat-page--standalone': standalone, 'session-open': mobileSessionOpen }">
+    <!-- 独立页顶栏：移动端会话入口 + 返回后台 -->
+    <header v-if="standalone" class="standalone-bar">
+      <button type="button" class="icon-btn mobile-only" title="会话历史" @click="mobileSessionOpen = !mobileSessionOpen">
+        <el-icon><Operation /></el-icon>
+      </button>
+      <span class="standalone-title">智能问答</span>
+      <router-link v-if="userStore.token" class="standalone-back" to="/chat">返回后台</router-link>
+    </header>
+    <div v-if="mobileSessionOpen" class="session-mask" @click="mobileSessionOpen = false"></div>
+    <div class="chat-body">
     <!-- 会话历史侧边栏 -->
     <aside class="history-panel">
       <button type="button" class="new-chat-btn" @click="newSession">
@@ -860,7 +1086,10 @@ async function submitCorrection() {
       <!-- 聊天头部：助手身份卡 -->
       <header class="chat-header">
         <div class="assistant-identity">
-          <div class="assistant-avatar"><el-icon><MagicStick /></el-icon></div>
+          <div class="assistant-avatar">
+            <img v-if="botAvatar" :src="botAvatar" alt="机器人头像" />
+            <el-icon v-else><MagicStick /></el-icon>
+          </div>
           <div class="assistant-meta">
             <span class="assistant-name">杰克百晓生</span>
             <span class="assistant-status">
@@ -870,6 +1099,12 @@ async function submitCorrection() {
           </div>
         </div>
         <div class="header-actions">
+          <button v-if="!standalone" type="button" class="icon-btn mobile-only" title="会话历史" @click="mobileSessionOpen = !mobileSessionOpen">
+            <el-icon><Operation /></el-icon>
+          </button>
+          <button v-if="!standalone" type="button" class="icon-btn" title="新窗口打开" @click="openStandalone">
+            <el-icon><FullScreen /></el-icon>
+          </button>
           <button type="button" class="icon-btn" title="重新对话" @click="restart">
             <el-icon><RefreshLeft /></el-icon>
           </button>
@@ -883,10 +1118,10 @@ async function submitCorrection() {
           <h1 v-if="greetingText" class="welcome-title">{{ greetingText }}</h1>
           <p class="welcome-subtitle">我可以基于企业知识库回答问题，答案附带引用溯源。</p>
           <div v-if="datasetsError" class="warn-tip">
-            ⚠️ Dify 知识库加载失败：{{ datasetsError }}，请到「系统配置」页配置 Dify 服务地址与 API Key。
+            ⚠️ 知识库加载失败：{{ datasetsError }}。
           </div>
-          <div v-else-if="!datasets.length" class="warn-tip">
-            尚未加载到 Dify 数据集，请到「系统配置」页配置 Dify 并保存后回到本页。
+          <div v-else-if="!kbSources.length" class="warn-tip">
+            尚无可检索的知识库，请到「知识应用 → 知识库」登记 DIFY / RagFlow 知识库后回到本页。
           </div>
         </div>
 
@@ -895,7 +1130,8 @@ async function submitCorrection() {
           <div v-for="(m, i) in messages" :key="i" class="message" :class="m.role === 'user' ? 'message--user' : 'message--assistant'">
             <!-- 头像 -->
             <div class="message__avatar" :class="m.role === 'user' ? 'avatar--user' : 'avatar--ai'">
-              <el-icon><User v-if="m.role === 'user'" /><MagicStick v-else /></el-icon>
+              <img v-if="m.role !== 'user' && botAvatar" :src="botAvatar" alt="机器人头像" />
+              <el-icon v-else><User v-if="m.role === 'user'" /><MagicStick v-else /></el-icon>
             </div>
             <div class="message__col">
               <!-- 用户消息 -->
@@ -934,14 +1170,27 @@ async function submitCorrection() {
                 >
                   <div class="steps-bar__header" @click="toggleSteps(i)">
                     <template v-if="!m.done && !m.stepsExpanded">
-                      <span class="step-spinner"></span>
-                      <span class="step-live-title">{{ m.steps[m.steps.length - 1]?.title }}</span>
-                      <span class="step-live-detail">{{ m.steps[m.steps.length - 1]?.detail }}</span>
-                      <span class="steps-expand-hint">▸ 展开过程</span>
+                      <!-- 运行中：滚动展示最近几步阶段信息（证据链一目了然），点击展开全部 -->
+                      <div class="step-live-roll" @click.stop>
+                        <div
+                          v-for="(st, ri) in m.steps.slice(-4)"
+                          :key="st.id || ri"
+                          class="step-live-row"
+                        >
+                          <span class="step-dot">
+                            <span v-if="st.status === 'running'" class="step-spinner step-spinner--mini"></span>
+                            <template v-else-if="st.status === 'failed'">!</template>
+                            <template v-else>✓</template>
+                          </span>
+                          <span class="step-live-title">{{ st.title }}</span>
+                          <span class="step-live-detail">{{ st.detail }}</span>
+                        </div>
+                      </div>
+                      <span class="steps-expand-hint" @click="toggleSteps(i)">▸ 展开过程</span>
                     </template>
                     <template v-else>
                       <span class="steps-bar__label">
-                        {{ m.stepsExpanded ? '▾' : '▸' }} 智能体检索过程 · 共 {{ m.steps.length }} 步{{ !m.done ? '（进行中…）' : '' }}
+                        {{ m.stepsExpanded ? '▾' : '▸' }} 问答过程 · 共 {{ m.steps.length }} 步{{ !m.done ? '（进行中…）' : '' }}
                       </span>
                       <span v-if="!m.done" class="step-spinner step-spinner--right"></span>
                     </template>
@@ -951,10 +1200,12 @@ async function submitCorrection() {
                       v-for="(st, si) in m.steps"
                       :key="si"
                       class="step-item"
-                      :class="{ done: si < m.steps.length - 1 || m.done }"
+                      :class="{ done: st.status === 'completed' || (!st.status && st.done) }"
                     >
                       <span class="step-dot">
-                        <span v-if="si === m.steps.length - 1 && !m.done" class="step-spinner step-spinner--mini"></span>
+                        <span v-if="st.status === 'running' && !m.done" class="step-spinner step-spinner--mini"></span>
+                        <template v-else-if="st.status === 'failed'">!</template>
+                        <template v-else-if="st.status === 'cancelled' || st.status === 'paused'">—</template>
                         <template v-else>✓</template>
                       </span>
                       <span class="step-title">{{ st.title }}</span>
@@ -964,6 +1215,13 @@ async function submitCorrection() {
                 </div>
 
                 <!-- 限时探索确认卡片：智能体暂停等待用户选择是否继续 -->
+                <div v-if="m.assessment" class="choice-card">
+                  <strong>当前知识库内容总结</strong>
+                  <div class="ans-text md-body" v-html="renderMd(m.content, m.citations)" />
+                  <strong>置信度（证据支持程度）：{{ m.assessment.confidence }}/100</strong>
+                  <p>{{ m.assessment.reason }}</p>
+                  <div class="choice-hint">模型对完整回答当前问题的证据评估，未经准确率校准；不代表答案正确概率。</div>
+                </div>
                 <div v-if="m.choice" class="choice-card">
                   <div class="choice-q">🙋 {{ m.choice.question }}</div>
                   <div class="choice-opts">
@@ -975,12 +1233,16 @@ async function submitCorrection() {
                       :class="{ 'choice-btn--primary': opt.includes('继续') }"
                       :disabled="m.choice.answered || loading"
                       @click="chooseOption(i, opt)"
-                    >{{ opt }}</button>
+                    >{{ choiceLabel(opt) }}</button>
                   </div>
+                  <div v-if="m.choice.autoContinueAt && !m.choice.answered" class="choice-hint">
+                    {{ m.choice.countdown ?? CHOICE_AUTO_CONTINUE_SECONDS }} 秒内未选择将自动继续探索
+                  </div>
+                  <div v-else-if="m.choice.autoContinued" class="choice-hint">超时未选择，已自动继续探索</div>
                 </div>
 
                 <!-- 答案 / 配置提示 / 知识缺口 -->
-                <div v-if="m.content || m.configError || m.noResult" class="message__bubble bubble--ai">
+                <div v-if="!m.assessment && (m.content || m.configError || m.noResult)" class="message__bubble bubble--ai">
                   <template v-if="m.configError">
                     <div class="cfg-tip">
                       <div class="cfg-text">{{ m.content }}</div>
@@ -990,18 +1252,14 @@ async function submitCorrection() {
                     </div>
                   </template>
                   <template v-else-if="m.content">
-                    <div v-if="m.answerStatus" class="evidence-status" role="status">
-                      <el-tag v-if="m.answerStatus === 'answered'" type="success">已通过证据核验</el-tag>
-                      <el-tag v-else-if="m.answerStatus === 'partial'" type="warning">部分有依据 · 尚有缺口</el-tag>
-                      <el-tag v-else-if="m.answerStatus === 'insufficient'" type="warning">证据不足</el-tag>
-                      <el-tag v-else-if="m.answerStatus === 'clarification'" type="info">需要补充信息</el-tag>
-                      <el-tag v-if="m.quality?.dws === 'hit'" type="info">已补查钉钉知识</el-tag>
+                    <div v-if="m.answerStatus && m.answerStatus !== 'answered'" class="evidence-status" role="status">
+                      <el-tag :type="m.answerStatus === 'insufficient' || m.answerStatus === 'partial' ? 'warning' : 'info'">{{ evidenceLabel(m.answerStatus, m.citations?.length || 0) }}</el-tag>
                     </div>
                     <el-alert v-for="warning in m.quality?.warnings || []" :key="warning"
                       :title="warning" type="warning" :closable="false" show-icon class="evidence-warning" />
                     <div
                       class="ans-text md-body"
-                      v-html="renderMd(m.content, m.citations)"
+                      v-html="renderMd(m.content, m.citations, !m.done)"
                     ></div>
                     <span class="msg-actions ans-acts">
                       <el-tooltip content="复制答案" placement="top">
@@ -1028,7 +1286,7 @@ async function submitCorrection() {
                           <small v-if="c.partial">此处为原文片段，请结合源文档核对适用范围。</small>
                         </el-popover>
                         <span v-if="c.page_number" class="ref-page">第 {{ c.page_number }} 页</span>
-                        <span class="doc-tag">{{ c.source === 'dws' ? '钉钉' : '知识库' }}</span>
+                        <span class="doc-tag">{{ sourceLabel(c.source) }}</span>
                         <el-tooltip content="对这条知识纠错" placement="top">
                           <span class="ref-correct" @click="feedback('correct', m, c)">👎 纠错</span>
                         </el-tooltip>
@@ -1088,21 +1346,18 @@ async function submitCorrection() {
             <el-option
               v-for="m in modelOptions"
               :key="`${m.profile_id}-${m.model}`"
-              :label="m.profile_name ? `${m.model}（${m.profile_name}）` : m.model"
+              :label="m.model"
               :value="m.model"
             >
               <span>{{ m.model }}</span>
               <span v-if="m.is_default" style="float: right; color: #409eff; font-size: 12px">默认</span>
             </el-option>
           </el-select>
-          <div class="tgl" :class="{ on: deepThink }" @click="deepThink = !deepThink">
-            <el-icon><MagicStick /></el-icon> 深度思考
-          </div>
           <el-popover
             v-model:visible="dsPopoverVisible"
             trigger="click"
             placement="top-start"
-            :width="280"
+            :width="340"
             :show-arrow="false"
             popper-class="kb-ds-popover"
             @show="kbSearch = true"
@@ -1110,23 +1365,45 @@ async function submitCorrection() {
             <template #reference>
               <div class="tgl" :class="{ on: kbSearch }">
                 <el-icon><Search /></el-icon> 知识库检索
-                <span v-if="kbSearch" class="ds-badge">{{ selectedDatasetIds.length }}/{{ datasets.length }}</span>
+                <span v-if="kbSearch" class="ds-badge">{{ selectedLibraryIds.length }}/{{ kbSources.length }}</span>
               </div>
             </template>
             <div class="ds-pop">
               <div class="ds-pop-bar">
-                <span>选择数据集</span>
+                <span>选择知识库</span>
                 <el-button link size="small" @click="closeKbSearch">关闭检索</el-button>
               </div>
               <el-divider style="margin: 6px 0" />
-              <el-checkbox
-                :model-value="isAllSelected"
-                :indeterminate="isIndeterminate"
-                @change="toggleAllDatasets"
-              >全选</el-checkbox>
-              <el-checkbox-group v-model="selectedDatasetIds" class="ds-pop-list">
-                <el-checkbox v-for="d in datasets" :key="d.id" :label="d.id">{{ d.name }}</el-checkbox>
-              </el-checkbox-group>
+              <div v-if="!kbSources.length" class="ds-pop-empty">
+                尚无可检索知识库，请到「知识应用 → 知识库」添加 DIFY / RagFlow 知识库。
+              </div>
+              <template v-else>
+                <el-checkbox
+                  :model-value="isAllSelected"
+                  :indeterminate="isIndeterminate"
+                  @change="toggleAllSources"
+                >全选</el-checkbox>
+                <div v-for="group in kbGroups" :key="group.engine" class="ds-group">
+                  <div class="ds-group-bar">
+                    <el-checkbox
+                      :model-value="isGroupAllSelected(group)"
+                      :indeterminate="isGroupIndeterminate(group)"
+                      @change="(v: any) => toggleGroup(group, v)"
+                    >{{ group.label }}</el-checkbox>
+                    <span class="ds-group-count">
+                      {{ group.items.filter((s) => selectedLibraryIds.includes(s.id)).length }}/{{ group.items.length }}
+                    </span>
+                  </div>
+                  <div class="ds-pop-list">
+                    <el-checkbox
+                      v-for="s in group.items"
+                      :key="s.id"
+                      :model-value="selectedLibraryIds.includes(s.id)"
+                      @change="(v: any) => toggleSource(s.id, v)"
+                    >{{ s.name }}</el-checkbox>
+                  </div>
+                </div>
+              </template>
             </div>
           </el-popover>
         </div>
@@ -1182,6 +1459,7 @@ async function submitCorrection() {
         <el-button type="primary" :loading="corrSubmitting" @click="submitCorrection">提交纠错</el-button>
       </template>
     </el-dialog>
+    </div>
   </div>
 </template>
 
@@ -1206,11 +1484,57 @@ async function submitCorrection() {
   min-height: 100%;
   height: 100%;
   display: flex;
-  flex-direction: row;
-  gap: 12px;
+  flex-direction: column;
   background: var(--bg);
   padding: 12px;
   box-sizing: border-box;
+}
+
+/* 行容器：会话侧栏 + 问答卡片（独立页顶栏之下） */
+.chat-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: row;
+  gap: 12px;
+}
+
+/* ===== 独立页（/qa）：全屏 + 极简顶栏 ===== */
+.chat-page--standalone {
+  height: 100dvh;
+  min-height: 100dvh;
+  padding: 0;
+}
+.chat-page--standalone .chat-body { padding: 12px; }
+.standalone-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 48px;
+  padding: 0 16px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+.standalone-title { font-size: 15px; font-weight: 600; color: var(--ink); }
+.standalone-back { margin-left: auto; font-size: 13px; color: var(--brand); text-decoration: none; }
+
+/* ===== 移动端：会话侧栏 off-canvas 抽屉 ===== */
+.session-mask { position: fixed; inset: 0; background: rgba(15, 23, 42, .35); z-index: 30; }
+button.mobile-only { display: none; }
+@media (max-width: 768px) {
+  button.mobile-only { display: inline-flex; }
+  .chat-body { gap: 0; }
+  .history-panel {
+    position: fixed;
+    left: 0; top: 0; bottom: 0;
+    z-index: 40;
+    width: 264px;
+    border-radius: 0;
+    transform: translateX(-105%);
+    transition: transform .2s ease;
+  }
+  .chat-page.session-open .history-panel { transform: none; }
 }
 
 /* ===== 会话历史侧边栏 ===== */
@@ -1352,7 +1676,9 @@ async function submitCorrection() {
   font-size: 20px;
   border: 2px solid var(--surface);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--brand) 20%, transparent);
+  overflow: hidden;
 }
+.assistant-avatar img { width: 100%; height: 100%; object-fit: cover; }
 .assistant-meta { display: flex; flex-direction: column; gap: 2px; }
 .assistant-name { font-weight: 600; font-size: 15px; color: var(--ink); }
 .assistant-status { font-size: 12.5px; color: var(--ink-2); display: flex; align-items: center; gap: 6px; }
@@ -1401,6 +1727,7 @@ async function submitCorrection() {
   color: var(--brand-ink);
 }
 .avatar--user { background: var(--surface-2); color: var(--ink-2); }
+.avatar--ai img { width: 100%; height: 100%; border-radius: 50%; object-fit: cover; }
 .message__col { min-width: 0; display: flex; flex-direction: column; }
 .message--user .message__col { align-items: flex-end; }
 
@@ -1505,6 +1832,11 @@ async function submitCorrection() {
 }
 .steps-bar__header:hover { background: color-mix(in srgb, var(--brand) 6%, transparent); }
 .steps-bar__label { font-weight: 500; }
+/* 运行中滚动阶段信息：最近 4 步常驻可见，证据链清晰（WorkBuddy 风格） */
+.step-live-roll { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.step-live-row { display: flex; align-items: center; gap: 6px; font-size: 12px; line-height: 1.5; min-width: 0; }
+.step-live-row .step-dot { width: 16px; flex: 0 0 auto; text-align: center; font-weight: bold; color: var(--success); display: inline-flex; justify-content: center; align-items: center; }
+.step-live-row:last-child .step-live-title { color: var(--brand); }
 .step-live-title { font-weight: 600; color: var(--brand); flex: 0 0 auto; }
 .step-live-detail { color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .steps-expand-hint { margin-left: auto; flex: 0 0 auto; font-size: 11.5px; color: var(--brand); opacity: .8; }
@@ -1550,9 +1882,11 @@ async function submitCorrection() {
   background: color-mix(in srgb, var(--brand) 86%, #000);
 }
 .choice-btn:disabled { cursor: not-allowed; opacity: .55; }
+.choice-hint { margin-top: 8px; font-size: 12px; color: var(--ink-3); }
 
 /* 引用来源 */
-.refs { margin-top: 12px; padding-top: 10px; border-top: 1px dashed var(--line); font-size: 12px; color: var(--ink-2); }
+.refs { margin-top: 12px; padding-top: 10px; border-top: 1px dashed var(--line); font-size: 12px; color: var(--ink-2); animation: refsIn .25s ease; }
+@keyframes refsIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
 .refs-title { font-weight: 600; margin-bottom: 6px; color: var(--ink); }
 .refs-toggle { margin-left: 8px; color: var(--brand); cursor: pointer; font-size: 12px; font-weight: 400; }
 .ref { display: flex; align-items: center; gap: 6px; padding: 3px 0; }
@@ -1639,6 +1973,12 @@ async function submitCorrection() {
 .ds-pop-bar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 2px; }
 .ds-pop-list { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
 .ds-pop-list .el-checkbox { margin-right: 0; }
+.ds-pop-empty { padding: 12px 4px; color: var(--el-text-color-secondary); font-size: 12px; line-height: 1.6; }
+.ds-group { margin-top: 10px; }
+.ds-group-bar { display: flex; align-items: center; justify-content: space-between; padding-bottom: 4px; border-bottom: 1px solid var(--el-border-color-lighter); }
+.ds-group-bar .el-checkbox { font-weight: 600; }
+.ds-group-count { font-size: 11px; color: var(--el-text-color-secondary); }
+.ds-group .ds-pop-list { margin-top: 6px; padding-left: 8px; }
 
 @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
 

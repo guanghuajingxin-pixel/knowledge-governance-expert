@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
 from kb_common.database import get_session
 from kb_common.models import Setting, DifyProfile, LLMProfile
-from app.deps import require_role, get_principal
+from app.deps import require_role, get_principal, get_current_user
 from kb_common.config import get_settings
 from kb_common.clients import llm_client
 
@@ -17,6 +17,8 @@ router = APIRouter(prefix="/api/v1/settings", tags=["settings"])
 
 # 可配置项白名单（is_secret=true 的只回显 key，不回显 value）
 KEYS = {
+    "site_name": ("站点名称（侧边栏 Logo 文字）", False),
+    "site_logo": ("站点图标（图片 URL 或 data: 图片，替换侧边栏默认图标）", False),
     "llm_base_url": ("LLM 服务地址", False),
     "llm_api_key": ("LLM API Key", True),
     "llm_model": ("LLM 模型名", False),
@@ -24,11 +26,16 @@ KEYS = {
     "mineru_api_key": ("MinerU API Key", True),
     "dify_base_url": ("Dify 服务地址", False),
     "dify_api_key": ("Dify API Key", True),
-    "dify_dataset_ids": ("Dify 默认数据集 ID（逗号分隔）", False),
+    "dify_upload_max_mb": ("Dify 单文件上传上限（MB）", False),
+    "ragflow_base_url": ("RAGFlow 服务地址", False),
+    "ragflow_api_key": ("RAGFlow API Key", True),
     "dingtalk_app_key": ("钉钉 AppKey", False),
     "dingtalk_app_secret": ("钉钉 AppSecret", True),
     "dingtalk_operator_union_id": ("钉钉操作人 UnionId", False),
     "dingtalk_robot_code": ("钉钉机器人 robotCode（发知识缺口通知）", False),
+    "dingtalk_corp_id": ("钉钉 corpId（H5 免登）", False),
+    "dingtalk_bot_enabled": ("钉钉机器人开关（true/false）", False),
+    "dingtalk_bot_allow_users": ("钉钉机器人白名单（userid 逗号分隔，空=全员）", False),
 }
 
 
@@ -48,7 +55,7 @@ async def get_settings_api(u=Depends(require_role("super_admin", "admin")),
     for k, (label, secret) in KEYS.items():
         row = (await s.execute(select(Setting).where(Setting.key == k))).scalar_one_or_none()
         val = row.value if row else getattr(get_settings(), k, "")
-        out[k] = {"label": label, "value": _mask_secret(val) if (secret and val) else val,
+        out[k] = {"label": label, "value": _mask_secret(val) if (secret and val) else str(val),
                   "is_set": bool(val), "is_secret": secret}
     return out
 
@@ -63,6 +70,22 @@ async def set_settings_api(body: SettingIn, u=Depends(require_role("super_admin"
                           s: AsyncSession = Depends(get_session)):
     if body.key not in KEYS:
         raise HTTPException(400, "不支持的配置项")
+    if body.key == "dify_upload_max_mb":
+        try:
+            size = int(body.value)
+            if not 1 <= size <= 1024:
+                raise ValueError()
+        except ValueError:
+            raise HTTPException(422, "上传上限必须为 1～1024 MB 的整数")
+    if body.key == "site_name":
+        if len(body.value) > 30:
+            raise HTTPException(422, "站点名称最多 30 个字符")
+    if body.key == "site_logo":
+        v = body.value.strip()
+        if v and not v.startswith(("http://", "https://", "data:image/")):
+            raise HTTPException(422, "站点图标仅支持 http(s) 链接或 data: 图片")
+        if len(v) > 512_000:
+            raise HTTPException(422, "站点图标过大（超过 512KB）")
     secret = KEYS[body.key][1]
     # 密钥字段提交掩码值（含 ****）时视为未修改，保留原值
     if secret and "****" in body.value:
@@ -73,7 +96,37 @@ async def set_settings_api(body: SettingIn, u=Depends(require_role("super_admin"
     else:
         s.add(Setting(key=body.key, value=body.value, is_secret=secret))
     await s.commit()
+    if body.key.startswith("dingtalk_"):
+        import asyncio
+        from kb_common.clients import dingtalk_client
+        from app.services import dingtalk_bot
+        # 凭证改动立即生效：先失效运行时配置缓存再重新载入（否则会被 TTL 缓存挡住）
+        dingtalk_client.invalidate_runtime_config()
+        await dingtalk_client.sync_runtime_config()
+        asyncio.create_task(dingtalk_bot.refresh_bot())
+    if body.key in ("dify_base_url", "dify_api_key"):
+        # 改了 Dify 链接/密钥：数据集列表缓存立即失效，避免最多吃 60s 旧列表
+        from app.routes.dify_route import invalidate_datasets_cache
+        invalidate_datasets_cache()
     return {"ok": True}
+
+
+@router.get("/dingtalk-bot-status")
+async def dingtalk_bot_status(u=Depends(require_role("super_admin", "admin"))):
+    """钉钉机器人 Stream 运行状态（系统配置页展示：启用/连接/最近错误）。"""
+    from app.services import dingtalk_bot
+    return dingtalk_bot.get_status()
+
+
+@router.get("/site")
+async def get_site_branding(u=Depends(get_current_user),
+                            s: AsyncSession = Depends(get_session)):
+    """站点外观（所有登录用户可读）：侧边栏 Logo 名称与图标。"""
+    out = {"site_name": "", "site_logo": ""}
+    for k in out:
+        row = (await s.execute(select(Setting).where(Setting.key == k))).scalar_one_or_none()
+        out[k] = (row.value or "").strip() if row else ""
+    return out
 
 
 class TestLLMIn(BaseModel):
@@ -392,6 +445,7 @@ class DifyProfileIn(BaseModel):
 @router.get("/dify-profiles")
 async def list_dify_profiles(u=Depends(require_role("super_admin", "admin")),
                               s: AsyncSession = Depends(get_session)):
+    await seed_profiles_from_legacy_settings(s)
     rows = (await s.execute(select(DifyProfile).order_by(DifyProfile.created_at))).scalars().all()
     return [_profile_to_dict(r) for r in rows]
 
@@ -477,15 +531,19 @@ async def enable_dify_profile(profile_id: str,
     row.enabled = True
     await s.commit()
     # 同步写入 settings 表，使 dify_client 能立即读取
+    # 注意：只同步「连接」（base_url/api_key）；具体检索哪些库由知识源注册表决定，
+    # 不再回写 dify_dataset_ids（系统配置页已下线库列表）。
     from kb_common.models import Setting as SettingModel
-    for k, v in [("dify_base_url", row.base_url), ("dify_api_key", row.api_key),
-                 ("dify_dataset_ids", row.dataset_ids)]:
+    for k, v in [("dify_base_url", row.base_url), ("dify_api_key", row.api_key)]:
         existing = (await s.execute(select(SettingModel).where(SettingModel.key == k))).scalar_one_or_none()
         if existing:
             existing.value = v
         else:
             s.add(SettingModel(key=k, value=v, is_secret=(k == "dify_api_key")))
     await s.commit()
+    # 切换 Dify 链接后数据集列表缓存必须失效，否则会按旧配置返回最长 60s 的旧列表
+    from app.routes.dify_route import invalidate_datasets_cache
+    invalidate_datasets_cache()
     return {"ok": True}
 
 
@@ -520,6 +578,79 @@ def _dump_models(models: list[dict]) -> str:
             "is_default": bool(m.get("is_default")),
         })
     return _json.dumps(clean, ensure_ascii=False)
+
+
+def _infer_provider(base_url: str) -> str:
+    """按服务地址推断供应商类型，用于旧配置迁移建档。"""
+    b = (base_url or "").lower()
+    if "deepseek" in b:
+        return "deepseek"
+    if "bigmodel" in b or "zhipu" in b:
+        return "zhipu"
+    return "custom"
+
+
+async def _sync_legacy_llm_settings(s: AsyncSession) -> None:
+    """将全局默认模型所属供应商回写旧版单值 settings（llm_base_url/llm_api_key/llm_model/llm_provider）。
+
+    知识加工、agent 回调、问答兜底等链路仍读旧键；系统配置页保存 LLM 配置后
+    同步旧键，保证运行时与页面配置始终一致。无全局默认模型时保持旧键不动。
+    """
+    rows = (await s.execute(select(LLMProfile))).scalars().all()
+    chosen: tuple | None = None
+    for p in rows:
+        for m in _parse_models(p.models):
+            if m.get("enabled") and m.get("is_default"):
+                chosen = (p, m)
+                break
+        if chosen:
+            break
+    if chosen is None:
+        return
+    p, m = chosen
+    for k, v in [("llm_base_url", p.base_url), ("llm_api_key", p.api_key),
+                 ("llm_model", m["name"]), ("llm_provider", p.provider)]:
+        row = (await s.execute(select(Setting).where(Setting.key == k))).scalar_one_or_none()
+        if row:
+            row.value = v
+        else:
+            s.add(Setting(key=k, value=v, is_secret=(k == "llm_api_key")))
+
+
+async def seed_profiles_from_legacy_settings(s: AsyncSession) -> None:
+    """一次性迁移：profiles 表为空时，用旧版单值设置生成对应 profile。
+
+    模型配置页下线后，存量的 LLM / Dify 单值配置若不在 profiles 表中，
+    将无法在系统配置页可见可管理；此处按「表空才迁移」幂等建档：
+    - LLM：需地址+Key+模型名齐全，默认模型标记为生效+默认；
+    - Dify：需地址存在，建档即生效（与迁移前运行时行为一致）。
+    """
+    if (await s.execute(select(LLMProfile).limit(1))).scalar_one_or_none() is None:
+        base_url = await _effective_setting(s, "llm_base_url")
+        api_key = await _effective_setting(s, "llm_api_key")
+        model = await _effective_setting(s, "llm_model")
+        if base_url and api_key and model:
+            provider = _infer_provider(base_url)
+            label = {"deepseek": "DeepSeek", "zhipu": "GLM（智谱）"}.get(provider, "自定义模型")
+            s.add(LLMProfile(
+                name=f"{label}·旧配置迁移",
+                provider=provider,
+                base_url=base_url.strip().rstrip("/"),
+                api_key=api_key,
+                models=_dump_models([{"name": model, "enabled": True, "is_default": True}]),
+            ))
+            await s.commit()
+    if (await s.execute(select(DifyProfile).limit(1))).scalar_one_or_none() is None:
+        base_url = await _effective_setting(s, "dify_base_url")
+        if base_url:
+            s.add(DifyProfile(
+                name="默认·旧配置迁移",
+                base_url=base_url.strip().rstrip("/"),
+                api_key=await _effective_setting(s, "dify_api_key"),
+                dataset_ids=await _effective_setting(s, "dify_dataset_ids"),
+                enabled=True,
+            ))
+            await s.commit()
 
 
 def _llm_to_dict(p: LLMProfile, mask: bool = True) -> dict:
@@ -567,6 +698,7 @@ class LLMProfileIn(BaseModel):
 @router.get("/llm-profiles")
 async def list_llm_profiles(u=Depends(require_role("super_admin", "admin")),
                             s: AsyncSession = Depends(get_session)):
+    await seed_profiles_from_legacy_settings(s)
     rows = (await s.execute(select(LLMProfile).order_by(LLMProfile.created_at))).scalars().all()
     return [_llm_to_dict(r) for r in rows]
 
@@ -589,6 +721,7 @@ async def create_llm_profile(body: LLMProfileIn,
     await s.flush()
     if has_default:
         await _clear_other_defaults(s, str(profile.id))
+    await _sync_legacy_llm_settings(s)
     await s.commit()
     return {"ok": True, "id": str(profile.id)}
 
@@ -621,6 +754,7 @@ async def update_llm_profile(profile_id: str, body: LLMProfileIn,
         row.models = _dump_models(body.models)
         if default_seen:
             await _clear_other_defaults(s, profile_id)
+    await _sync_legacy_llm_settings(s)
     await s.commit()
     return {"ok": True}
 
@@ -634,6 +768,8 @@ async def delete_llm_profile(profile_id: str,
     if not row:
         raise HTTPException(404, "配置不存在")
     await s.delete(row)
+    await s.commit()
+    await _sync_legacy_llm_settings(s)
     await s.commit()
     return {"ok": True}
 
@@ -682,6 +818,57 @@ async def _clear_other_defaults(s: AsyncSession, keep_profile_id: str) -> None:
                 changed = True
         if changed:
             r.models = _dump_models(models)
+
+
+# ==================== 菜单显示配置（侧边栏功能区菜单显隐） ====================
+# 存储：settings 表 key="menu_visibility"，value 为 JSON：{"hidden": ["/chat", ...]}
+# 未配置或解析失败 → 空列表（全部菜单默认显示）
+_MENU_VISIBILITY_KEY = "menu_visibility"
+
+
+def _load_menu_visibility(raw: str | None) -> list[str]:
+    """解析已保存的隐藏菜单路径列表，异常时回退为空（全部显示）。"""
+    if not raw:
+        return []
+    try:
+        data = _json.loads(raw)
+        if isinstance(data, dict):
+            hidden = data.get("hidden")
+        else:
+            hidden = data
+        if isinstance(hidden, list):
+            return [str(x) for x in hidden if x]
+    except Exception:
+        pass
+    return []
+
+
+@router.get("/menu-visibility")
+async def get_menu_visibility(u=Depends(get_principal),
+                             s: AsyncSession = Depends(get_session)):
+    """菜单显示配置读取（所有登录用户可读，供侧边栏渲染）。"""
+    row = (await s.execute(select(Setting).where(Setting.key == _MENU_VISIBILITY_KEY))).scalar_one_or_none()
+    return {"hidden": _load_menu_visibility(row.value if row else None)}
+
+
+class MenuVisibilityIn(BaseModel):
+    hidden: list[str] = []
+
+
+@router.put("/menu-visibility")
+async def set_menu_visibility(body: MenuVisibilityIn,
+                              u=Depends(require_role("super_admin", "admin")),
+                              s: AsyncSession = Depends(get_session)):
+    """菜单显示配置保存（管理员可写），整体覆盖式更新。"""
+    clean = sorted({str(x).strip() for x in body.hidden if str(x).strip()})
+    row = (await s.execute(select(Setting).where(Setting.key == _MENU_VISIBILITY_KEY))).scalar_one_or_none()
+    value = _json.dumps({"hidden": clean}, ensure_ascii=False)
+    if row:
+        row.value = value
+    else:
+        s.add(Setting(key=_MENU_VISIBILITY_KEY, value=value, is_secret=False))
+    await s.commit()
+    return {"ok": True, "hidden": clean}
 
 
 @router.get("/llm-enabled-models")

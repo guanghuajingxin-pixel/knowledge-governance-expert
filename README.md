@@ -1,6 +1,6 @@
 # Knowledge Governance Expert（知识治理专家）
 
-知识治理专家：文档采集 / 切片 / 向量检索 / LLM 问答 + FAQ 精准匹配 + **LangGraph 智能问答 Agent（基于 Dify 知识库）**，3 进程微服务 + Docker 基础设施 + 本地 Dify 服务。
+知识治理专家：文档采集 / 切片 / 向量检索 / LLM 问答 + FAQ 精准匹配 + **LangGraph 智能问答 Agent（统一知识库层：RAGFlow / DIFY 镜像，检索策略按库类型自动决定）**，3 进程微服务 + Docker 基础设施 + 本地 Dify 服务。
 
 ## 架构
 
@@ -52,11 +52,11 @@ BGE-M3 + bge-reranker-v2-m3 仅在 kb-api 进程加载一次（~2-3GB RSS），f
 - **进程内嵌入式运行**：sidecar 通过 DeerFlow 官方 `DeerFlowClient`（`deerflow/client.py`）在进程内直接跑 Lead Agent（create_agent + 中间件链 + 子智能体 + 长期记忆 + 摘要压缩 + sqlite checkpointer），**无需** langgraph server / gateway 进程。入口 [services/deerflow/backend/app/qa_server.py](services/deerflow/backend/app/qa_server.py)（FastAPI + SSE）。
 - **配置自举**：sidecar 启动时 `GET` kb-api `/api/v1/agent/bootstrap` 拉取模型配置（base_url/api_key/model/temperature），自动生成 `config.yaml` 与「杰克百晓生」人格 `SOUL.md`；kb-api 晚启动时后台重试（40 次 × 5s）。
 - **企业知识接入（目录预判 + 双来源检索 + 钉钉正文读取）**：DeerFlow 通过自定义扩展工具 [extensions/kb_tools.py](services/deerflow/backend/extensions/kb_tools.py) 挂载四个工具（`config.yaml` 的 `use: 模块:变量` 动态导入），知识类问题**主动、同时检索两个来源**，无需征询：
-  - `knowledge_search` → kb-api `POST /api/v1/internal/kb/retrieve`（头 `X-Internal-Token`，env `KB_INTERNAL_TOKEN`，默认 `kge-internal-dev-token`），落到 Dify 语义+全文检索，返回文档正文片段，是答案内容的主要来源；
+  - `knowledge_search` → kb-api `POST /api/v1/internal/kb/retrieve`（头 `X-Internal-Token`，env `KB_INTERNAL_TOKEN`，默认 `kge-internal-dev-token`），落到**统一知识库层**（`knowledge_libraries` 登记的 RAGFlow / DIFY 镜像库，按 platform 分通道走各自引擎的语义+全文检索与重排策略），返回文档正文片段，是答案内容的主要来源；
   - `dingtalk_browse` → kb-api `POST /api/v1/internal/dingtalk/browse`，**目录浏览**（不读正文、速度快）：`action="map"` 返回有权限知识库 → 二级目录的地图（含各目录文档/在线文档计数），用于**先预判问题最可能落在哪个知识库与目录**；`action="list"` 按目录关键词模糊匹配返回该目录下的文档（node_id/标题/扩展名/online 标记，**在线文档排在最前**）；
-  - `dingtalk_search` → kb-api `POST /api/v1/internal/dingtalk/search`，基于钉钉知识库文件缓存（文件名/目录路径关键词匹配，见上文「钉钉知识」），用于目录预判不到时补漏，发现 Dify 未收录的文档；
+  - `dingtalk_search` → kb-api `POST /api/v1/internal/dingtalk/search`，基于钉钉知识库文件缓存（文件名/目录路径关键词匹配，见上文「钉钉知识」），用于目录预判不到时补漏，发现知识库未收录的文档；
   - `dingtalk_read_doc` → kb-api `POST /api/v1/internal/dingtalk/content`，通过 `dws` CLI 读取钉钉文档**正文**（在线文档 `dws doc read` 直读 Markdown；二进制文件 `dws drive download` 下载后**优先经本地 MinerU 引擎解析为 Markdown**——ppt/pptx/doc/docx/xls/xlsx 用 MinerU 原生 OOXML 转换（秒级、无需模型/LibreOffice），pdf/扫描件用 MinerU pipeline（OCR/版面/表格）；引擎不可用或返回空时降级 python-pptx/python-docx/openpyxl/pdfplumber 即时解析，再降级 MinerU 云 API）。**文件名/目录仅用于预判该不该读，答案必须基于正文**——pptx/docx 等办公文档正文可读后，智能体不再只靠文件名猜测内容。详见下文「文档解析引擎（本地 MinerU）」。
-  - SOUL.md / SKILL.md 规定检索顺序：**先预判目录再进目录**（`knowledge_search` 与 `browse(map)` 并行 → `browse(list)` 列目录、在线文档优先精读、办公文档其次 → `search` 补漏），**每读完一篇立即确认能否回答**（能答即停，禁止无差别顺序读完整个目录），钉钉命中文档**必须读正文**再作答、禁止仅给链接；另规定双源穷尽检索（同义词/上下位词/拆解子问题，3-5 次以上）、多源结果归纳合并去重、答案第一句直接是实质内容；钉钉未配置时工具返回明确提示让智能体仅用 Dify 作答。
+  - SOUL.md / SKILL.md 规定检索顺序：**先预判目录再进目录**（`knowledge_search` 与 `browse(map)` 并行 → `browse(list)` 列目录、在线文档优先精读、办公文档其次 → `search` 补漏），**每读完一篇立即确认能否回答**（能答即停，禁止无差别顺序读完整个目录），钉钉命中文档**必须读正文**再作答、禁止仅给链接；另规定双源穷尽检索（同义词/上下位词/拆解子问题，3-5 次以上）、多源结果归纳合并去重、答案第一句直接是实质内容；钉钉未配置时工具返回明确提示让智能体仅用知识库检索结果作答。
 - **引用来源过滤**：[deerflow_runner.py](services/kb-api/app/services/agent/deerflow_runner.py) 的 `_filter_cited_citations` 在 `final` 事件前按答案正文过滤——只保留文档标题核心名（去 `[钉钉]` 前缀/扩展名/`杰克_` 前缀）出现在答案中的引用，避免把仅检索过但答案未提及的文档列出。
 - **会话模型**：前端每个对话会话生成 `session_id`（重新对话时刷新），kb-api 映射为 DeerFlow `thread_id = kge-u{uid}-{sid}`；同一会话复用 sqlite 检查点维持多轮记忆与上下文。
 - **限时探索机制（1 分钟询问 / 5 分钟再问 / 10 分钟兜底）**：由 [exploration_timeout_middleware.py](services/deerflow/backend/packages/harness/deerflow/agents/middlewares/exploration_timeout_middleware.py) 按 `thread_id` 跟踪墙钟（类级注册表，跨"暂停→续跑"保持），到点动作**确定性短路**（不依赖模型自觉、不额外消耗 token）：检索满 **1 分钟**未出答案时，`wrap_model_call` 直接合成一次 `ask_clarification` 工具调用（由 ClarificationMiddleware 拦截后结束本轮 SSE），前端弹出选择按钮「继续探索（再给我一些时间）/ 先基于已检索内容回答」；用户选继续后续跑，满 **5 分钟**仍无答案再问一次；总时长满 **10 分钟**则合成最终答复，明确告知"当前知识库无法获得准确答案"并建议换问法/知识征集。用户选「先基于已检索内容回答」时，`before_model` 注入停止指令给模型一次整合作答的机会，模型仍调工具则由 `after_model` 剥除并给兜底结论。阈值可用环境变量覆盖：`KGE_EXPLORE_FIRST_ASK`（默认 60s）、`KGE_EXPLORE_SECOND_ASK`（300s）、`KGE_EXPLORE_HARD_LIMIT`（600s）。
@@ -74,12 +74,14 @@ BGE-M3 + bge-reranker-v2-m3 仅在 kb-api 进程加载一次（~2-3GB RSS），f
 **流式问答**：智能问答页支持 SSE 流式输出。DeerFlow 底座下实时显示 Lead Agent 运行进度（🦌 DeerFlow 2.0 智能体 → 📚 知识检索（第 N 次，含检索词）→ 📌 钉钉知识库检索/目录浏览 → 📖 读取钉钉文档 → ✅ 检索完成 → 🧩 子任务派发/返回 → 🙋 等待确认），回答文本通过 `answer_delta` 事件**逐字流式上屏**（不再等终帧）；回退内置工作流时显示原节点进度（🔍 分类 → ✏️ 改写 → 📚 检索 → ⚖️ 判定 → ✍️ 生成）。后端端点 `POST /api/v1/search/chat/stream`，前端 [chat/index.vue](web/src/views/chat/index.vue) 消费 SSE 事件逐条渲染步骤与增量文本。每个前端会话携带 `session_id`（重新对话时刷新）映射 DeerFlow thread。引用来源默认只展示前 5 条，超过可「展开全部」。模型下拉只显示系统配置中已配置可用的 LLM（未配置时显示占位引导）。
 
 - **检索过程可展开**：助手消息的「智能体检索过程」步骤条运行中显示为紫色高亮条（spinner + 当前步骤 +「▸ 展开过程」），**点击即可展开查看全部步骤**（最后一步进行中带 spinner）；问答结束后步骤条仍可随时展开/收起，便于回溯检索路径。注意轮次保存后仅刷新侧边栏会话列表，不用 DB 记录全量重载消息，以保留按钮/Token 等交互态。
-- **限时探索选择按钮**：检索超 1 分钟（继续后再超 5 分钟）时，助手消息中出现选择卡片（`choice`/`choice_pause` 事件），提供「继续探索（再给我一些时间）/ 先基于已检索内容回答」两个按钮：点继续则以 `action=continue` 在同一 thread 续跑；点停止则 `action=stop` 立即收尾作答；按钮点击后禁用。10 分钟硬上限由系统自动给出"当前知识库无法获得准确答案"的兜底回复。
+- **限时探索选择按钮**：检索超 1 分钟（继续后再超 5 分钟）时，助手消息中出现选择卡片（`choice`/`choice_pause` 事件），提供「继续探索（再给我一些时间）/ 先基于已检索内容回答」两个按钮：点继续则以 `action=continue` 在同一 thread 续跑；点停止则 `action=stop` 立即收尾作答；按钮点击后禁用。**确认卡片 10 秒未点选自动按「继续探索」续跑**（按钮文案精简为「继续探索」等、不叠加倒计时，倒计时仅在按钮下方提示行「N 秒内未选择将自动继续探索」展示，超时后续跑并标注「已自动继续探索」；后台会话的确认态同样到点自动续跑，续跑消息写入该会话自己的消息数组；续跑轮不把选项文字作为用户消息上屏，历史重载时同样隐藏）。10 分钟硬上限由系统自动给出"当前知识库无法获得准确答案"的兜底回复。
 - **Token 消耗展示**：消息时间行在模型名/时间之后显示本轮模型接口返回的真实用量（`· ↑{input_tokens} ↓{output_tokens} tokens`，≥1000 紧凑显示为 x.xk），数据取自 sidecar `end` 事件的 `usage`（按各模型轮次 `usage_metadata` 累计），经 runner `final.result.usage` / `choice_pause.usage` 透传到前端。
 - **多会话并行问答（切换不中断，最多 5 路）**：不同会话可同时问答，**切换会话不中断进行中的回答**。前端 [chat/index.vue](web/src/views/chat/index.vue) 用会话级运行注册表 `runs`（sid → 消息对象/abort/状态）与内存消息数组 `liveArrays` 持有各会话的 SSE 连接与流式消息——连接归属会话而非视图，切换会话仅替换 `messages` 引用，后台会话继续逐字上屏，切回即恢复现场；当前会话是否「运行中」由 `loading` 计算属性派生。侧栏会话条目状态指示：运行中=**旋转小圆圈**（`.run-spinner`）、等待确认（choice_pause 暂停）=**琥珀点**（`.run-choice-dot`，回会话点选继续/停止）、有新完成的回答=**绿点**（`.run-done-dot`，打开该会话即清除）。并发上限 `MAX_CONCURRENT=5`（等待确认的 choice 态不占后端并发），超出发送提示稍候；同一会话运行中不允许重复发送。仅「停止按钮」与「删除会话」会 abort + cancel 对应会话。实现要点：`reactive(new Map())` 读取值是响应式代理，与原始对象严格比较恒为 false，运行态身份判断必须经 `toRaw` 归一（`isRun` 辅助函数），否则转圈不落点、完成不清理。后端配套：sidecar 的全局 `_stream_lock` 改为 `_NullLock`（仅保留结构），并发由 `_serialize_checkpointer` 给 SqliteSaver 各方法挂**方法级 `threading.RLock`**（可重入，规避 `get_tuple`→`setup` 嵌套自锁）实现——多会话的 LLM 流式长任务完全并行，仅 sqlite 检查点短 IO 在共享连接上串行；多会话同时读钉钉文档时 [agent_internal.py](services/kb-api/app/routes/agent_internal.py) `_run_dws` 全局并发≤3 + 0.4s 节流 + 瞬时失败重试 1 次，避免并行限频 500。
 - **运行中可中断（停止按钮 + 后端真正停止 Agent）**：回答进行中发送按钮变为深色实心方块（停止按钮），点击即中断；中断后按钮恢复发送态，末条 AI 消息标记「⏹ 已中断 · {model}」（无正文时补「（已中断本次回答）」）。中断采用**双保险**：前端除 `abort` 断开 SSE 外，额外 `POST /api/v1/search/chat/cancel`（[chat.ts](web/src/api/chat.ts) `cancelChat`），kb-api 按同一规则拼 `thread_id` 调 sidecar `POST /v1/chat/cancel`（[deerflow_runner.py](services/kb-api/app/services/agent/deerflow_runner.py) `cancel_deerflow_stream`），确保取消信号确定性到达、不依赖断连检测时机。后端确定性停止：① [exploration_timeout_middleware.py](services/deerflow/backend/packages/harness/deerflow/agents/middlewares/exploration_timeout_middleware.py) 的 `cancelled` 标志在每个模型节点边界由 `wrap_model_call` 短路（**不再调用模型、不耗 token**），`_due_action` 中 cancelled 优先级最高；② sidecar 收到取消后在**驱动 agent 的同一线程** `gen.close()` 注入 `GeneratorExit`，关闭同步图迭代器，中断进行中的模型流并释放资源。sidecar `/v1/chat/stream` 用**专属 worker 线程 + `asyncio.Queue` 泵**驱动**同步** `agent.stream()`（DeerFlow harness 用同步 `SqliteSaver`，不支持 `astream`/`AsyncSqliteSaver`）：worker 线程在 loop 外迭代同步生成器、把帧 `call_soon_threadsafe` 入队，async 泵端出帧下发；泵每 0.2s 轮询 `is_cancelled(thread_id) or request.is_disconnected()`，使取消发生在「等帧间隙」（无帧可触发）或**纯断连**（不调 cancel 直接关页/杀连接）时也能被检测并停图。`gen.close()` 始终在同一 worker 线程的 finally 中执行，保证 checkpointer 串行锁必被释放（多会话并发后 `_stream_lock` 退化为 `_NullLock`，sqlite 串行由 `_serialize_checkpointer` 的方法级 RLock 承担，见「多会话并行问答」）——中断后立即发新问答不卡锁、不回退内置工作流。sidecar 下发 `{"type":"cancelled"}` 帧，runner 收到即 `return`（跳过追问生成/`final`），kb-api `_gen` 的 finally 兜底再 cancel 一次（正常结束为 no-op）。注意 anyio 的 `CancelScope` 是**同步**上下文管理器，收尾时必须用 `with anyio.CancelScope(shield=True):`（`async with` 会抛 `TypeError` 导致 close 不执行、图被遗弃在后台继续跑空转耗 token）。同步工具（`@tool` 知识库/钉钉检索，httpx 同步、在 executor 线程跑）无法即时取消但会自然结束且不再驱动图；模型调用是 async httpx（token 消耗源），由中间件短路 + close 迭代器在「下一个图事件」粒度（通常 1～数秒）停止。
 
 **HiAgent 智能问答（外链嵌入）**：侧边栏「HiAgent智能问答」页通过火山引擎 HiAgent WebSDK（`embedFull.js`）以 iframe 方式内嵌官方智能体对话界面，见 [hiagent/index.vue](web/src/views/hiagent/index.vue)。SDK 以初始化内联脚本的父节点作为挂载容器，前端在 `onMounted` 时把 SDK 脚本与 init 脚本动态注入页面宿主 div，离开页面时清理 iframe；appKey/baseUrl 常量定义在该视图文件顶部。
+
+**菜单显示配置**：「系统配置 → 菜单配置」以列表形式管理侧边栏「功能区」全部菜单的显示/隐藏（开关即存，整体覆盖式更新）。「智能问答」为默认首页固定显示。存储：settings 表 `menu_visibility`（JSON `{"hidden":[路径]}`），接口 `GET/PUT /api/v1/settings/menu-visibility`（GET 所有登录用户可读、PUT 管理员），见 [settings_route.py](services/kb-api/app/routes/settings_route.py) 与 [model.vue](web/src/views/governance/model.vue)「菜单配置」Tab；[Sidebar.vue](web/src/components/layout/Sidebar.vue) 加载配置过滤功能区菜单（含二级子菜单），读取失败或未配置时默认全部显示，隐藏仅作用于导航（路由仍可直接访问）。
 
 **「关于我」产品介绍页**：侧边栏左下角「关于我」按钮（紫色图标，所有登录用户可见，[Sidebar.vue](web/src/components/layout/Sidebar.vue)），点击**新开浏览器页签**打开纯静态介绍页 [web/public/about.html](web/public/about.html)（原生 `<a :href="import.meta.env.BASE_URL + 'about.html'" target="_blank">`，避免弹窗拦截；dev 与构建产物均由根路径直达，不依赖登录态与后端）。页面以营销页形式呈现：平台定位与数据条（4 应用进程 / 5 基础设施容器 / 1.6万+ 钉钉知识节点 / 6.7TB 企业存储 / 1/5/10min 限时探索）、设计理念（答案优先而非链接堆砌、先预判目录再进目录、把时间还给用户、一切皆可配置、安全与稳定是默认值、基于正文作答）、**知识治理闭环全景图**（单张紧凑白色卡片，SVG 环形闭环布局：5 个彩色圆角节点①采集「汇得拢」②加工「读得懂」③应用「用得上」④运营「看得见」⑤治理「管得住」围成圆环，灰色实线弧箭头沿环顺时针流转，**治理→采集的橙色收口弧使首尾相接成闭环**；环中心为紫色「治理飞轮」hub（越用越准·越治越新）；环内两条红色虚线表达跨环节质量回流——治理→加工（重分段/重打标/重建索引）、应用→治理（问答反馈·点赞/踩/无结果），回流标签最后绘制并加白色描边保证压线可读；卡片底部双行图例（环节色点 + 线条类型）；≤960px 窄屏自动降级为纵向紧凑列表）、闭环整体价值三胶囊（知识不沉没/质量自进化/投入可度量）、分层系统架构图（接入层 → DeerFlow 智能体层 → 应用服务层 → 检索与解析 → 基础设施）、八大功能模块卡片与技术亮点清单；内容与 README 架构章节保持同口径（HiAgent 为临时模块未收录）。纯单文件 HTML + 内联 CSS，无外部资源依赖，响应式适配窄屏。
 
@@ -187,6 +189,9 @@ docker compose -f docker-compose.app.yml up -d
 # 7. 初始化 DB + 种子 admin
 docker exec kge-kb-api sh -c "cd /app/services/kb-api && uv run alembic -c ../../alembic.ini upgrade head"
 docker exec kge-kb-api sh -c "cd /app/services/kb-api && uv run python ../../scripts/seed_admin.py"
+#    ⚠️ 模型变更必须伴随迁移：新增/修改 ORM 字段时先在本地补 alembic 迁移再部署，
+#    禁止依赖本地 create_all/手工改表（schema 漂移会导致线上 UndefinedColumnError 500），
+#    迁移号先 `alembic heads` 确认无并行冲突。部署后用受影响接口验证。
 
 # 8. 前端 nginx（8080 端口，反代 /api/v1/faq→8004、/api/v1→8001）
 sudo cp nginx-kge.conf /etc/nginx/sites-enabled/kge && sudo nginx -t && sudo systemctl reload nginx
@@ -298,6 +303,7 @@ KB_API_INTERNAL_URL=http://kb-api:8000
 | 智能问答数据集为空 | 先在 Dify 控制台创建知识库并上传文档，再到「系统配置 → 接入配置」填 Dify `API 端点`/`API Key` 并「拉取列表」 |
 | 8088 端口被占用 | 改 `dify/docker/.env` 的 `EXPOSE_NGINX_PORT`，并同步改 kb-api 的 `DIFY_BASE_URL` |
 | Dify 控制台 502 Bad Gateway | nginx 启动早于 api 就绪会缓存错误上游 IP（macOS 代理 fake-ip `198.18.x.x`）；`docker restart docker-nginx-1` 强制重解析即可。若 api 日志报 `No space left on device`，先 `docker system prune -a -f` 清理 colima 磁盘 |
+| Dify 上传文档超 15MB 被拒 | `UPLOAD_FILE_SIZE_LIMIT` 默认 15MB，且该变量不在 `dify/docker/.env`（仅在 shared.env.example 模板），运行态静默回落。在 `.env` 写 `UPLOAD_FILE_SIZE_LIMIT=100` 后 `docker compose up -d api worker` 重建；详见 [知识库上传文件大小上限](#知识库上传文件大小上限️-部署到新服务器必查) |
 | HiAgent 页提示「当前域名无访问权限」 | HiAgent 智能体配置了网站访问白名单（WebSiteList）；到 HiAgent 控制台把当前访问域名（如 `http://localhost:5173`）加入 WebSDK 嵌入白名单，或清空白名单允许所有域名 |
 | HiAgent 页一直加载/脚本加载失败 | 需能访问外网 `hia.volcenginepaas.com`；公司网络拦截时放开该域名，或检查 appKey 是否有效（appKey/baseUrl 在 [hiagent/index.vue](web/src/views/hiagent/index.vue) 顶部常量维护） |
 
@@ -314,9 +320,11 @@ KB_API_INTERNAL_URL=http://kb-api:8000
 - **输入区**：圆角大容器（focus 时紫色 ring），上方工具条三个开关/选择器，下方无边框 textarea + 圆形发送按钮（有内容时变紫）：
   - **模型选择**：下拉只列出「系统配置」中已配置的可用模型；选中模型随请求 `model` 字段传给后端，覆盖系统默认模型（占位项「（未配置 LLM）」不覆盖）。
   - **深度思考**：开关，随 `deep_think` 传后端。开启后知识库召回 `top_k` 由 5 提升到 10，生成节点温度调高并追加「分步拆解、逐一引证、详尽回答」指令；助手消息 meta 前缀显示「深度思考 ·」。
-  - **知识库检索**：开关 + 数据集多选弹层。开启时按勾选的 Dify 数据集检索（`dify_dataset_ids`），可全选/半选；关闭时传 `null` 走系统默认数据集。
+  - **知识库检索**：开关 + 知识库多选弹层。开启时按勾选的知识库检索（`library_ids`，来自「知识应用 → 知识库」登记的 RAGFlow / DIFY 镜像，按平台分组展示），可全选/半选；关闭时传 `null` 走全部已启用的知识库。
 - **流式**：`POST /api/v1/search/chat/stream`（SSE）逐节点推送 `step` / `answer_delta`（回答文本增量，逐字上屏）/ `final`（含 `usage` token 用量）/ `choice` / `choice_pause`（限时探索确认按钮，本轮无 `final`）/ `config_error` 事件；`ChatIn` 支持 `model` / `deep_think` / `history` / `session_id`（映射 DeerFlow thread，重新对话时刷新）/ `action`（限时探索续跑：`continue` 继续探索、`stop` 立即收尾，留空为新问题）参数（非流式 `/chat` 同步支持）。
 - **下一步问题建议**：回答完成后，答案反馈条下方显示「你可能还想问」3 个追问胶囊（由模型生成，点击直接提问）。
+
+**知识库（检索抽象层）**：「知识应用 → 知识库」（路由 `/apply/knowledge-libraries`，[knowledge-libraries/index.vue](web/src/views/knowledge-libraries/index.vue)）统一登记 **RAGFlow / DIFY 知识库镜像**，供智能体检索选库。仅登记 `platform + dataset_id` 引用（**只做镜像，不支持导入/解析新文档**，文档与解析仍在原平台维护），与「知识源管理」（推送路径定义）相互独立。后端 CRUD 见 [knowledge_library.py](services/kb-api/app/routes/knowledge_library.py)（`/api/v1/knowledge-libraries`，同平台同 dataset_id 不可重复，写操作限管理员），数据模型 `KnowledgeLibrary`（[models.py](services/kb-common/kb_common/models.py)，迁移 0025）。检索真相源切换：问答请求首选 `library_ids`（[search.py](services/kb-api/app/routes/search.py) `_resolve_retrieval_targets` 按 platform 解析为 dify/ragflow 两组 dataset，兼容旧 `knowledge_source_ids`/`dify_dataset_ids`；都不传时默认全部启用的知识库），sidecar 兜底（[agent_internal.py](services/kb-api/app/routes/agent_internal.py) `/internal/kb/retrieve`）同样优先抽象层、为空时回退旧知识源注册表；**检索策略由抽象层按 platform 内部决定**（Dify 走数据集自身检索配置含 rerank，RAGFlow 走引擎检索参数），提示词与工具描述统一为「知识库检索」，不再写死 Dify。
 
 ## 智能体配置（DeerFlow 2.0 底座）
 
@@ -375,6 +383,21 @@ docker compose up -d
 - Dify 控制台：http://127.0.0.1:8088 （首次用 `admin` / `Dify@2026` 登录设置）
 - 内部服务（api:5001 / web:3000 / weaviate / postgres / redis / sandbox / plugin_daemon / agent_backend）在 compose 网络内互通，仅 nginx 8088 暴露到主机
 - 镜像拉取受网络影响时，跑 `bash dify/docker/pull-images.sh` 单镜像重试续传
+
+### 知识库上传文件大小上限（⚠️ 部署到新服务器必查）
+
+Dify 文档上传大小由 `UPLOAD_FILE_SIZE_LIMIT` 控制（**单位 MB，内部默认 15**）。坑点：该变量只存在于模板 `dify/docker/envs/core-services/shared.env.example`，而容器实际加载的是 `dify/docker/.env`；若 `.env` 未显式写入，运行态会**静默回落到 15MB 默认值**（`docker exec docker-api-1 printenv UPLOAD_FILE_SIZE_LIMIT` 为空即中招）。
+
+本仓库 `dify/docker/.env` 已显式配置：
+
+```dotenv
+UPLOAD_FILE_SIZE_LIMIT=100    # 知识库单文档上传上限 100MB
+UPLOAD_FILE_BATCH_LIMIT=100   # 单次批量上传文件数上限 100
+```
+
+改后须 `docker compose up -d api worker` 重建容器生效；同时确认 nginx 请求体上限 `NGINX_CLIENT_MAX_BODY_SIZE`（docker-compose 默认 `100M`）≥ 该值，否则大文件会先被 nginx 以 413 拦掉。
+
+> **部署提醒**：`dify/docker/.env` 被 gitignore、不进版本库，rsync/clone 到服务器时**不会带上**。每次在新服务器部署或重建 Dify 后，务必检查该文件里是否已写入 `UPLOAD_FILE_SIZE_LIMIT=100` 和 `UPLOAD_FILE_BATCH_LIMIT=100`，否则线上仍是默认的 15MB / 单批 5 个。
 
 ### 获取 Dify API Key
 
@@ -437,12 +460,13 @@ docker compose down -v        # 同时删除卷（清空 Dify 数据库与知识
 
 实时拉取**钉钉开放平台**的企业知识库（Wiki）数据，非本地数据：
 
-- **数据源**：`dingtalk_client` 调用 `v2.0/wiki/workspaces` + `v2.0/wiki/nodes` 遍历操作人可见的全部团队知识库；创建人 userid 经 `oapi.dingtalk.com/topapi/v2/user/get` 解析为姓名（进程级缓存）。
+- **数据源与持久化**：`dingtalk_client` 调用 `v2.0/wiki/workspaces` + `v2.0/wiki/nodes` 遍历操作人可见的全部团队知识库；结果**持久化在 PostgreSQL `dingtalk_file_snapshots` 表**（只保留最新一份，payload 为文件 JSON，含创建人姓名）。列表接口只读快照，不调用钉钉，进程重启 / 容器重建 / 开发环境 `--reload` 后列表依旧可用。升级时若存在历史磁盘快照（`/tmp/kge_dingtalk_files.json`，路径可用 `KGE_DINGTALK_SNAPSHOT` 覆盖），首次访问会自动导入数据库。
+- **刷新方式（仅手动）**：**只有点右上角「刷新」并确认**才触发后台全量遍历（会二次确认，提示约 25–30 分钟）；接口立即返回、前端按 12s 轮询并显示「后台同步中…」，期间列表继续展示当前快照；遍历成功后覆盖写入数据库快照并提示「钉钉知识快照已刷新」，失败则在表头显示告警（不弹成功提示）。没有任何定时/过期自动遍历——表头「数据更新于 HH:mm」即最近一次成功刷新的时间（悬停可看说明）。同一时刻只跑一个遍历（单飞）。
+- **创建人姓名**：遍历结束时一次性经 `oapi.dingtalk.com/topapi/v2/user/get` 解析并写入快照，列表接口不再调用钉钉通讯录；仅对缺少姓名的历史快照做一次补解析并回写快照。
 - **上级目录**：多层文件夹以 `/` 拼接完整路径（如 `/业务管理/AI与数字化团队/营销项目管理/M8系统`），知识库根目录下的文件显示 `/`。
 - **元数据列**：文件名称（点击跳转钉钉文档）、来源知识库、上级目录、文件类型、文件大小、创建人、创建时间、最近更新。
 - **过滤维度**：按知识库过滤（多选）、按创建人过滤（多选）、文件名搜索、上级目录路径搜索。
-- **手动刷新**：右上角「刷新」触发后台重新遍历钉钉；结果内存缓存 1 小时，遍历成功后同时落盘快照（`/tmp/kge_dingtalk_files.json`，可用环境变量 `KGE_DINGTALK_SNAPSHOT` 覆盖路径）。进程重启 / 开发环境 `--reload` 后自动从快照预热，无需等待全量遍历。
-- **性能与容错**：钉钉 `wiki/nodes` 接口限流严格（实测 3 并发即批量 403），客户端采用**并发信号量（≤3）+ 全局最小请求间隔节流（0.4s/次，约 2.5 QPS）+ 403/429/5xx/超时指数退避重试**；遍历为后台异步任务（单飞，并发访问不重复遍历），前端按 12s 间隔轮询，全量约 4,500 个节点请求、25–30 分钟；明确无权限的目录自动跳过。
+- **性能与容错**：钉钉 `wiki/nodes` 接口限流严格（实测 3 并发即批量 403），客户端采用**并发信号量（≤3）+ 全局最小请求间隔节流（0.4s/次，约 2.5 QPS）+ 403/429/5xx/超时指数退避重试**；全量约 4,500 个节点请求、**25–30 分钟**。明确无权限的目录自动跳过。智能问答的 `dingtalk_search` / `dingtalk_browse` 兜底工具读同一份快照（只读，不触发遍历）。
 - **配置**：在「系统配置」页填写钉钉 AppKey / AppSecret / 操作人 UnionId（settings 表持久化，`sync_runtime_config` 每次调用前同步）；未配置时页面显示友好告警。
 - **知识Owner通知（知识缺口）**：知识缺口页钉钉行操作列新增「通知」按钮（仅**快照存在 + 已维护 Owner + 目录无文档**的行可点，其余禁用并以 tooltip 说明原因）；点击弹窗预览正文「你即将通过钉钉发送私聊通知给知识Owner xxx：【库名 / 目录路径】该目录下的知识为空，请尽快补充，谢谢！」，确认后经 `POST /governance/gaps/dingtalk/notify` 走钉钉企业机器人单聊（`v1.0/robot/oToMessages/send`，sampleText）。前置条件：①「系统配置 → 钉钉设置」填写 **机器人 robotCode**（`dingtalk_robot_code`，取值见开放平台「应用详情 → 机器人」，与 AppKey 不同）；②应用开通「企业内机器人发送消息权限」与「通讯录个人信息读权限」；③ Owner 填写的是员工**姓名**（后端按姓名在通讯录精确匹配 userid，无精确匹配返回 400）。发送成功返回 `已通过钉钉私聊通知 {owner}`，错误分类：400 业务校验、502 钉钉 OpenAPI 网络/权限错误。
 
@@ -459,9 +483,9 @@ docker compose down -v        # 同时删除卷（清空 Dify 数据库与知识
 
 侧边栏「知识采集」（路由 `/collection`）含六个页签，覆盖从钉钉单文件同步到 Dify 知识库批量入库，再到定时增量同步与运行监控的完整采集动线：
 
-- **从钉钉同步**：**按目录查询**（避免全量遍历超时）——依次选择钉钉知识库 + 文件夹（级联懒加载子目录，任意层级可选）后点「查询」，仅加载该目录的**直接子文档**；首次进入未选择时列表为空。实时数据 + 浏览器内存缓存（5 分钟 TTL，不持久化），「强制刷新」绕过缓存重新拉取。过滤文件名/分页为前端本地进行。后端新增轻量接口（[knowledge_center.py](services/kb-api/app/routes/knowledge_center.py)）：`GET /knowledge-center/dingtalk/workspaces`（实时列团队知识库，含根节点 ID）、`GET /knowledge-center/dingtalk/nodes?parent_node_id=`（实时列某父节点直接子节点），均为单次钉钉 API 调用（约 1.5s）；勾选文档同步到 Dify 沿用 `POST /api/v1/dify/datasets/{id}/sync-dingtalk`（请求体传 `node_id`，后端用 `dingtalk_client.download_document` 走 `queryDentryId → downloadInfos/query → OSS 直链` 下载原文件；**注意**：钉钉 wiki 节点的 `url` 字段是 alidocs 在线预览页，直接下载会得到 HTML 导致 Dify 解析失败，且 OSS 返回的文件名是无扩展名哈希串，上传时须用前端传入的带扩展名原始文件名）。**大文件兜底**：文件 ≤15MB 直接 `create-by-file`；>15MB 或 `create-by-file` 失败时，先存 OSS（Minio `raw-docs` bucket，`dingtalk-sync/` 前缀）作为原始备份，再用 MinerU 解析为 Markdown，通过 `create-by-text` 写入 Dify（`doc_form`/`indexing_technique` 从数据集读取保持一致，避免 400），Dify 自动分块索引即「块拼接」；返回 `method=text` 标识此路径，原文件 OSS key 一并返回。
+- **从钉钉同步**：**按目录查询**（避免全量遍历超时）——依次选择钉钉知识库 + 文件夹（级联懒加载子目录，任意层级可选）后点「查询」，仅加载该目录的**直接子文档**；首次进入未选择时列表为空。实时数据 + 浏览器内存缓存（5 分钟 TTL，不持久化），「强制刷新」绕过缓存重新拉取。过滤文件名/分页为前端本地进行。后端新增轻量接口（[knowledge_center.py](services/kb-api/app/routes/knowledge_center.py)）：`GET /knowledge-center/dingtalk/workspaces`（实时列团队知识库，含根节点 ID）、`GET /knowledge-center/dingtalk/nodes?parent_node_id=`（实时列某父节点直接子节点），均为单次钉钉 API 调用（约 1.5s）；勾选文档同步到 Dify 沿用 `POST /api/v1/dify/datasets/{id}/sync-dingtalk`（请求体传 `node_id`，后端用 `dingtalk_client.download_document` 走 `queryDentryId → downloadInfos/query → OSS 直链` 下载原文件；**注意**：钉钉 wiki 节点的 `url` 字段是 alidocs 在线预览页，直接下载会得到 HTML 导致 Dify 解析失败，且 OSS 返回的文件名是无扩展名哈希串，上传时须用前端传入的带扩展名原始文件名）。**源文档直传（不做本地转换）**：源文件先备份对象存储（Minio `raw-docs/dingtalk-sync/{node_id}/`），≤15MB 按目标库类型选择 `create-by-file` 或 `pipeline/run` 以源文档上传；>15MB 时 Dify 硬性限制无法直传，明确报错并返回源文件 OSS key。**禁止经 MinerU/文本抽取转换后上传**（历史转换产物内容失真：表格/图片/排版丢失，仅剩分页文本流）。在线文档（adoc/axls/able 等）无 OSS 原文件，仍走钉钉官方导出接口得 docx/xlsx/pdf 后源文件上传。
 - **上传到 Dify 知识库** / **上传前 AI 预检** / **缺口与征集**：单文件与批量上传、AI 预检与缺口看板（详见各页签内说明）。
-- **同步源管理**（后端 `app/routes/sync_route.py`，`/api/v1/sync/sources`）：配置钉钉知识库目录 → Dify 数据集的映射关系，每个同步源自带独立 `cron` 定时表达式（默认 `0 2 * * *` 每日凌晨 2 点）。支持新增/编辑/启停/删除、**预演**（dry-run，只比对不写入）、**立即同步**、连接测试。表单内可懒加载钉钉目录树并按关键字搜索定位起始目录；同步源保存后由 `app/services/sync/scheduler.py`（APScheduler BackgroundScheduler）按 cron 注册任务，增删改自动 `reload_sync_jobs`。
+- **同步源管理**（后端 `app/routes/sync_route.py`，`/api/v1/sync/sources`）：配置钉钉知识库目录 → Dify 数据集的映射关系，每个同步源自带独立 `cron` 定时表达式（默认 `0 2 * * *` 每日凌晨 2 点）。支持新增/编辑/启停/删除、**同步列表**（原「预演」，dry-run 只比对不写入；**点击立即弹窗、在弹窗内等待加载**——行内按钮不转圈，表格区域显示 loading 遮罩，加载失败自动收起弹窗；结果弹窗前端分页每页 20 条；**全量展示**该目录下所有文档——未同步过标「新增」、上一轮已同步标「更新」，另有「跳过/删除」，每篇带「参与同步」开关，开关打开的文档同步时一律重新上传、不做内容 hash 跳过；**性能**：目录树快照服务端缓存 10 分钟——内存 + `/tmp/kge_sync_walk_cache.json` 磁盘快照（重启热身）命中秒回，未命中时兄弟目录并发遍历（≤3 并发 + 全局 0.4s 节流防钉钉限流）；弹窗内「刷新列表」传 `refresh=true` 强制重遍历（同样弹窗内等待）并保留已调开关；真实同步始终绕过缓存直读钉钉最新目录；数据集 runtime 模式缓存 10 分钟）、**立即同步**、连接测试。操作列仅保留「立即同步 / 同步列表 / 启停开关 / 更多▼」（编辑与删除收进「更多」下拉）。**文档数 = 该源映射表中 status=synced 的数量**（多源可共享同一 Dify 数据集且数据集可能含手动上传文档，不能用数据集全库文档数作为单源口径）。表单中**目录必选**（点选目录树节点，不再默认整库同步；「已选目录」只读回显所点选路径）；目录树在首次选择知识库时自动拉取完整目录并持久化到 localStorage（`kge:sync_dir_tree:{workspace_id}`），再次打开弹窗直接用缓存不请求，搜索框旁「刷新」按钮强制重新拉取。同步源保存后由 `app/services/sync/scheduler.py`（APScheduler BackgroundScheduler）按 cron 注册任务，增删改自动 `reload_sync_jobs`。
 - **运行监控**（合并自源项目 Monitor + Logs 单页三区块）：① **失败清单**（待处理，可单项/全部重试）；② **同步历史**（运行记录表：触发方式/耗时/新增·更新·删除·跳过·失败计数/结果状态）；③ **运行日志**（按级别 info/warn/error、关键字、时间窗筛选）。
 
 ### 钉钉知识库 → Dify 定时增量同步（合并自 DingDingKonwledgePipeline）
@@ -469,8 +493,9 @@ docker compose down -v        # 同时删除卷（清空 Dify 数据库与知识
 并入平台后保留的核心能力，相关代码分布：
 
 - **数据模型**（迁移 `alembic/versions/0011_add_sync_tables.py`）：`sync_sources`（含 `cron` 字段，不保留独立 jobs 表）、`sync_runs`、`sync_document_mappings`、`sync_failures`、`sync_logs`，模型定义见 [kb_common/models.py](services/kb-common/kb_common/models.py)。
-- **同步引擎**（[services/sync/engine.py](services/kb-api/app/services/sync/engine.py)）：钉钉目录树遍历 → 下载/导出（ALIDOC 与 .able 经 dws CLI）→ Dify 增量上传（元数据指纹 + 内容 hash 判定新增/更新/跳过；`delete_policy=sync` 时同步删除已不存在的 Dify 文档）。同步版 httpx + 同步 ORM，跑在 `ThreadPoolExecutor` 后台线程不阻塞事件循环。
-- **运行兜底与中断语义**（[runtime.py](services/kb-api/app/services/sync/runtime.py)）：单次同步硬超时 `sync_run_timeout_seconds`（默认 **7200 秒 = 2 小时**，超时强杀进程组）；超时/进程崩溃/孤儿收编时保留已完成的同步成果——有成功项则标 `partial`（部分成功，WARNING 日志），仅零成功才标 `failed`（ERROR），日志带「成功 N 个，失败 N 个」计数（与引擎正常路径的 partial 判定一致）。前端「同步源管理」与「同步工作台」对运行中任务每 3 秒轮询，全部结束后自动停止轮询，按钮由「同步中」恢复为「立即同步」可再次触发。
+- **同步引擎**（[services/sync/engine.py](services/kb-api/app/services/sync/engine.py)）：钉钉目录树遍历（并发 ≤3 + 0.4s 节流；真实同步 `use_cache=False` 直读最新目录，预演走 10 分钟快照缓存）→ 下载/导出（ALIDOC 与 .able 经 dws CLI）→ **源文档备份对象存储**（Minio `raw-docs/dingtalk-sync/{node_id}/`）→ **源文档直传 Dify**（预演开关打开的文档一律重新同步：已同步过走更新、未同步过新建，**不做内容 hash/指纹跳过**；仅「预演关闭」或扩展名在跳过列表才跳过；`delete_policy=sync` 时同步删除已不存在的 Dify 文档）。**上传前不做任何本地转换**（无 MinerU/文本抽取——历史转换产物内容失真，已废弃）；仅受 Dify 15MB 单文件硬限制，超限报错。同步版 httpx + 同步 ORM，跑在 `ThreadPoolExecutor` 后台线程不阻塞事件循环。
+- **知识流水线数据集分流**（[dify_sync_client.py](services/kb-api/app/services/sync/dify_sync_client.py)）：目标 Dify 知识库为 **RAG Pipeline 模式**（`runtime_mode=rag_pipeline`）时，`create-by-file` 会派发普通索引任务导致「No subchunk segmentation found in rules」失败、且控制台「处理/预览」报 `PublishedWorkflowRunPayload` 校验错误——此类数据集自动改走 `POST /datasets/{id}/pipeline/run`（上传暂存文件 → 阻塞运行已发布流水线 → 用响应中的 document id/batch 复用 `wait_indexing` 轮询）；更新场景因该接口不支持 `original_document_id`，先创建新文档并确认索引成功，再删除旧文档；失败时保留旧文档与原映射。流水线运行依赖 dify 镜像补丁 `base_app_generator.py`（必填变量缺失回退默认值）+ `variables_manager.py`（`default_value → default` 字段映射），见 [dify/docker/patches/README.md](dify/docker/patches/README.md)。
+- **运行兜底与中断语义**（[runtime.py](services/kb-api/app/services/sync/runtime.py)）：单次同步硬超时 `sync_run_timeout_seconds`（默认 **28800 秒 = 8 小时**，超时强杀进程组）；超时/进程崩溃/孤儿收编时保留已完成的同步成果——有成功项则标 `partial`（部分成功，WARNING 日志），仅零成功才标 `failed`（ERROR），日志带「成功 N 个，失败 N 个」计数（与引擎正常路径的 partial 判定一致）。前端「同步源管理」与「同步工作台」对运行中任务每 3 秒轮询，全部结束后自动停止轮询，按钮由「同步中」恢复为「立即同步」可再次触发。
 - **配置读取**：钉钉 AppKey/Secret/操作人、Dify base_url/api_key 复用「系统配置」页；同步参数（`sync_max_depth`、`sync_export_format`、`sync_skip_extensions`、`sync_dify_wait_indexing` 等）与 `dws_bin`/`dws_config_dir` 从 [kb_common/config.py](services/kb-common/kb_common/config.py) 读取，可用 `.env` 覆盖。
 - **依赖**：kb-api 新增 `apscheduler`（cron 调度）与 `psycopg[binary]`（同步引擎的同步 DB 会话，连接同一套库；平台主 ORM 仍为 asyncpg）。
 - **认证**：沿用平台 `require_role("super_admin","admin","editor")`，不保留源项目的 admin/password 哈希登录。
@@ -570,10 +595,14 @@ knowledge-governance-expert/
     └── src/views/
         ├── chat/                # 智能问答（Dify 数据集多选 + Agent）
         ├── hiagent/             # HiAgent智能问答（火山 HiAgent WebSDK iframe 嵌入）
-        ├── governance/          # 知识治理 7 大模块（默认页签为知识缺口；含 model.vue 接入配置；治理标准页实时读取钉钉多维表《杰克知识管理规范》，需应用开通 Notable.Base.Read.All 权限；知识缺口页知识库过滤选项取自知识源管理中已启用的钉钉知识库，选中钉钉知识库后查询读取 dingtalk_folder_stats 快照表（文件夹直属文档数=在线文档+本地上传文件；「文件夹数量」列=该目录直属子文件夹数，不含目录本身与孙级——钉钉行由快照路径树推导、本地行走 parent_id，CSV 导出同口径），「刷新数据」按钮触发后台全量遍历并覆盖写入快照（几万文档的大库需数分钟，前端轮询进度，刷新保留已维护的 Owner）；知识Owner 支持行内编辑弹窗与批量导入（CSV/XLSX，按目录ID或知识库＋目录路径匹配，本地目录与钉钉文件夹均可），钉钉行另提供「通知」按钮——经钉钉企业机器人向 Owner 发单聊催补提醒（无文档行可点，正文预览见「知识Owner通知」说明）；新增钉钉知识源时自动触发该库快照预热，知识源列表显示「目录获取中」状态）
+        ├── governance/          # 知识治理 7 大模块（默认页签为知识缺口；含 model.vue 接入配置；治理标准页实时读取钉钉多维表《杰克知识管理规范》，需应用开通 Notable.Base.Read.All 权限；知识缺口页知识库过滤选项取自知识源管理中已启用的钉钉知识库，选中钉钉知识库后查询读取 dingtalk_folder_stats 快照表（文件夹直属文档数=在线文档+本地上传文件；「文件夹数量」列=该目录直属子文件夹数，不含目录本身与孙级——钉钉行由快照路径树推导、本地行走 parent_id，CSV 导出同口径），「刷新数据」按钮触发后台全量遍历并覆盖写入快照（几万文档的大库需数分钟，前端轮询进度，刷新保留已维护的 Owner）；知识Owner 支持行内编辑弹窗与批量导入（CSV/XLSX，按目录ID或知识库＋目录路径匹配，本地目录与钉钉文件夹均可），钉钉行另提供「通知」按钮——经钉钉企业机器人向 Owner 发单聊催补提醒（无文档行可点，正文预览见「知识Owner通知」说明）；新增钉钉知识源时自动触发该库快照预热，知识源列表显示「目录获取中」状态；知识采集的同步任务弹窗「目录选择」优先读取该快照表秒开（GET /knowledge-center/knowledge-sources/{id}/dingtalk-folder-snapshot，按路径树还原目录，快照缺失时自动回退实时遍历））
         └── settings/            # 兼容旧路由的模型配置页（隐藏）
 ```
 
 ## 企业问答增强与准确率验收
 
 智能问答采用统一的企业知识检索、DWS 钉钉补查、原文摘录校验与语义核验链路。配置方式、权限边界、标签/摘要/图谱与记忆设计，以及超过 90% 准确率的专家题集验收方法见 [企业问答说明](docs/qa-evaluation/README.md)。实际验证范围见 [验证记录](docs/qa-evaluation/VALIDATION.md)。
+
+### 问答输出与过程展示
+
+问答页按实际工具调用显示处理、检索、读取、上下文展开及失败/取消状态。内部会话摘要与正式答案分开；正文在本轮主模型最终结果确认后展示，过程继续实时更新。有引用的答案标注“附有参考来源”，不再将提示词自检描述为事实核验。历史答案不会自动改写。实现及验收见 [问答输出隔离说明](docs/features/qa-output-isolation-plan.md)。

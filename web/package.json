@@ -16,6 +16,7 @@
     "@element-plus/icons-vue": "^2.3.1",
     "@types/dompurify": "^3.2.0",
     "axios": "^1.6.8",
+    "dingtalk-jsapi": "^3.2.9",
     "dompurify": "^3.4.14",
     "echarts": "^6.1.0",
     "element-plus": "^2.7.0",

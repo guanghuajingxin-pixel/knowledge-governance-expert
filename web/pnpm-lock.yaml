@@ -17,6 +17,9 @@ importers:
       axios:
         specifier: ^1.6.8
         version: 1.18.1(debug@4.4.3)
+      dingtalk-jsapi:
+        specifier: ^3.2.9
+        version: 3.2.9
       dompurify:
         specifier: ^3.4.14
         version: 3.4.14
@@ -903,6 +906,9 @@ packages:
     resolution: {integrity: sha512-EjePK1srD3P08o2j4f0ExnylqRs5B9tJjcp9t1krH2qRi8CCdsYfwe9JgSLurFBWwq4uOlipzfk5fHNvwFKr8Q==}
     engines: {node: ^14.15.0 || ^16.10.0 || >=18.0.0}
 
+  dingtalk-jsapi@3.2.9:
+    resolution: {integrity: sha512-VLt8co92z29bdguxUvJLnhpQn7WFjb5rJTODDczieS7I0yyWj5+KwF04sWfMvyIKX0MQPVL++Fyo6z2JucFpgQ==}
+
   dompurify@3.4.14:
     resolution: {integrity: sha512-dVoH9z+MY+C9IilgGCk3YfFqjLi3fChm2OiKJMzh6axrJ5qwxqWaZamgmHrpv22CN/KdbZJuGEGgfQoL00LTdg==}
 
@@ -1379,6 +1385,9 @@ packages:
   pretty-format@29.7.0:
     resolution: {integrity: sha512-Pdlw/oPxN+aXdmM9R00JVC9WVFoCLTKJvDVLgmJ+qAffBMxsV85l/Lu7sNx4zSzPyoL2euImuEwHhOXdEgNFZQ==}
     engines: {node: ^14.15.0 || ^16.10.0 || >=18.0.0}
+
+  promise-polyfill@7.1.2:
+    resolution: {integrity: sha512-FuEc12/eKqqoRYIGBrUptCBRhobL19PS2U31vMNTfyck1FxPyMfgsXyW4Mav85y/ZN1hop3hOwRlUDok23oYfQ==}
 
   proto-list@1.2.4:
     resolution: {integrity: sha512-vtK/94akxsTMhe0/cbfpR+syPuszcuwhqVjJq26CuNDgFGj682oRBXOP5MJpv2r7JtE8MsiepGIqvvOTBwn2vA==}
@@ -2504,6 +2513,10 @@ snapshots:
 
   diff-sequences@29.6.3: {}
 
+  dingtalk-jsapi@3.2.9:
+    dependencies:
+      promise-polyfill: 7.1.2
+
   dompurify@3.4.14:
     optionalDependencies:
       '@types/trusted-types': 2.0.7
@@ -3028,6 +3041,8 @@ snapshots:
       '@jest/schemas': 29.6.3
       ansi-styles: 5.2.0
       react-is: 18.3.1
+
+  promise-polyfill@7.1.2: {}
 
   proto-list@1.2.4: {}
 

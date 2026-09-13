@@ -15,6 +15,10 @@ def ask_clarification_tool(
     ],
     context: str | None = None,
     options: list[str] | None = None,
+    evidence_summary: str | None = None,
+    confidence: int | None = None,
+    confidence_reason: str | None = None,
+    choice_kind: str | None = None,
 ) -> str:
     """Ask the user for clarification when you need more information to proceed.
 
@@ -48,6 +52,10 @@ def ask_clarification_tool(
         clarification_type: The type of clarification needed (missing_info, ambiguous_requirement, approach_choice, risk_confirmation, suggestion).
         context: Optional context explaining why clarification is needed. Helps the user understand the situation.
         options: Optional list of choices (for approach_choice or suggestion types). Present clear options for the user to choose from.
+        evidence_summary: Summary of retrieved knowledge and remaining evidence gaps.
+        confidence: Uncalibrated evidence support score from 0 to 69 when evidence is insufficient.
+        confidence_reason: Reason for the evidence support score, not an accuracy probability.
+        choice_kind: Platform choice category; populated by the retrieval gate.
     """
     # This is a placeholder implementation
     # The actual logic is handled by ClarificationMiddleware which intercepts this tool call

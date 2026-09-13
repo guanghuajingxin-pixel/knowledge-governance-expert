@@ -30,7 +30,9 @@ import TabBar from '@/components/layout/TabBar.vue'
 }
 .content-area {
   flex: 1;
-  overflow-y: auto;
+  min-height: 0;
+  /* 滚动权下放给页面内部（页签 pane / page-content），外框只负责按比例分配高度 */
+  overflow: hidden;
   background: #f5f7fa;
 }
 </style>

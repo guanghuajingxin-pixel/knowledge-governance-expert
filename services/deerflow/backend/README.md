@@ -373,3 +373,7 @@ See the [LICENSE](../LICENSE) file in the project root.
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines.
+
+### Knowledge governance QA sidecar
+
+The platform QA sidecar isolates internal model calls from user answers. It streams factual operation progress and publishes the main model's answer once the run has completed. Failed, cancelled, paused and completed steps remain distinct. Summary/working notes are never forwarded as answer tokens. This is output isolation, not a factual verification system. Restart the QA sidecar after changing its Python modules; Vite updates the platform frontend during development.

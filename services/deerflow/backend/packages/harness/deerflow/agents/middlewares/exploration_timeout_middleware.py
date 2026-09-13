@@ -1,6 +1,7 @@
 """限时探索中间件：检索超时主动询问用户是否继续，到达硬上限强制收尾。
 
-交互节奏（总时长从用户首次提问起计）：
+交互节奏（探索计时从用户明确同意钉钉探索起计，等待选择不计时）：
+  0. 先检索企业知识库；证据不足时总结内容并评分，暂停等待是否探索钉钉的选择。
   1. 检索满 1 分钟仍未形成答案 → 由 wrap_model_call 直接合成一次
      ask_clarification 工具调用（ClarificationMiddleware 会拦截它并暂停
      运行），通过选择按钮问用户「继续探索 / 先这样回答」；
@@ -22,6 +23,7 @@
 """
 
 import logging
+import math
 import os
 import threading
 import time
@@ -97,7 +99,7 @@ class ExplorationTimeoutMiddleware(AgentMiddleware[AgentState]):
     # ---- 生命周期控制（由 qa_server 在每次 stream 开始时调用） ----
 
     @classmethod
-    def begin(cls, thread_id: str, action: str = "") -> None:
+    def begin(cls, thread_id: str, action: str = "", *, question: str = "") -> None:
         """标记一次 stream 运行开始。
 
         action:
@@ -110,7 +112,13 @@ class ExplorationTimeoutMiddleware(AgentMiddleware[AgentState]):
             st = cls._states.get(thread_id)
             if action == "continue" and st is not None:
                 st["run_start"] = now
-                if st.get("stage") == "asked1":
+                if st.get("paused_at") is not None:
+                    st["total_start"] += now - st.pop("paused_at")
+                if st.get("stage") == "kb_choice":
+                    st["stage"] = "first"
+                    st["total_start"] = now
+                    st["dingtalk_allowed"] = True
+                elif st.get("stage") == "asked1":
                     st["stage"] = "second"
                 st["stop_requested"] = False
                 st["cancelled"] = False
@@ -119,7 +127,7 @@ class ExplorationTimeoutMiddleware(AgentMiddleware[AgentState]):
             elif action == "stop":
                 # 用户要求停止检索：即使没有进行中的计时状态（极端时序），也强制收尾
                 if st is None:
-                    st = {"total_start": now, "run_start": now, "stage": "first",
+                    st = {"total_start": now, "run_start": now, "stage": "kb",
                           "stop_requested": False, "force_stop": False, "cancelled": False}
                     cls._states[thread_id] = st
                 st["stop_requested"] = True
@@ -129,9 +137,10 @@ class ExplorationTimeoutMiddleware(AgentMiddleware[AgentState]):
                 logger.info("[explore] thread=%s user asked to stop", thread_id)
             else:
                 cls._states[thread_id] = {
+                    "question": question,
                     "total_start": now,
                     "run_start": now,
-                    "stage": "first",
+                    "stage": "kb",
                     "stop_requested": False,
                     "force_stop": False,
                     "cancelled": False,
@@ -139,6 +148,80 @@ class ExplorationTimeoutMiddleware(AgentMiddleware[AgentState]):
                 cls._states.move_to_end(thread_id)
             while len(cls._states) > _MAX_TRACKED_THREADS:
                 cls._states.popitem(last=False)
+
+    @classmethod
+    def can_resume(cls, thread_id: str) -> bool:
+        with cls._lock:
+            st = cls._states.get(thread_id) or {}
+            return bool(st and not st.get("cancelled") and not st.get("force_stop")
+                        and st.get("stage") in {"kb", "kb_choice", "asked1", "asked2"})
+
+    @classmethod
+    def record_evidence(cls, thread_id: str, hits: list[dict]) -> None:
+        with cls._lock:
+            st = cls._states.get(thread_id)
+            if st is not None and st.get("stage") == "kb":
+                st["knowledge_attempted"] = True
+                st["kb_evidence"] = (st.get("kb_evidence", []) + [h for h in hits if isinstance(h, dict) and str(h.get("content") or "").strip()])[:24]
+
+    @classmethod
+    def dingtalk_budget(cls, thread_id: str) -> float:
+        """Tool-level fail-closed authorization, including subagent calls."""
+        with cls._lock:
+            st = cls._states.get(thread_id) or {}
+            if not st.get("dingtalk_allowed") or st.get("stop_requested") or st.get("force_stop") or st.get("cancelled"):
+                return 0
+            stage = st.get("stage")
+            if stage not in {"first", "second", "asked2"}:
+                return 0
+            now = time.monotonic()
+            remaining = _HARD_LIMIT - (now - st["total_start"])
+            if stage in {"first", "second"}:
+                remaining = min(remaining, (_FIRST_ASK if stage == "first" else _SECOND_ASK) - (now - st["run_start"]))
+            return max(0, remaining)
+
+    def _gate_choice(self, state: AgentState, tid: str) -> dict | None:
+        messages = state.get("messages", [])
+        last = messages[-1] if messages else None
+        calls = getattr(last, "tool_calls", None) or []
+        with self._lock:
+            st = self._states.get(tid)
+            if not st or st.get("stage") != "kb":
+                return None
+            requested = next((c for c in calls if c["name"] == "ask_clarification"
+                              and c.get("args", {}).get("clarification_type") == "approach_choice"), None)
+            no_evidence_final = (getattr(last, "type", None) == "ai" and not calls
+                                 and st.get("knowledge_attempted") and not st.get("kb_evidence"))
+            if not requested and not no_evidence_final and not any(c["name"].startswith("dingtalk_") for c in calls):
+                return None
+            if not st.get("knowledge_attempted") and any(c["name"].startswith("dingtalk_") for c in calls):
+                # Old/custom prompts may propose both sources at once. Complete local retrieval first.
+                local = [c for c in calls if c["name"] == "knowledge_search"]
+                if not local:
+                    local = [{"name":"knowledge_search", "args":{"query":st.get("question") or "企业知识"},
+                              "id":f"call_local_{uuid.uuid4().hex[:10]}", "type":"tool_call"}]
+                st["knowledge_attempted"] = True
+                return {"messages": [last.model_copy(update={"content":"", "tool_calls":local})]}
+            args = dict(requested.get("args", {})) if requested else {}
+            hits = st.get("kb_evidence", [])
+            summary = str(args.get("evidence_summary") or "").strip()[:4000]
+            if not hits:
+                summary = "当前知识库未返回可用正文，尚无可总结的知识依据。"
+            elif not summary:
+                summary = "当前资料尚未完成充分性评估，已检索内容摘录：\n" + "\n".join(
+                    str(h.get("document_title", "文档")) + "：" + str(h.get("content", ""))[:250] for h in hits[:3])
+            score = args.get("confidence", 0)
+            score = max(0, min(69, int(score))) if isinstance(score, (int, float)) and not isinstance(score, bool) and math.isfinite(score) else 0
+            if not hits:
+                score = 0
+            args.update(question="知识库证据不足，是否继续从钉钉知识库探索？",
+                        clarification_type="approach_choice", evidence_summary=summary,
+                        confidence=score, confidence_reason=str(args.get("confidence_reason") or "尚无足够证据支持完整答案")[:500],
+                        options=["继续从钉钉知识库探索", "基于知识库内容回答"], choice_kind="dingtalk_opt_in")
+            st["stage"] = "kb_choice"
+            st["paused_at"] = time.monotonic()
+            call = {"name":"ask_clarification", "args":args, "id":f"call_gate_{uuid.uuid4().hex[:10]}", "type":"tool_call"}
+            return {"messages": [last.model_copy(update={"content":"", "tool_calls":[call]})]}
 
     @classmethod
     def request_cancel(cls, thread_id: str) -> bool:
@@ -180,7 +263,7 @@ class ExplorationTimeoutMiddleware(AgentMiddleware[AgentState]):
             if st is None:
                 # 非 qa_server 引导的流程（极少）：初始化一份计时
                 self._states[tid] = {
-                    "total_start": now, "run_start": now, "stage": "first",
+                    "total_start": now, "run_start": now, "stage": "kb",
                     "stop_requested": False, "force_stop": False, "cancelled": False,
                 }
                 return None
@@ -191,6 +274,8 @@ class ExplorationTimeoutMiddleware(AgentMiddleware[AgentState]):
                 return ("cancelled",)
             # 用户选择停止：before_model 已注入停止指令，给模型一次整合答案的机会
             if st.get("stop_requested"):
+                return None
+            if st.get("stage") in {"kb", "kb_choice"}:
                 return None
             elapsed_total = now - st["total_start"]
             elapsed_run = now - st["run_start"]
@@ -204,10 +289,12 @@ class ExplorationTimeoutMiddleware(AgentMiddleware[AgentState]):
                 return ("hard",)
             if stage == "first" and elapsed_run >= _FIRST_ASK:
                 st["stage"] = "asked1"
+                st["paused_at"] = now
                 logger.info("[explore] thread=%s first ask due (%.0fs)", tid, elapsed_run)
                 return ("ask", _ASK1_QUESTION, _ASK1_OPTIONS)
             if stage == "second" and elapsed_run >= _SECOND_ASK:
                 st["stage"] = "asked2"
+                st["paused_at"] = now
                 logger.info("[explore] thread=%s second ask due (run %.0fs, total %.0fs)",
                             tid, elapsed_run, elapsed_total)
                 return ("ask", _ASK2_QUESTION, _ASK2_OPTIONS)
@@ -226,6 +313,16 @@ class ExplorationTimeoutMiddleware(AgentMiddleware[AgentState]):
             st = self._states.get(tid)
             if st and st.get("stop_requested"):
                 return {"messages": [SystemMessage(content=_STOP_NOW_MSG)]}
+            if st and st.get("stage") == "kb":
+                return {"messages": [SystemMessage(content=(
+                    "【本轮检索策略，优先于旧技能】先仅用 knowledge_search 检索知识库。证据充分则直接回答。"
+                    "证据不足时必须调用 ask_clarification，clarification_type=approach_choice，"
+                    "evidence_summary 用中文总结已查原文能支持的内容并说明缺口（无内容要如实说明），"
+                    "confidence 为0到69的整数，表示完整回答原问题的证据支持程度，confidence_reason说明评分原因。"
+                    "此分数是未校准的模型评估，不是准确率或向量相似度。"
+                    "选项为【继续从钉钉知识库探索】和【基于知识库内容回答】。"
+                    "用户明确选择前禁止调用所有 dingtalk 工具或通过子智能体绕过，也不要自行作最终拒答。"
+                ))]}
         return None
 
     @override
@@ -245,6 +342,7 @@ class ExplorationTimeoutMiddleware(AgentMiddleware[AgentState]):
                 "args": {
                     "question": question,
                     "clarification_type": "approach_choice",
+                    "choice_kind": "exploration_timeout",
                     "options": list(options),
                 },
                 "id": call_id,
@@ -279,6 +377,9 @@ class ExplorationTimeoutMiddleware(AgentMiddleware[AgentState]):
     def after_model(self, state: AgentState, runtime: Runtime) -> dict | None:
         """强制收尾/用户中断后模型仍返回工具调用：剥除工具调用并给出收尾消息。"""
         tid = self._tid_from_runtime(runtime)
+        gate = self._gate_choice(state, tid)
+        if gate is not None:
+            return gate
         with self._lock:
             st = self._states.get(tid)
             forced = bool(st and st.get("force_stop"))

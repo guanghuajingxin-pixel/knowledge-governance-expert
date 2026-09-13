@@ -10,65 +10,154 @@ from fastapi import FastAPI, HTTPException
 
 from app.routes import search
 
+TOOLS_ALL = {'knowledge_search': True, 'dingtalk_search': True, 'dingtalk_read_doc': True,
+             'ask_clarification': True, 'present_files': True}
+
 
 class RouteTests(unittest.IsolatedAsyncioTestCase):
-    async def test_scope_and_memory_settings_are_applied_per_request(self):
-        user=SimpleNamespace(id=uuid4(),role='editor')
-        empty=SimpleNamespace(scalar_one_or_none=lambda:None)
-        session=SimpleNamespace(execute=AsyncMock(return_value=empty))
-        cfg={'top_k':7,'long_memory_enabled':False}
-        with patch('app.services.agent.config.load_agent_config',AsyncMock(return_value=cfg)), \
-             patch('app.services.llm_resolver.resolve_llm_config',AsyncMock(return_value={'api_key':'test'})):
-            qa=await search._prepare_qa(search.ChatIn(query='审批条件',dify_dataset_ids=[],
-                history=[{'role':'assistant','content':'上一轮未经核验的结论'}]),user,session)
-            self.assertEqual(qa.history,[])
-            self.assertEqual(qa.retriever.dataset_ids,[])
-            self.assertEqual(qa.retriever.top_k,7)
-            deep=await search._prepare_qa(search.ChatIn(query='审批条件',dify_dataset_ids=[],top_k=2,deep_think=True),user,session)
-            self.assertEqual(deep.retriever.top_k,12)
+    def _session(self):
+        # execute() 结果需同时支持 scalar_one_or_none()（单行）与 scalars().all()（多行，
+        # 知识源注册表查询走此路径，默认空注册表）
+        result = SimpleNamespace(
+            scalar_one_or_none=lambda: None,
+            scalars=lambda: SimpleNamespace(all=lambda: []),
+        )
+        return SimpleNamespace(execute=AsyncMock(return_value=result))
+
+    async def test_scope_and_hyperparams_are_applied_per_request(self):
+        user = SimpleNamespace(id=uuid4(), role='editor')
+        session = self._session()
+        cfg = {'top_k': 7, 'long_memory_enabled': False, 'tools_enabled': dict(TOOLS_ALL)}
+        with patch('app.services.agent.config.load_agent_config', AsyncMock(return_value=cfg)), \
+             patch('app.services.llm_resolver.resolve_llm_config', AsyncMock(return_value={'api_key': 'test'})):
+            params = await search._prepare_qa(
+                search.ChatIn(query='审批条件', dify_dataset_ids=[]), user, session)
+            self.assertEqual(params['dataset_ids'], [])
+            self.assertEqual(params['top_k'], 7)
+            self.assertEqual(params['disabled_tools'], [])
+            self.assertTrue(params['thread_id'].startswith('anon-'))
             with self.assertRaises(HTTPException) as err:
-                await search._prepare_qa(search.ChatIn(query='审批条件',dify_dataset_ids=[uuid4()]),user,session)
-            self.assertEqual(err.exception.status_code,403)
+                await search._prepare_qa(
+                    search.ChatIn(query='审批条件', dify_dataset_ids=[uuid4()]), user, session)
+            self.assertEqual(err.exception.status_code, 403)
+
+    async def test_disabled_knowledge_search_clears_scope(self):
+        user = SimpleNamespace(id=uuid4(), role='editor')
+        session = self._session()
+        tools = dict(TOOLS_ALL, knowledge_search=False)
+        cfg = {'tools_enabled': tools}
+        with patch('app.services.agent.config.load_agent_config', AsyncMock(return_value=cfg)), \
+             patch('app.services.llm_resolver.resolve_llm_config', AsyncMock(return_value={'api_key': 'test'})):
+            params = await search._prepare_qa(search.ChatIn(query='审批条件'), user, session)
+        self.assertEqual(params['dataset_ids'], [])
+        self.assertEqual(params['kb_ids'], [])
+        self.assertIn('knowledge_search', params['disabled_tools'])
+
+    async def test_session_thread_reuses_session_id_when_memory_enabled(self):
+        user = SimpleNamespace(id=uuid4(), role='editor')
+        session = self._session()
+        sid = uuid4()
+        with patch('app.services.agent.config.load_agent_config', AsyncMock(return_value={'long_memory_enabled': True})), \
+             patch('app.services.llm_resolver.resolve_llm_config', AsyncMock(return_value={'api_key': 'test'})), \
+             patch('app.routes.chat_session_route._get_owned', AsyncMock(return_value=SimpleNamespace(id=sid))):
+            params = await search._prepare_qa(
+                search.ChatIn(query='上一条是谁', session_id='s1'), user, session)
+            self.assertEqual(params['thread_id'], str(sid))
+        with patch('app.services.agent.config.load_agent_config', AsyncMock(return_value={'long_memory_enabled': False})), \
+             patch('app.services.llm_resolver.resolve_llm_config', AsyncMock(return_value={'api_key': 'test'})), \
+             patch('app.routes.chat_session_route._get_owned', AsyncMock(return_value=SimpleNamespace(id=sid))):
+            params = await search._prepare_qa(
+                search.ChatIn(query='上一条是谁', session_id='s1'), user, session)
+            self.assertTrue(params['thread_id'].startswith(f'nomem-{sid}-'))
 
     async def test_session_owner_is_verified_before_using_conversation(self):
-        user=SimpleNamespace(id=uuid4(),role='editor')
-        session=SimpleNamespace(execute=AsyncMock(return_value=SimpleNamespace(scalar_one_or_none=lambda:None)))
-        with patch('app.services.agent.config.load_agent_config',AsyncMock(return_value={})), \
-             patch('app.services.llm_resolver.resolve_llm_config',AsyncMock(return_value={'api_key':'test'})), \
-             patch('app.routes.chat_session_route._get_owned',AsyncMock(side_effect=HTTPException(404,'会话不存在'))):
+        user = SimpleNamespace(id=uuid4(), role='editor')
+        session = self._session()
+        with patch('app.services.agent.config.load_agent_config', AsyncMock(return_value={})), \
+             patch('app.services.llm_resolver.resolve_llm_config', AsyncMock(return_value={'api_key': 'test'})), \
+             patch('app.routes.chat_session_route._get_owned', AsyncMock(side_effect=HTTPException(404, '会话不存在'))):
             with self.assertRaises(HTTPException) as err:
-                await search._prepare_qa(search.ChatIn(query='上一条是谁',session_id='another-session',dify_dataset_ids=[]),user,session)
-            self.assertEqual(err.exception.status_code,404)
+                await search._prepare_qa(search.ChatIn(query='上一条是谁', session_id='another-session', dify_dataset_ids=[]), user, session)
+            self.assertEqual(err.exception.status_code, 404)
+
+    async def test_qa_events_reports_unavailable_sidecar_without_fallback(self):
+        from app.services.agent import deerflow_runner
+
+        async def boom(**kwargs):
+            raise deerflow_runner.DeerflowUnavailable('connection refused')
+            yield  # pragma: no cover
+
+        params = {'query': 'q', 'thread_id': 't', 'llm_config': {'api_key': 'k'}}
+        with patch('app.services.agent.deerflow_runner.run_deerflow_stream', boom):
+            events = [e async for e in search._qa_events(params)]
+        self.assertEqual(events[0]['type'], 'config_error')
+        self.assertEqual(events[0]['code'], 'agent_not_ready')
 
     async def test_json_and_stream_use_same_engine_and_final_contract(self):
+        app = FastAPI(); app.include_router(search.router)
+        app.dependency_overrides[search.get_principal] = lambda: SimpleNamespace(id='user', role='editor')
+        app.dependency_overrides[search.get_session] = lambda: None
+        expected = {'answer': '已核实的事实 [1]', 'answer_status': 'answered', 'citations': []}
+        async def events(_):
+            yield {'type': 'step', 'node': 'retrieve', 'title': '检索', 'detail': '开始'}
+            yield {'type': 'final', 'result': expected}
+        with patch.object(search, '_prepare_qa', AsyncMock(return_value={'thread_id': 't', 'llm_config': {'api_key': 'k'}, 'query': 'q'})) as prepare, \
+             patch.object(search, '_qa_events', events), patch.object(search, '_log_usage'):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
+                ordinary = await client.post('/api/v1/search/chat', json={'query': '制度问题'})
+                stream = await client.post('/api/v1/search/chat/stream', json={'query': '制度问题'})
+            self.assertEqual(ordinary.json(), expected)
+            chunks = [json.loads(c[6:]) for c in stream.text.strip().split('\n\n') if c.startswith('data:')]
+            self.assertEqual(chunks[-1], {'type': 'final', 'result': expected})
+            self.assertEqual(prepare.await_count, 2)
+
+    async def test_no_memory_choice_reuses_only_current_question_thread(self):
+        user=SimpleNamespace(id=uuid4(),role='editor'); owned=SimpleNamespace(id=uuid4())
+        with patch('app.services.agent.config.load_agent_config',AsyncMock(return_value={'long_memory_enabled':False})), \
+             patch('app.services.llm_resolver.resolve_llm_config',AsyncMock(return_value={'api_key':'test'})), \
+             patch('app.routes.chat_session_route._get_owned',AsyncMock(return_value=owned)):
+            first=await search._prepare_qa(search.ChatIn(query='问题',session_id='s'),user,self._session())
+            resume=await search._prepare_qa(search.ChatIn(query='继续从钉钉知识库探索',session_id='s',action='continue'),user,self._session())
+            new=await search._prepare_qa(search.ChatIn(query='下一问题',session_id='s'),user,self._session())
+        self.assertEqual(first['thread_id'],resume['thread_id'])
+        self.assertNotEqual(first['thread_id'],new['thread_id'])
+
+    async def test_json_endpoint_returns_pending_choice_instead_of_null(self):
+        async def events(_):
+            yield {'type':'choice_pause','question':'继续吗','options':['继续从钉钉知识库探索','基于知识库内容回答'],
+                   'choice_kind':'dingtalk_opt_in','evidence_summary':'部分制度摘要','confidence':30,'citations':[]}
+        with patch.object(search,'_prepare_qa',AsyncMock(return_value={})), patch.object(search,'_qa_events',events):
+            response=await search.chat(search.ChatIn(query='问题'),SimpleNamespace(id='u'),None)
+        self.assertEqual(response['answer_status'],'awaiting_choice')
+        self.assertEqual(response['answer'],'部分制度摘要')
+        self.assertEqual(response['choice']['confidence'],30)
+
+    async def test_stream_pause_does_not_send_sidecar_cancel(self):
         app=FastAPI(); app.include_router(search.router)
         app.dependency_overrides[search.get_principal]=lambda:SimpleNamespace(id='user',role='editor')
         app.dependency_overrides[search.get_session]=lambda:None
-        expected={'answer':'已核实的事实 [1]','answer_status':'answered','citations':[]}
         async def events(_):
-            yield {'type':'step','node':'retrieve','title':'检索','detail':'开始'}
-            yield {'type':'final','result':expected}
-        with patch.object(search,'_prepare_qa',AsyncMock(return_value=object())) as prepare, patch.object(search,'_qa_events',events), patch.object(search,'_log_usage'):
+            yield {'type':'choice_pause','question':'继续吗','choice_kind':'dingtalk_opt_in'}
+        with patch.object(search,'_prepare_qa',AsyncMock(return_value={'thread_id':'t'})), \
+             patch.object(search,'_qa_events',events), \
+             patch('app.services.agent.deerflow_runner.cancel_deerflow_stream',AsyncMock()) as cancel:
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://test') as client:
-                ordinary=await client.post('/api/v1/search/chat',json={'query':'制度问题'})
-                stream=await client.post('/api/v1/search/chat/stream',json={'query':'制度问题'})
-            self.assertEqual(ordinary.json(),expected)
-            chunks=[json.loads(c[6:]) for c in stream.text.strip().split('\n\n')]
-            self.assertEqual(chunks[-1],{'type':'final','result':expected})
-            self.assertEqual(prepare.await_count,2)
+                response=await client.post('/api/v1/search/chat/stream',json={'query':'问题'})
+            self.assertIn('choice_pause',response.text)
+            cancel.assert_not_awaited()
 
     async def test_cancel_cannot_cancel_another_users_session(self):
-        sleeper=asyncio.create_task(asyncio.sleep(100))
-        search._ACTIVE_QA[('owner','session')]=sleeper
+        sleeper = asyncio.create_task(asyncio.sleep(100))
+        search._ACTIVE_QA[('owner', 'session')] = sleeper
         try:
-            result=await search.chat_cancel(search.ChatCancelIn(session_id='session'),SimpleNamespace(id='other'))
+            result = await search.chat_cancel(search.ChatCancelIn(session_id='session'), SimpleNamespace(id='other'))
             self.assertFalse(result['cancelled']); self.assertFalse(sleeper.cancelled())
-            result=await search.chat_cancel(search.ChatCancelIn(session_id='session'),SimpleNamespace(id='owner'))
+            result = await search.chat_cancel(search.ChatCancelIn(session_id='session'), SimpleNamespace(id='owner'))
             self.assertTrue(result['cancelled'])
         finally:
-            sleeper.cancel(); await asyncio.gather(sleeper,return_exceptions=True)
+            sleeper.cancel(); await asyncio.gather(sleeper, return_exceptions=True)
             search._ACTIVE_QA.clear()
 
 
-if __name__=='__main__':
+if __name__ == '__main__':
     unittest.main()

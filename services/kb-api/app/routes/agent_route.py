@@ -83,8 +83,14 @@ async def get_agent_config(u=Depends(get_current_user),
 async def update_agent_config(body: dict,
                               u=Depends(require_role("super_admin", "admin")),
                               s: AsyncSession = Depends(get_session)):
-    """更新智能体配置（仅管理员）。"""
-    return await save_agent_config(s, body)
+    """更新智能体配置（仅管理员）。保存后通知 sidecar 热更新，新对话即时生效。"""
+    saved = await save_agent_config(s, body)
+    try:
+        await _df_post("/v1/reconfig", {})
+    except HTTPException as exc:
+        import logging
+        logging.getLogger(__name__).warning("sidecar reconfig notify failed: %s", exc.detail)
+    return saved
 
 
 @router.get("/greeting")
@@ -94,14 +100,15 @@ async def get_greeting(u=Depends(get_current_user),
     cfg = await load_agent_config(s)
     return {
         "agent_name": cfg["agent_name"],
+        "bot_avatar": cfg.get("bot_avatar", ""),
         "greeting_enabled": cfg["greeting_enabled"],
         "greeting": cfg["greeting"],
         "suggested_questions": cfg["suggested_questions"],
         "models": cfg["models"],
+        "default_model": cfg["default_model"] or (cfg["models"][0] if cfg["models"] else ""),
         "follow_up_enabled": cfg["follow_up_enabled"],
         "planning_enabled": cfg["planning_enabled"],
         "long_memory_enabled": cfg["long_memory_enabled"],
-        "deep_think_default": cfg["deep_think_default"],
     }
 
 

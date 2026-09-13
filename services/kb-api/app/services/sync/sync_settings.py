@@ -18,6 +18,9 @@ SYNC_SETTING_KEYS = (
     "dingtalk_operator_union_id",
     "dify_base_url",
     "dify_api_key",
+    "dify_upload_max_mb",
+    "ragflow_base_url",
+    "ragflow_api_key",
 )
 
 
@@ -54,4 +57,28 @@ def make_dify_client(db):
     from app.services.sync.dify_sync_client import DifyClient
 
     vals = load_sync_settings(db)
+    get_settings().dify_upload_max_mb = int(vals["dify_upload_max_mb"])
     return DifyClient(vals["dify_base_url"], vals["dify_api_key"])
+
+
+def make_ragflow_client(db):
+    """用解析后的凭据构建同步 RagflowSyncClient。"""
+    from app.services.sync.ragflow_sync_client import RagflowSyncClient
+
+    vals = load_sync_settings(db)
+    return RagflowSyncClient(vals["ragflow_base_url"], vals["ragflow_api_key"])
+
+
+def make_backend(source, db):
+    """按同步源的 backend_type 返回目标引擎客户端（dify | ragflow）。
+
+    source 可传 SyncSource 对象，或直接传 backend_type 字符串（路由层校验时用）。
+    两种客户端暴露同一套方法面（resolve_dataset/upload_file/update_file/
+    delete_document/wait_indexing/close），SyncEngine 无需区分具体引擎；
+    Dify 专属的知识流水线逻辑由 engine 用 backend_type=='dify' 守卫。
+    """
+    backend_type = source if isinstance(source, str) else getattr(source, "backend_type", "dify")
+    backend_type = (backend_type or "dify").strip().lower()
+    if backend_type == "ragflow":
+        return make_ragflow_client(db)
+    return make_dify_client(db)

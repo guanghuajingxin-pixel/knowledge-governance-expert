@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>知识应用 · 重设计原型</title>
+<style>
+  :root{
+    --primary:#409EFF; --primary-light:#ecf5ff; --success:#67c23a; --warning:#e6a23c;
+    --danger:#f56c6c; --info:#909399; --text:#303133; --text-2:#606266; --text-3:#909399;
+    --bg:#f0f2f5; --card:#fff; --line:#ebeef5; --line-2:#e5e7eb;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Helvetica Neue","Microsoft YaHei",sans-serif;
+    background:var(--bg);color:var(--text);font-size:14px}
+  .shell{display:flex;min-height:100vh}
+  /* ============ 侧边栏 ============ */
+  .sidebar{width:220px;background:#fff;border-right:1px solid var(--line);padding:14px 10px;flex-shrink:0}
+  .side-item{display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:8px;color:var(--text-2);
+    cursor:pointer;margin-bottom:2px;font-size:13.5px}
+  .side-item .ico{width:26px;height:26px;border-radius:7px;background:#f2f3f5;color:#8a919c;display:flex;
+    align-items:center;justify-content:center;font-size:12px;flex-shrink:0}
+  .side-item.active{background:var(--primary-light);color:var(--primary);font-weight:600}
+  .side-item.active .ico{background:var(--primary);color:#fff}
+  .side-group{font-size:11px;color:#b0b6bf;margin:14px 10px 6px}
+  .side-sep{border-top:1px solid var(--line);margin:10px 6px}
+  /* ============ 主区 ============ */
+  .main{flex:1;min-width:0}
+  .topbar{height:44px;background:#fff;border-bottom:1px solid var(--line);display:flex;align-items:center;
+    justify-content:center;position:relative}
+  .topbar .tabmark{width:64px;height:3px;background:var(--primary);border-radius:2px;position:absolute;top:0}
+  .page{padding:20px 24px 48px;max-width:1320px;margin:0 auto}
+  .pg-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
+  .pg-title{font-size:19px;font-weight:700}
+  .pg-sub{color:#6b7280;font-size:13px;margin:6px 0 16px;line-height:1.8}
+  .proto-tag{background:#fdf6ec;color:#b45309;border:1px solid #f5d9a8;border-radius:6px;font-size:11px;
+    padding:3px 8px;margin-left:10px;vertical-align:3px;font-weight:500}
+  .head-actions{display:flex;gap:8px;flex-shrink:0;padding-top:2px}
+  /* ============ 按钮 / 标签 ============ */
+  .btn{border:1px solid var(--line-2);background:#fff;border-radius:6px;padding:6px 12px;font-size:13px;
+    color:var(--text-2);cursor:pointer;display:inline-flex;align-items:center;gap:5px}
+  .btn:hover{color:var(--primary);border-color:#c6e2ff;background:var(--primary-light)}
+  .btn.primary{background:var(--primary);border-color:var(--primary);color:#fff}
+  .btn.primary:hover{background:#66b1ff}
+  .btn.sm{padding:4px 9px;font-size:12px}
+  .btn.link{border:none;background:none;color:var(--primary);padding:0 4px}
+  .tag{display:inline-flex;align-items:center;border-radius:4px;font-size:12px;padding:2px 8px;line-height:18px;white-space:nowrap}
+  .tag.success{background:#f0f9eb;color:#67c23a;border:1px solid #e1f3d8}
+  .tag.danger{background:#fef0f0;color:#f56c6c;border:1px solid #fde2e2}
+  .tag.warning{background:#fdf6ec;color:#e6a23c;border:1px solid #faecd8}
+  .tag.info{background:#f4f4f5;color:#909399;border:1px solid #e9e9eb}
+  .tag.primary{background:var(--primary-light);color:var(--primary);border:1px solid #d9ecff}
+  /* ============ 页签 ============ */
+  .tabs{display:flex;gap:26px;border-bottom:1px solid var(--line-2);margin-bottom:16px}
+  .tab{padding:9px 2px;cursor:pointer;color:var(--text-2);font-size:14px;position:relative;white-space:nowrap}
+  .tab .cnt{font-size:11px;color:var(--text-3);margin-left:4px}
+  .tab.active{color:var(--primary);font-weight:600}
+  .tab.active:after{content:"";position:absolute;left:0;right:0;bottom:-1px;height:2px;background:var(--primary);border-radius:1px}
+  .panel{display:none}
+  .panel.active{display:block}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px}
+  .card-head{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid var(--line)}
+  .card-title{font-size:14px;font-weight:600;display:flex;align-items:center;gap:8px}
+  .card-body{padding:16px}
+  /* ============ 过滤栏 ============ */
+  .filter-bar{display:flex;align-items:center;flex-wrap:wrap;gap:10px;background:#fff;border:1px solid var(--line-2);
+    border-radius:10px;padding:12px 16px;margin-bottom:14px}
+  .filter-item{display:flex;align-items:center;gap:8px}
+  .filter-label{font-size:13px;color:#4b5563;white-space:nowrap}
+  .input,.select{border:1px solid var(--line-2);border-radius:6px;padding:6px 10px;font-size:13px;color:var(--text-2);
+    background:#fff;outline:none;height:32px}
+  .input:focus,.select:focus{border-color:var(--primary)}
+  .input.w220{width:220px}.input.w200{width:200px}.input.w180{width:180px}.select.w140{width:140px}.select.w120{width:120px}
+  .spacer{flex:1}
+  /* ============ Tab1 主从布局 ============ */
+  .md{display:flex;gap:14px;align-items:stretch}
+  .md-list{width:340px;flex-shrink:0;background:#fff;border:1px solid var(--line);border-radius:10px;overflow:hidden;
+    display:flex;flex-direction:column}
+  .md-list-head{padding:10px 14px;border-bottom:1px solid var(--line);font-size:13px;color:var(--text-3);
+    display:flex;justify-content:space-between;align-items:center}
+  .md-item{padding:11px 14px;border-bottom:1px solid var(--line);cursor:pointer;border-left:3px solid transparent}
+  .md-item:hover{background:#fafbfc}
+  .md-item.sel{background:var(--primary-light);border-left-color:var(--primary)}
+  .md-item .r1{display:flex;align-items:center;gap:8px;margin-bottom:5px}
+  .md-item .tm{font-family:ui-monospace,Menlo,monospace;font-size:11.5px;color:var(--text-3)}
+  .md-item .app{font-size:11.5px;color:#64748b;background:#f1f5f9;border-radius:4px;padding:1px 6px}
+  .md-item .q{font-size:13px;color:var(--text);line-height:1.55;display:-webkit-box;-webkit-line-clamp:2;
+    -webkit-box-orient:vertical;overflow:hidden;margin-bottom:6px}
+  .md-detail{flex:1;min-width:0;background:#fff;border:1px solid var(--line);border-radius:10px;padding:18px 20px}
+  .dq{display:flex;gap:10px;align-items:flex-start}
+  .dq .qt{color:var(--primary);font-weight:800;font-size:16px;flex-shrink:0}
+  .dq .qx{color:#1d4ed8;font-weight:600;font-size:15px;line-height:1.6}
+  .meta-row{display:flex;flex-wrap:wrap;gap:6px 14px;margin:10px 0 4px 26px;font-size:12.5px;color:#6b7280}
+  .meta-row .chip{display:inline-flex;align-items:center;gap:4px}
+  .meta-row .chip b{color:#374151;font-weight:600}
+  .sec-title{font-size:13px;font-weight:600;color:#374151;margin:16px 0 8px;display:flex;align-items:center;gap:8px}
+  .chain{background:#f9fafb;border:1px dashed var(--line-2);border-radius:8px;padding:12px 14px}
+  .chain-step{display:flex;align-items:center;gap:8px;padding:3.5px 0;font-size:13px}
+  .step-dot{width:18px;height:18px;border-radius:50%;background:#dbeafe;color:#2563eb;display:inline-flex;
+    align-items:center;justify-content:center;font-size:11px;flex-shrink:0;font-weight:600}
+  .step-dot.warn{background:#faecd8;color:#e6a23c}
+  .step-title{color:#374151;font-weight:500;min-width:118px}
+  .step-detail{color:#9ca3af;font-size:12.5px}
+  .hit{background:#fafbfc;border:1px solid #eef0f3;border-radius:10px;padding:12px 14px;margin-bottom:8px}
+  .hit.cited{border-color:#b3e19d;background:#f6fbf3}
+  .hit-top{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+  .top-badge{background:#e5e7eb;color:#6b7280;font-weight:700;font-size:12px;padding:4px 8px;border-radius:6px}
+  .top-badge.top3{background:#fff7ed;color:#ea580c}
+  .score-area{display:flex;align-items:center;gap:8px;flex:1;min-width:150px;max-width:280px}
+  .score-label{font-size:12px;color:#9ca3af;white-space:nowrap}
+  .score-bar{flex:1;height:6px;background:#e5e7eb;border-radius:3px;overflow:hidden}
+  .score-fill{height:100%;background:linear-gradient(90deg,#3b82f6,#2563eb);border-radius:3px}
+  .score-val{font-size:12.5px;font-weight:600;color:#374151;min-width:52px;font-family:ui-monospace,Menlo,monospace}
+  .path-chips{display:flex;gap:6px;flex-wrap:wrap}
+  .pchip{font-size:11px;color:#64748b;background:#f1f5f9;border-radius:4px;padding:2px 7px;
+    font-family:ui-monospace,Menlo,monospace}
+  .hit-doc{font-size:13.5px;font-weight:600;color:#1f2937;display:inline-flex;align-items:center;gap:5px}
+  .hit-doc .dv{color:#94a3b8;font-weight:400;font-size:12px}
+  .hit-snip{margin-top:8px;font-size:13px;line-height:1.7;color:#4b5563}
+  .hit-foot{margin-top:8px;display:flex;gap:16px;font-size:12px;color:#9ca3af;align-items:center;flex-wrap:wrap}
+  .alert{border-radius:8px;padding:11px 14px;font-size:13px;line-height:1.8;margin:12px 0 4px}
+  .alert.danger{background:#fef0f0;border:1px solid #fde2e2;color:#a80202}
+  .alert.warning{background:#fdf6ec;border:1px solid #faecd8;color:#92400e}
+  .alert b{font-weight:600}
+  .foot-note{margin-top:14px;font-size:12px;color:#9ca3af;line-height:1.9;border-top:1px dashed var(--line-2);padding-top:10px}
+  .foot-note code{background:#f4f4f5;border-radius:4px;padding:1px 5px;font-size:11.5px;color:#606266}
+  /* ============ Tab2 指标 ============ */
+  .kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:14px;margin-bottom:14px}
+  .kpi{background:#fff;border:1px solid var(--line);border-radius:10px;padding:14px 16px;position:relative}
+  .kpi .lb{font-size:12.5px;color:#6b7280;display:flex;align-items:center;gap:6px}
+  .kpi .vl{font-size:24px;font-weight:700;margin:8px 0 4px;font-family:ui-monospace,Menlo,monospace}
+  .kpi .dl{font-size:12px;color:#9ca3af}
+  .kpi .dl .up{color:var(--success)} .kpi .dl .dn{color:var(--danger)}
+  .kpi.star{border-color:#c6e2ff;background:linear-gradient(180deg,#f5faff,fff)}
+  .kpi.star .vl{color:var(--primary)}
+  .star-badge{position:absolute;top:12px;right:12px;font-size:11px;color:var(--primary);background:var(--primary-light);
+    border-radius:4px;padding:2px 6px}
+  .charts{display:grid;grid-template-columns:2fr 1fr;gap:14px;margin-bottom:14px}
+  .chart-box{background:#fff;border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+  .chart-title{font-size:13.5px;font-weight:600;color:#374151;margin-bottom:4px;display:flex;justify-content:space-between}
+  .legend{display:flex;gap:14px;font-size:12px;color:#6b7280;font-weight:400}
+  .legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px}
+  .hbar-row{display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px dashed var(--line)}
+  .hbar-row:last-child{border:none}
+  .hbar-name{width:96px;font-size:13px;color:#4b5563;flex-shrink:0}
+  .hbar-track{flex:1;height:10px;background:#f1f5f9;border-radius:5px;overflow:hidden}
+  .hbar-fill{height:100%;border-radius:5px;background:var(--primary)}
+  .hbar-fill.g{background:var(--success)} .hbar-fill.w{background:var(--warning)}
+  .hbar-val{width:132px;font-size:12px;color:#6b7280;text-align:right;font-family:ui-monospace,Menlo,monospace;flex-shrink:0}
+  /* ============ 表格 ============ */
+  table.tb{width:100%;border-collapse:collapse}
+  .tb th{text-align:left;font-size:13px;color:var(--text-3);font-weight:500;padding:10px 12px;border-bottom:1px solid var(--line)}
+  .tb td{padding:11px 12px;border-bottom:1px solid var(--line);font-size:13px;color:var(--text-2);vertical-align:middle}
+  .tb tr:last-child td{border-bottom:none}
+  .tb tr:hover td{background:#fafbfc}
+  .mono{font-family:ui-monospace,Menlo,monospace;font-size:12px}
+  .small{font-size:12.5px;color:#475569;line-height:1.7}
+  /* ============ Tab4 渠道 ============ */
+  .ch-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+  .ch-card{background:#fff;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+  .ch-head{display:flex;align-items:center;justify-content:space-between;padding:13px 16px;border-bottom:1px solid var(--line)}
+  .ch-name{font-size:14.5px;font-weight:600;display:flex;align-items:center;gap:8px}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--success);flex-shrink:0}
+  .dot.off{background:var(--info)}
+  .ch-body{padding:6px 16px 12px}
+  .ch-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 0;
+    border-bottom:1px dashed #eef1f5;font-size:13px;color:#475569}
+  .ch-row:last-child{border:none}
+  .ch-row .k{color:#6b7280;flex-shrink:0}
+  .ch-row .v{text-align:right;line-height:1.6}
+  .kb-chips{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+  .sw{width:36px;height:20px;border-radius:10px;background:#dcdfe6;position:relative;cursor:pointer;transition:.2s;flex-shrink:0}
+  .sw:after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;transition:.2s}
+  .sw.on{background:var(--success)}
+  .sw.on:after{left:18px}
+  .svc-bar{margin-top:16px;background:#fff;border:1px solid var(--line);border-radius:10px;padding:12px 16px;
+    display:flex;align-items:center;gap:22px;flex-wrap:wrap;font-size:13px;color:#4b5563}
+  .svc-bar b{color:#374151}
+  .svc-bar .mono{color:#6b7280}
+  /* ============ 弹窗 ============ */
+  .mask{position:fixed;inset:0;background:rgba(0,0,0,.4);display:none;align-items:center;justify-content:center;z-index:50}
+  .mask.show{display:flex}
+  .dialog{width:460px;background:#fff;border-radius:10px;overflow:hidden}
+  .dlg-head{padding:14px 18px;font-size:15px;font-weight:600;border-bottom:1px solid var(--line);
+    display:flex;justify-content:space-between;align-items:center}
+  .dlg-body{padding:18px}
+  .dlg-row{margin-bottom:14px}
+  .dlg-row label{display:block;font-size:13px;color:#6b7280;margin-bottom:6px}
+  .dlg-row .input,.dlg-row .select,.dlg-row textarea{width:100%}
+  textarea.input{height:76px;resize:vertical;font-family:inherit}
+  .dlg-foot{padding:12px 18px;border-top:1px solid var(--line);display:flex;justify-content:flex-end;gap:10px}
+  .x{cursor:pointer;color:#9ca3af;font-size:16px;line-height:1}
+</style>
+</head>
+<body>
+<div class="shell">
+  <!-- 侧边栏（复刻现有导航） -->
+  <aside class="sidebar">
+    <div class="side-item"><span class="ico">问</span>智能问答</div>
+    <div class="side-item"><span class="ico">采</span>知识采集</div>
+    <div class="side-item"><span class="ico">加</span>知识加工</div>
+    <div class="side-item active"><span class="ico">用</span>知识应用</div>
+    <div class="side-item"><span class="ico">营</span>知识运营</div>
+    <div class="side-item"><span class="ico">治</span>知识治理</div>
+    <div class="side-item"><span class="ico">中</span>知识中心</div>
+    <div class="side-item"><span class="ico">源</span>知识源管理</div>
+    <div class="side-sep"></div>
+    <div class="side-group">平台配置</div>
+    <div class="side-item"><span class="ico">户</span>用户管理</div>
+    <div class="side-item"><span class="ico">配</span>系统配置</div>
+    <div class="side-item"><span class="ico">智</span>智能体配置</div>
+  </aside>
+
+  <div class="main">
+    <div class="topbar"><span class="tabmark"></span></div>
+    <div class="page">
+      <div class="pg-head">
+        <div>
+          <h2 class="pg-title" style="display:inline">知识应用</h2>
+          <span class="proto-tag">原型 · 样例数据</span>
+          <p class="pg-sub">应用是治理的基础。三端共用统一检索服务（Dify 承载），每次问答都带引用、可反馈——问答日志是治理最重要的数据来源。</p>
+        </div>
+        <div class="head-actions">
+          <button class="btn">↗ 去统一检索</button>
+        </div>
+      </div>
+
+      <!-- 页签 -->
+      <div class="tabs">
+        <div class="tab active" data-p="p1">召回明细</div>
+        <div class="tab" data-p="p2">效果指标</div>
+        <div class="tab" data-p="p3">反馈与纠错 <span class="cnt">3 待处理</span></div>
+        <div class="tab" data-p="p4">渠道管理</div>
+      </div>
+
+      <!-- ============ Tab 1 召回明细 ============ -->
+      <div class="panel active" id="p1">
+        <div class="filter-bar">
+          <div class="filter-item"><span class="filter-label">检索时间</span>
+            <input class="input w200" value="2026-09-05 – 2026-09-11" readonly></div>
+          <div class="filter-item"><span class="filter-label">应用方</span>
+            <select class="select w140"><option>全部应用方</option><option>本插件·智能问答</option><option>Dify 智能体</option><option>千问办公</option><option>人类门户</option></select></div>
+          <div class="filter-item"><span class="filter-label">结果</span>
+            <select class="select w120"><option>全部结果</option><option>已引用作答</option><option>无结果</option><option>仅外网资料</option></select></div>
+          <div class="filter-item"><span class="filter-label">问题</span>
+            <input class="input w180" placeholder="问题 / 命中文档关键词"></div>
+          <button class="btn primary">查询</button>
+          <button class="btn">重置</button>
+          <button class="btn sm" style="margin-left:auto">⬇ 导出 CSV</button>
+        </div>
+
+        <div class="md">
+          <!-- 左：问题列表（原问答日志表的升级） -->
+          <div class="md-list">
+            <div class="md-list-head"><span>问答记录 · 今日 603 次</span><span class="mono">源：Dify 问答日志</span></div>
+            <div id="qaList"></div>
+            <div style="margin-top:auto;padding:10px 14px;font-size:12px;color:#9ca3af;border-top:1px solid var(--line)">样例展示 4 条 · 生产环境按今日 603 条分页加载</div>
+          </div>
+          <!-- 右：链路下钻 -->
+          <div class="md-detail" id="qaDetail"></div>
+        </div>
+
+        <div class="foot-note">
+          数据来源：<code>GET /qa/details</code>（ChatMessage.detail 的 steps / retrieval / feedbacks）。左列即原「问答日志与溯源」表的升级形态（更细粒度 + 可下钻 + 可导出）。<br>
+          落地缺口：分路分数（向量 / BM25 / RRF 排名）目前在 <code>searcher.py</code> 融合后被丢弃，仅 rerank 分落库——原型中分路 chip 为目标形态，需扩展 tracer 与 detail JSON 后才有真值。
+        </div>
+      </div>
+
+      <!-- ============ Tab 2 效果指标 ============ -->
+      <div class="panel" id="p2">
+        <div class="kpis">
+          <div class="kpi star"><span class="star-badge">北极星</span>
+            <div class="lb">问答准确率</div><div class="vl">87.4%</div>
+            <div class="dl"><span class="up">↑ 2.1%</span> 较上周 · 口径：👍 占反馈比</div></div>
+          <div class="kpi"><div class="lb">命中率</div><div class="vl">93.2%</div>
+            <div class="dl"><span class="up">↑ 0.8%</span> · 召回≥1 条占比</div></div>
+          <div class="kpi"><div class="lb">无结果率</div><div class="vl">6.8%</div>
+            <div class="dl"><span class="dn">↑ 0.4%</span> · 目标 &lt; 5%</div></div>
+          <div class="kpi"><div class="lb">引用率</div><div class="vl">74.5%</div>
+            <div class="dl"><span class="up">↑ 3.2%</span> · 命中且带引用作答</div></div>
+          <div class="kpi"><div class="lb">反馈满意度</div><div class="vl">91.8%</div>
+            <div class="dl">👍 412 / 反馈 449 · 7 日</div></div>
+        </div>
+
+        <div class="charts">
+          <div class="chart-box">
+            <div class="chart-title"><span>近 14 日问答量与无结果率</span>
+              <span class="legend"><span><i style="background:#409EFF"></i>问答量</span><span><i style="background:#e6a23c"></i>无结果率</span></span></div>
+            <svg id="trend" width="100%" height="190" viewBox="0 0 760 190"></svg>
+          </div>
+          <div class="chart-box">
+            <div class="chart-title"><span>三端对比（7 日）</span></div>
+            <div class="hbar-row"><span class="hbar-name">Dify 智能体</span><div class="hbar-track"><div class="hbar-fill" style="width:86%"></div></div><span class="hbar-val">2,431 次 · 94.1%</span></div>
+            <div class="hbar-row"><span class="hbar-name">千问办公</span><div class="hbar-track"><div class="hbar-fill g" style="width:41%"></div></div><span class="hbar-val">1,168 次 · 91.6%</span></div>
+            <div class="hbar-row"><span class="hbar-name">人类门户</span><div class="hbar-track"><div class="hbar-fill w" style="width:22%"></div></div><span class="hbar-val">623 次 · 88.3%</span></div>
+            <div style="font-size:12px;color:#9ca3af;margin-top:10px;line-height:1.8">条长 = 问答量；百分比 = 各端命中率。人类门户命中率最低，主因外网兜底占比高。</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><span class="card-title">Top 无结果问题（7 日）<span class="tag info">治理输入</span></span>
+            <button class="btn sm">批量转缺口看板</button></div>
+          <table class="tb">
+            <thead><tr><th style="width:40%">问题</th><th style="width:56px">次数</th><th style="width:120px">主要来源端</th><th style="width:130px">疑似归属目录</th><th>状态</th><th style="width:110px">操作</th></tr></thead>
+            <tbody>
+              <tr><td class="small">大客户 VIP 折扣怎么算</td><td class="mono">17</td><td>千问办公</td><td>渠道政策</td><td><span class="tag danger">已建缺口 GAP-0912-03</span></td><td><button class="btn link sm">查看</button></td></tr>
+              <tr><td class="small">海外机型的保修期差异</td><td class="mono">11</td><td>Dify·设备智能体</td><td>售后政策</td><td><span class="tag warning">待判定</span></td><td><button class="btn link sm">转缺口</button></td></tr>
+              <tr><td class="small">吊挂系统安装验收标准</td><td class="mono">8</td><td>人类门户</td><td>（无归属目录）</td><td><span class="tag warning">待判定</span></td><td><button class="btn link sm">转缺口</button></td></tr>
+              <tr><td class="small">2026 年经销商返利细则</td><td class="mono">6</td><td>Dify·制度助手</td><td>渠道政策</td><td><span class="tag success">已转办负责人</span></td><td><button class="btn link sm">查看</button></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="foot-note">
+          口径：问答量与命中取自 <code>usage_logs</code> + <code>chat_messages</code>；反馈满意度取自 <code>qa_feedbacks</code>；无结果问题聚合自检索 trace 中「rerank 最高分 &lt; 阈值」的事件，转缺口后写入知识治理-缺口看板。
+        </div>
+      </div>
+
+      <!-- ============ Tab 3 反馈与纠错 ============ -->
+      <div class="panel" id="p3">
+        <div class="filter-bar">
+          <div class="filter-item"><span class="filter-label">状态</span>
+            <select class="select w120"><option>全部状态</option><option>待处理</option><option>处理中</option><option>已处理</option><option>已忽略</option></select></div>
+          <div class="filter-item"><span class="filter-label">错误类型</span>
+            <select class="select w140"><option>全部类型</option><option>内容错误</option><option>知识过期</option><option>知识不完整</option><option>知识难理解</option></select></div>
+          <div class="filter-item"><span class="filter-label">关键词</span>
+            <input class="input w220" placeholder="问题 / 知识标题"></div>
+          <button class="btn primary">查询</button>
+          <div class="spacer"></div>
+          <span class="small" style="color:#9ca3af">智能体「👎 纠错」与人类门户纠错入口同轨，自动建单</span>
+        </div>
+        <div class="card">
+          <table class="tb">
+            <thead><tr><th style="width:110px">创建时间</th><th style="width:24%">问题</th><th style="width:100px">错误类型</th><th style="width:22%">关联知识</th><th style="width:110px">提交人</th><th style="width:80px">处理人</th><th style="width:90px">状态</th><th style="width:150px">操作</th></tr></thead>
+            <tbody id="ckBody">
+              <tr data-st="待处理"><td class="mono">09-11 10:06</td><td class="small">大客户 VIP 折扣怎么算</td><td><span class="tag danger">知识不完整</span></td><td class="small">—（未关联，需补建）</td><td>李文博</td><td>—</td><td><span class="tag danger">待处理</span></td><td><button class="btn link sm" onclick="openDlg(this)">处理</button> <button class="btn link sm">溯源</button></td></tr>
+              <tr data-st="待处理"><td class="mono">09-11 09:31</td><td class="small">JK-8669D 针距偏差允许范围</td><td><span class="tag warning">知识过期</span></td><td class="small">JK-8669D 维修手册 · 3.2</td><td>王芳</td><td>—</td><td><span class="tag danger">待处理</span></td><td><button class="btn link sm" onclick="openDlg(this)">处理</button> <button class="btn link sm">去钉钉原文</button></td></tr>
+              <tr data-st="待处理"><td class="mono">09-10 17:44</td><td class="small">试用期考核标准里答辩占比</td><td><span class="tag warning">内容错误</span></td><td class="small">新员工试用期管理办法 V2</td><td>Dify·新员工导师</td><td>—</td><td><span class="tag danger">待处理</span></td><td><button class="btn link sm" onclick="openDlg(this)">处理</button> <button class="btn link sm">去钉钉原文</button></td></tr>
+              <tr data-st="处理中"><td class="mono">09-10 14:02</td><td class="small">CE 认证流程适用机型清单</td><td><span class="tag info">知识不完整</span></td><td class="small">出口认证制度汇编</td><td>赵磊</td><td>黄景新</td><td><span class="tag warning">处理中</span></td><td><button class="btn link sm" onclick="openDlg(this)">处理</button> <button class="btn link sm">溯源</button></td></tr>
+              <tr data-st="已处理"><td class="mono">09-09 11:20</td><td class="small">缝纫机换油周期</td><td><span class="tag info">知识难理解</span></td><td class="small">设备保养手册（通用）</td><td>陈晨</td><td>周敏</td><td><span class="tag success">已处理</span></td><td><button class="btn link sm">查看记录</button></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="foot-note">
+          数据来源：<code>GET /qa/corrections</code> / <code>PUT /qa/corrections/{id}</code>（已有接口，直接复用）。「溯源」跳回「召回明细」页签并定位到对应问题；「去钉钉原文」跳钉钉编辑——编辑一律回钉钉事实源，本页只记录闭环状态。
+        </div>
+      </div>
+
+      <!-- ============ Tab 4 渠道管理 ============ -->
+      <div class="panel" id="p4">
+        <div class="ch-grid">
+          <div class="ch-card">
+            <div class="ch-head"><span class="ch-name"><span class="dot"></span>Dify 智能体</span><span class="tag success">在线</span></div>
+            <div class="ch-body">
+              <div class="ch-row"><span class="k">接入智能体</span><span class="v">设备智能体 / 新员工导师 / 制度助手 等 <b>5</b> 个</span></div>
+              <div class="ch-row"><span class="k">注册知识库</span><span class="v"><span class="kb-chips"><span class="tag primary">产品手册</span><span class="tag primary">制度标准</span><span class="tag primary">+3</span></span></span></div>
+              <div class="ch-row"><span class="k">路由策略</span><span class="v">先选库，再决定 rerank / 多跳（审计留痕）</span></div>
+              <div class="ch-row"><span class="k">问答日志回流</span><span class="sw on" onclick="this.classList.toggle('on')"></span></div>
+              <div class="ch-row"><span class="k">无结果写回缺口</span><span class="sw on" onclick="this.classList.toggle('on')"></span></div>
+            </div>
+          </div>
+          <div class="ch-card">
+            <div class="ch-head"><span class="ch-name"><span class="dot"></span>千问办公</span><span class="tag success">在线</span></div>
+            <div class="ch-body">
+              <div class="ch-row"><span class="k">注册知识域</span><span class="v"><span class="kb-chips"><span class="tag primary">品质检验</span><span class="tag primary">制度标准</span><span class="tag primary">商品方案</span></span></span></div>
+              <div class="ch-row"><span class="k">注册门禁</span><span class="v">仅注册质检达标库（健康度 &lt; 60 不注册）</span></div>
+              <div class="ch-row"><span class="k">门禁联动</span><span class="sw on" onclick="this.classList.toggle('on')"></span></div>
+              <div class="ch-row"><span class="k">无结果写回缺口</span><span class="sw on" onclick="this.classList.toggle('on')"></span></div>
+              <div class="ch-row"><span class="k">引用强制展示</span><span class="sw on" onclick="this.classList.toggle('on')"></span></div>
+            </div>
+          </div>
+          <div class="ch-card">
+            <div class="ch-head"><span class="ch-name"><span class="dot"></span>人类门户</span><span class="tag success">在线</span></div>
+            <div class="ch-body">
+              <div class="ch-row"><span class="k">语义检索</span><span class="sw on" onclick="this.classList.toggle('on')"></span></div>
+              <div class="ch-row"><span class="k">权限内预览</span><span class="sw on" onclick="this.classList.toggle('on')"></span></div>
+              <div class="ch-row"><span class="k">跳转钉钉原文阅读/编辑</span><span class="sw on" onclick="this.classList.toggle('on')"></span></div>
+              <div class="ch-row"><span class="k">纠错入口（与智能体同轨）</span><span class="sw on" onclick="this.classList.toggle('on')"></span></div>
+              <div class="ch-row"><span class="k">外网兜底</span><span class="sw on" onclick="this.classList.toggle('on')"></span></div>
+            </div>
+          </div>
+        </div>
+        <div class="svc-bar">
+          <span><span class="dot" style="display:inline-block;margin-right:6px"></span>统一检索服务（Dify 承载）<b>正常</b></span>
+          <span>Rerank 模型：<b>bge-reranker-v2-m3 可用</b></span>
+          <span>平均检索耗时 <span class="mono">318ms</span></span>
+          <span>引用阈值 <span class="mono">0.35</span></span>
+          <span class="spacer"></span>
+          <span style="display:flex;gap:8px;flex-shrink:0">
+            <button class="btn sm">🔄 刷新健康检查</button>
+            <button class="btn sm">⚙ 检索参数配置</button>
+          </span>
+        </div>
+        <div class="foot-note">
+          现状：三端注册关系在 kb-api 内尚无表结构（grep 零命中），本页签落地需新增「渠道注册」配置表（渠道 / 注册库 / 开关 / 健康状态），开关写入后由同步服务与检索服务读取。
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 处理弹窗 -->
+<div class="mask" id="mask">
+  <div class="dialog">
+    <div class="dlg-head"><span>处理纠错单</span><span class="x" onclick="closeDlg()">✕</span></div>
+    <div class="dlg-body">
+      <div class="dlg-row"><label>处理状态</label>
+        <select class="select" id="dlgStatus" style="width:100%"><option>处理中</option><option>已处理</option><option>已忽略</option></select></div>
+      <div class="dlg-row"><label>处理说明（将写入工单留痕）</label>
+        <textarea class="input" placeholder="例：已更新钉钉原文 3.2 节偏差允许值，并触发重新同步"></textarea></div>
+      <div class="dlg-row" style="margin:0"><label>快捷动作</label>
+        <button class="btn sm">↗ 去钉钉原文编辑</button>
+        <button class="btn sm">⟳ 触发该文档重新同步</button></div>
+    </div>
+    <div class="dlg-foot"><button class="btn" onclick="closeDlg()">取消</button><button class="btn primary" onclick="saveDlg()">保存</button></div>
+  </div>
+</div>
+
+<script>
+/* ================= 样例数据（原型演示用） ================= */
+const QA = [
+  { time:'10:21', app:'本插件·智能问答', q:'JK-8669D 针距偏差允许范围？', kb:'产品手册', result:'已引用作答', rt:'success',
+    meta:{model:'GLM-4.6', dur:'1.84s', topk:5, trace:'a3f9c21d…', fb:[['👍 有帮助','success']]},
+    steps:[['查询接收','原问直检，未改写'],['向量召回 kNN','ES kb_product · top10 · 214ms'],['关键词召回 BM25','ES kb_product · top10 · 96ms'],
+      ['RRF 融合','20 候选 → 去重 12'],['Rerank','bge-reranker-v2-m3 · 12 → 5 · 310ms'],['引用判定','阈值 0.35 · 达标 2 条'],['生成回答','引用 2 条片段作答']],
+    hits:[
+      {top:1, rk:0.8123, vec:0.712, bm:9.24, rrf:1, cited:true, doc:'JK-8669D 维修手册', path:'产品手册 / 维修标准 / 3.2 针距调整', pg:14, ck:'c-8f3a…', sn:'针距偏差允许范围：标准转速（2500rpm）下 ±0.2mm；转速超过 3000rpm 时收紧至 ±0.15mm，并以针距仪复校。'},
+      {top:2, rk:0.6641, vec:0.681, bm:8.02, rrf:2, cited:true, doc:'针距质量检验规范 V3', path:'产品手册 / 质检标准', pg:6, ck:'c-1b7e…', sn:'检验频次：首件 + 每 2 小时巡检；偏差超允许范围须停机调整，并追溯至上一次巡检合格点。'},
+      {top:3, rk:0.4102, vec:0.552, bm:6.11, rrf:4, cited:false, doc:'JK-8669D 操作快速指南', path:'产品手册 / 快速上手', pg:3, ck:'c-90d2…', sn:'针距长度与针幅的调节快捷操作（偏差允许范围见维修手册）。'},
+      {top:4, rk:0.3318, vec:0.498, bm:5.40, rrf:6, cited:false, doc:'缝纫机常见故障代码表', path:'产品手册 / 维修标准', pg:22, ck:'c-44aa…', sn:'E-07 针距异常：可能原因为送布牙磨损、压脚压力不均……'},
+      {top:5, rk:0.2874, vec:0.461, bm:4.93, rrf:9, cited:false, doc:'设备保养手册（通用）', path:'产品手册 / 保养', pg:41, ck:'c-77c1…', sn:'通用保养周期与润滑点说明，不区分机型。'}]},
+  { time:'10:05', app:'千问办公', q:'大客户 VIP 折扣怎么算', kb:'路由 → 渠道政策', result:'无结果 → AI 判定缺口', rt:'danger',
+    meta:{model:'GLM-4.6', dur:'1.12s', topk:3, trace:'7b20e9af…', fb:[['❓ 没找到','info']]},
+    steps:[['查询接收','路由至「渠道政策」库'],['向量召回 kNN','ES kb_policy · top10 · 188ms'],['关键词召回 BM25','ES kb_policy · top10 · 74ms'],
+      ['RRF 融合','14 候选 → 去重 9'],['Rerank','9 → 3 · 262ms'],['引用判定','阈值 0.35 · 最高 0.2104 未达标',1],['生成回答','无结果话术 + 缺口事件写回',1]],
+    hits:[
+      {top:1, rk:0.2104, vec:0.388, bm:3.10, rrf:2, cited:false, doc:'渠道管理办法（2024 版）', path:'渠道政策 / 总则', pg:2, ck:'c-5e11…', sn:'渠道分级与授权原则（未含 VIP 折扣计算口径）。'},
+      {top:2, rk:0.1732, vec:0.341, bm:2.62, rrf:5, cited:false, doc:'经销商返利细则 2025', path:'渠道政策 / 返利', pg:8, ck:'c-20bd…', sn:'年度返利按提货额阶梯计算……（与折扣无关）'},
+      {top:3, rk:0.1408, vec:0.302, bm:2.05, rrf:8, cited:false, doc:'合同模板使用说明', path:'渠道政策 / 合同', pg:1, ck:'c-9c47…', sn:'合同金额栏填写规范……'}],
+    alert:{t:'danger', h:'无结果归因：Rerank 最高分 0.2104 &lt; 引用阈值 0.35，库内无同义片段（BM25 亦无「VIP 折扣」词条）。',
+      s:'已自动写入缺口看板：<b>GAP-0912-03</b>，归属「渠道政策」目录，负责人待认领 → <a href="javascript:void(0)" style="color:#a80202">去缺口看板</a>'}},
+  { time:'09:47', app:'人类门户', q:'CE 认证流程', kb:'制度标准', result:'仅外网资料', rt:'warning',
+    meta:{model:'GLM-4.6', dur:'2.31s', topk:2, trace:'e1180b6c…', fb:[]},
+    steps:[['查询接收','原问直检'],['向量召回 kNN','ES kb_rule · top10 · 176ms'],['关键词召回 BM25','ES kb_rule · top10 · 68ms'],
+      ['RRF 融合','11 候选 → 去重 7'],['Rerank','7 → 2 · 240ms'],['引用判定','阈值 0.35 · 未达标',1],['外网兜底','内部未命中 → 外网检索 2 条',1]],
+    hits:[
+      {top:1, rk:0.1822, vec:0.352, bm:2.44, rrf:3, cited:false, doc:'出口业务管理制度', path:'制度标准 / 出口', pg:11, ck:'c-71f0…', sn:'出口产品须满足目的国认证要求（未展开 CE 流程）。'},
+      {top:'外1', rk:null, vec:null, bm:null, rrf:null, cited:false, ext:true, doc:'外网 · 欧盟官网 CE marking 指南', path:'ec.europa.eu', pg:null, ck:'—', sn:'CE 认证五步：判定指令 → 符合性评估 → 技术文件 → 符合性声明 → 加贴标志。'},
+      {top:'外2', rk:null, vec:null, bm:null, rrf:null, cited:false, ext:true, doc:'外网 · 某认证机构流程页', path:'tuv.com', pg:null, ck:'—', sn:'缝纫机械类 CE 涉及机械指令 2006/42/EC 与低电压指令……'}],
+    alert:{t:'warning', h:'内部库未命中，已走外网兜底——此类问答不计入引用率，且连续 3 次同义问题将提示建库。', s:'建议：将 CE 认证流程沉淀为内部制度文档（出口认证制度汇编缺章节）。'}},
+  { time:'09:12', app:'Dify·新员工导师', q:'试用期考核标准', kb:'制度标准', result:'已引用作答', rt:'success',
+    meta:{model:'GLM-4.6', dur:'1.46s', topk:3, trace:'40cc7e2b…', fb:[['👍 有帮助','success']]},
+    steps:[['查询接收','原问直检'],['向量召回 kNN','ES kb_rule · top10 · 181ms'],['关键词召回 BM25','ES kb_rule · top10 · 71ms'],
+      ['RRF 融合','16 候选 → 去重 10'],['Rerank','10 → 3 · 255ms'],['引用判定','阈值 0.35 · 达标 2 条'],['生成回答','引用 2 条片段作答']],
+    hits:[
+      {top:1, rk:0.7742, vec:0.694, bm:8.86, rrf:1, cited:true, doc:'新员工试用期管理办法 V2', path:'制度标准 / 人事', pg:4, ck:'c-33a9…', sn:'试用期考核 = 业务答辩 40% + 导师评价 30% + 文化融入 30%，总分 ≥ 80 转正。'},
+      {top:2, rk:0.5918, vec:0.622, bm:7.14, rrf:2, cited:true, doc:'导师制实施细则', path:'制度标准 / 人事', pg:9, ck:'c-6d05…', sn:'导师评价维度：任务交付、主动性、协作……'},
+      {top:3, rk:0.3021, vec:0.471, bm:4.80, rrf:6, cited:false, doc:'薪酬管理办法', path:'制度标准 / 人事', pg:15, ck:'c-a2e8…', sn:'试用期薪酬为转正薪酬的 80%……'}]}
+];
+
+/* ================= Tab1 渲染 ================= */
+let sel = 0;
+function renderList(){
+  document.getElementById('qaList').innerHTML = QA.map((x,i)=>`
+    <div class="md-item ${i===sel?'sel':''}" onclick="pick(${i})">
+      <div class="r1"><span class="tm">${x.time}</span><span class="app">${x.app}</span>
+        <span style="flex:1"></span><span class="tag ${x.rt}">${x.result}</span></div>
+      <div class="q">${x.q}</div>
+    </div>`).join('');
+}
+function pick(i){ sel=i; renderList(); renderDetail(); }
+function renderDetail(){
+  const x = QA[sel];
+  const fb = x.meta.fb.map(f=>`<span class="tag ${f[1]}">${f[0]}</span>`).join(' ') || '<span class="tag info">无反馈</span>';
+  const steps = x.steps.map((s,i)=>`
+    <div class="chain-step"><span class="step-dot ${s[2]?'warn':''}">${i+1}</span>
+      <span class="step-title">${s[0]}</span><span class="step-detail">${s[1]}</span></div>`).join('');
+  const hits = x.hits.map(h=>`
+    <div class="hit ${h.cited?'cited':''}">
+      <div class="hit-top">
+        <span class="top-badge ${h.top===1||h.top===2||h.top===3?'top3':''}">${h.ext?'外网':'TOP '+String(h.top).padStart(2,'0')}</span>
+        ${h.rk!=null?`<span class="score-area"><span class="score-label">Rerank</span>
+          <span class="score-bar"><span class="score-fill" style="display:block;width:${Math.min(100,h.rk*100)}%"></span></span>
+          <span class="score-val">${h.rk.toFixed(4)}</span></span>`:''}
+        <span class="hit-doc">📄 ${h.doc} <span class="dv">${h.path}${h.pg?' · P'+h.pg:''}</span></span>
+        <span style="flex:1"></span>
+        ${h.cited?'<span class="tag success">已引用</span>':(h.ext?'<span class="tag warning">外网兜底</span>':'<span class="tag info">未引用</span>')}
+      </div>
+      ${h.rk!=null?`<div class="path-chips" style="margin-top:8px">
+        <span class="pchip">向量 ${h.vec.toFixed(3)}</span><span class="pchip">BM25 ${h.bm.toFixed(2)}</span>
+        <span class="pchip">RRF #${h.rrf}</span><span class="pchip">阈值 0.35</span></div>`:''}
+      <div class="hit-snip">${h.sn}</div>
+      <div class="hit-foot"><span>片段 ${h.ck}</span>${h.pg?`<span>页码 ${h.pg}</span>`:''}
+        <span style="flex:1"></span><button class="btn link sm">预览原文</button><button class="btn link sm">去钉钉编辑</button></div>
+    </div>`).join('');
+  const alert = x.alert?`<div class="alert ${x.alert.t}"><b>${x.alert.h}</b><br>${x.alert.s}</div>`:'';
+  document.getElementById('qaDetail').innerHTML = `
+    <div class="dq"><span class="qt">Q</span><span class="qx">${x.q}</span>
+      <span style="flex:1"></span><span class="tag ${x.rt}">${x.result}</span></div>
+    <div class="meta-row">
+      <span class="chip">应用方 <b>${x.app}</b></span><span class="chip">时间 <b>${x.time}</b></span>
+      <span class="chip">模型 <b>${x.meta.model}</b></span><span class="chip">耗时 <b>${x.meta.dur}</b></span>
+      <span class="chip">TopK <b>${x.meta.topk}</b></span><span class="chip">链路 <b class="mono">${x.meta.trace}</b></span>
+      <span class="chip">反馈 ${fb}</span></div>
+    <div class="sec-title">回答链路</div>
+    <div class="chain">${steps}</div>
+    ${alert}
+    <div class="sec-title">召回片段（${x.hits.length} 条）<span class="tag info">引用阈值 0.35</span></div>
+    ${hits}`;
+}
+renderList(); renderDetail();
+
+/* ================= 页签切换 ================= */
+document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click',()=>{
+  document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
+  document.querySelectorAll('.panel').forEach(x=>x.classList.remove('active'));
+  t.classList.add('active'); document.getElementById(t.dataset.p).classList.add('active');
+}));
+
+/* ================= Tab2 趋势图（内联 SVG） ================= */
+(function(){
+  const days=['08-29','08-30','08-31','09-01','09-02','09-03','09-04','09-05','09-06','09-07','09-08','09-09','09-10','09-11'];
+  const cnt =[412,388,455,501,522,498,476,510,365,342,548,571,590,603];
+  const nr  =[5.1,5.6,4.9,6.2,6.8,6.1,5.8,6.4,7.2,7.5,6.9,6.6,6.4,6.8];
+  const W=760,H=190,pl=34,pr=34,pt=14,pb=26, iw=W-pl-pr, ih=H-pt-pb;
+  const maxC=650, maxR=10;
+  let bars='', pts=[];
+  cnt.forEach((c,i)=>{
+    const bw=iw/days.length*0.52, x=pl+iw/days.length*i+(iw/days.length-bw)/2, h=c/maxC*ih;
+    bars+=`<rect x="${x.toFixed(1)}" y="${(pt+ih-h).toFixed(1)}" width="${bw.toFixed(1)}" height="${h.toFixed(1)}" rx="2" fill="#409EFF" opacity="${i===days.length-1?1:0.55}"/>`;
+    pts.push([pl+iw/days.length*i+iw/days.length/2, pt+ih-nr[i]/maxR*ih]);
+  });
+  const line=pts.map((p,i)=>(i?'L':'M')+p[0].toFixed(1)+' '+p[1].toFixed(1)).join(' ');
+  const dots=pts.map(p=>`<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="2.6" fill="#e6a23c"/>`).join('');
+  let ax='';
+  [0,5,10].forEach(v=>{const y=pt+ih-v/maxR*ih; ax+=`<line x1="${pl}" y1="${y}" x2="${W-pr}" y2="${y}" stroke="#eef1f5"/><text x="${W-pr+6}" y="${y+4}" font-size="10" fill="#9ca3af">${v}%</text>`;});
+  const xl=days.map((d,i)=>(i%2===0?`<text x="${pl+iw/days.length*i+iw/days.length/2}" y="${H-8}" font-size="10" fill="#9ca3af" text-anchor="middle">${d}</text>`:'')).join('');
+  document.getElementById('trend').innerHTML = ax+bars+`<path d="${line}" fill="none" stroke="#e6a23c" stroke-width="2"/>`+dots+xl;
+})();
+
+/* ================= Tab3 处理弹窗 ================= */
+let curRow=null;
+function openDlg(btn){ curRow=btn.closest('tr'); document.getElementById('mask').classList.add('show'); }
+function closeDlg(){ document.getElementById('mask').classList.remove('show'); }
+function saveDlg(){
+  if(!curRow) return;
+  const st=document.getElementById('dlgStatus').value;
+  const cls=st==='已处理'?'success':st==='已忽略'?'info':'warning';
+  curRow.querySelector('td:nth-child(7)').innerHTML=`<span class="tag ${cls}">${st}</span>`;
+  curRow.dataset.st=st; closeDlg();
+}
+</script>
+</body>
+</html>

@@ -1,11 +1,12 @@
 <script setup lang="ts">
 /**
  * 知识中心 - 钉钉知识
- * 实时拉取钉钉开放平台知识库文件，支持按知识库 / 创建人 / 目录过滤，手动刷新
+ * 读取服务端持久化快照（重启后仍在）；全量遍历只在点「刷新」时触发，
+ * 支持按知识库 / 创建人 / 目录过滤
  */
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { Search, Refresh, Document } from '@element-plus/icons-vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { fetchDingTalkDocuments } from '@/api/knowledge-center'
 import { formatDate, formatFileSize } from '@/utils/format'
 import type { DingTalkFile, DingTalkOption } from '@/types/knowledge-center'
@@ -17,6 +18,20 @@ const loading = ref(false)        // 首次同步（无数据）时的全屏遮�
 const refreshing = ref(false)     // 后台遍历中（手动刷新按钮态）
 const page = ref(1)
 const size = ref(20)
+
+// 快照信息：最近一次手动刷新的时间（服务端持久化，进程重启后仍可用）
+const cachedAt = ref<string | null>(null)
+const snapshotTip = '列表为最近一次手动刷新的持久化快照（服务重启后仍在）；点「刷新」重新遍历钉钉知识库更新，全量遍历约 25–30 分钟'
+const cachedAtText = computed(() => {
+  if (!cachedAt.value) return ''
+  const d = new Date(cachedAt.value)
+  if (isNaN(d.getTime())) return ''
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}`
+})
+const emptyText = computed(() => (cachedAt.value
+  ? '没有符合条件的文件'
+  : '暂无钉钉知识快照：点右上角「刷新」从钉钉同步（全量遍历约 25–30 分钟）'))
 
 // 后台遍历耗时较长时，按此间隔轮询
 const POLL_INTERVAL = 12000
@@ -65,6 +80,7 @@ async function loadDocs(forceRefresh = false, fromPoll = false) {
     wsOptions.value = res.workspaces || []
     creatorOptions.value = res.creators || []
     errorMsg.value = res.error || ''
+    cachedAt.value = res.cached_at ?? cachedAt.value
 
     if (res.loading) {
       // 后台遍历中：无数据时保持遮罩，有数据时保持刷新按钮态，稍后轮询
@@ -75,13 +91,13 @@ async function loadDocs(forceRefresh = false, fromPoll = false) {
       return
     }
 
-    // 后台遍历完成
+    // 后台遍历完成（失败时 error 已由后端写入 errorMsg，不提示成功）
     stopPolling()
     const wasRefreshing = refreshing.value
     loading.value = false
     refreshing.value = false
-    if (forceRefresh || (wasRefreshing && fromPoll)) {
-      ElMessage.success('钉钉知识库已刷新')
+    if ((forceRefresh || (wasRefreshing && fromPoll)) && !errorMsg.value) {
+      ElMessage.success('钉钉知识快照已刷新')
     }
   } catch (e: any) {
     stopPolling()
@@ -105,7 +121,17 @@ function handleReset() {
   loadDocs()
 }
 
-function handleRefresh() {
+async function handleRefresh() {
+  if (refreshing.value) return
+  try {
+    await ElMessageBox.confirm(
+      '将重新遍历钉钉全部知识库（约 4,500 次节点请求，需 25–30 分钟），期间列表继续显示当前快照。是否开始刷新？',
+      '刷新钉钉知识快照',
+      { type: 'warning', confirmButtonText: '开始刷新', cancelButtonText: '取消' },
+    )
+  } catch {
+    return // 用户取消
+  }
   page.value = 1
   loadDocs(true)
 }
@@ -144,7 +170,7 @@ onUnmounted(() => {
 
 <template>
   <div class="dt-manage" v-loading="loading" element-loading-text="正在从钉钉知识库同步数据，请稍候…">
-    <!-- 顶部操作栏 -->
+    <!-- 顶部状态栏：同步提示 + 文件总数 + 缓存时间 + 刷新 -->
     <div class="action-bar">
       <div class="action-left">
         <el-alert
@@ -158,73 +184,81 @@ onUnmounted(() => {
       </div>
       <div class="action-right">
         <span class="total-hint">共 {{ total }} 个文件</span>
+        <el-tooltip v-if="cachedAtText" :content="snapshotTip" placement="top">
+          <span class="cache-hint">数据更新于 {{ cachedAtText }}</span>
+        </el-tooltip>
         <span v-if="refreshing" class="sync-hint">后台同步中…</span>
         <el-button :icon="Refresh" :loading="refreshing" @click="handleRefresh">刷新</el-button>
       </div>
     </div>
 
-    <!-- 筛选栏 -->
+    <!-- 筛选栏：左侧条件自适应换行，右侧「查询 / 重置」成组固定，行尾对齐 -->
     <div class="filter-bar">
-      <el-input
-        v-model="searchKeyword"
-        placeholder="搜索文件名称"
-        clearable
-        style="width: 200px"
-        @keyup.enter="handleSearch"
-        @clear="handleSearch"
-      >
-        <template #prefix>
-          <el-icon><Search /></el-icon>
-        </template>
-      </el-input>
-      <el-select
-        v-model="wsFilter"
-        placeholder="按知识库过滤"
-        multiple
-        collapse-tags
-        collapse-tags-tooltip
-        clearable
-        style="width: 220px"
-        @change="handleSearch"
-      >
-        <el-option
-          v-for="ws in wsOptions"
-          :key="ws.id"
-          :label="ws.name"
-          :value="ws.id"
+      <div class="filter-fields">
+        <el-input
+          v-model="searchKeyword"
+          class="f-search"
+          placeholder="搜索文件名称"
+          clearable
+          @keyup.enter="handleSearch"
+          @clear="handleSearch"
+        >
+          <template #prefix>
+            <el-icon><Search /></el-icon>
+          </template>
+        </el-input>
+        <el-select
+          v-model="wsFilter"
+          class="f-ws"
+          placeholder="按知识库过滤"
+          multiple
+          collapse-tags
+          collapse-tags-tooltip
+          clearable
+          @change="handleSearch"
+        >
+          <el-option
+            v-for="ws in wsOptions"
+            :key="ws.id"
+            :label="ws.name"
+            :value="ws.id"
+          />
+        </el-select>
+        <el-select
+          v-model="creatorFilter"
+          class="f-creator"
+          placeholder="按创建人过滤"
+          multiple
+          collapse-tags
+          collapse-tags-tooltip
+          clearable
+          @change="handleSearch"
+        >
+          <el-option
+            v-for="c in creatorOptions"
+            :key="c.id"
+            :label="c.name"
+            :value="c.id"
+          />
+        </el-select>
+        <el-input
+          v-model="directoryKeyword"
+          class="f-dir"
+          placeholder="上级目录（如 /新人导航）"
+          clearable
+          @keyup.enter="handleSearch"
+          @clear="handleSearch"
         />
-      </el-select>
-      <el-select
-        v-model="creatorFilter"
-        placeholder="按创建人过滤"
-        multiple
-        collapse-tags
-        collapse-tags-tooltip
-        clearable
-        style="width: 180px"
-        @change="handleSearch"
-      >
-        <el-option
-          v-for="c in creatorOptions"
-          :key="c.id"
-          :label="c.name"
-          :value="c.id"
-        />
-      </el-select>
-      <el-input
-        v-model="directoryKeyword"
-        placeholder="上级目录（如 /新人导航）"
-        clearable
-        style="width: 200px"
-        @keyup.enter="handleSearch"
-        @clear="handleSearch"
-      />
-      <el-button type="primary" @click="handleSearch">查询</el-button>
-      <el-button @click="handleReset">重置</el-button>
+      </div>
+      <div class="filter-actions">
+        <el-button type="primary" @click="handleSearch">查询</el-button>
+        <el-button @click="handleReset">重置</el-button>
+      </div>
     </div>
 
-    <!-- 表格 -->
-    <el-table :data="documents" style="width: 100%" stripe>
+    <!-- 表格：撑满剩余高度，表体内部滚动 -->
+    <div class="table-fill">
+      <el-table :data="documents" style="width: 100%" height="100%" stripe :empty-text="emptyText">
       <el-table-column label="文件名称" min-width="240" prop="name" show-overflow-tooltip>
         <template #default="scope: any">
           <el-link type="primary" :underline="false" :href="scope.row.url" target="_blank" :disabled="!scope.row.url">
@@ -276,6 +310,7 @@ onUnmounted(() => {
         </template>
       </el-table-column>
     </el-table>
+    </div>
 
     <!-- 分页 -->
     <div class="pagination-wrap">
@@ -295,7 +330,7 @@ onUnmounted(() => {
 
 <style scoped>
 .dt-manage {
-  flex: 1;
+  height: 100%;
   background: #fff;
   padding: 16px;
   display: flex;
@@ -331,11 +366,56 @@ onUnmounted(() => {
 
 .filter-bar {
   display: flex;
-  align-items: center;
-  gap: 8px;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px 12px;
   flex-wrap: wrap;
   margin-bottom: 12px;
   flex-shrink: 0;
+}
+
+/* 筛选条件：占据整行剩余宽度，窄屏时自行换行，不挤压右侧按钮组 */
+.filter-fields {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  flex: 1 1 560px;
+  min-width: 0;
+}
+
+.filter-fields :deep(.el-input),
+.filter-fields :deep(.el-select) {
+  flex: 0 1 auto;
+}
+
+.f-search {
+  width: 200px;
+}
+
+.f-ws {
+  width: 210px;
+}
+
+.f-creator {
+  width: 170px;
+}
+
+.f-dir {
+  width: 210px;
+}
+
+/* 查询 / 重置：固定成组靠右，与上方「刷新」按钮同一竖向对齐线 */
+.filter-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+.filter-actions :deep(.el-button + .el-button) {
+  margin-left: 0;
 }
 
 .file-icon {
@@ -348,8 +428,9 @@ onUnmounted(() => {
   font-size: 13px;
 }
 
-:deep(.el-table) {
+.table-fill {
   flex: 1;
+  min-height: 0;
 }
 
 .pagination-wrap {
@@ -363,6 +444,12 @@ onUnmounted(() => {
 .total-hint {
   font-size: 13px;
   color: #909399;
+}
+
+.cache-hint {
+  font-size: 13px;
+  color: #909399;
+  cursor: help;
 }
 
 .sync-hint {

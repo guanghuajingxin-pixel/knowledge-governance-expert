@@ -5,8 +5,8 @@
 
 - Lead Agent 自主决定检索次数、检索词、是否澄清、是否派发子智能体；
 - knowledge_search 工具的返回内容在此汇总为引用来源（按文档去重）；
-- 回答文本随 agent 产出实时下发（answer_delta）；
-- sidecar 不可达时抛 DeerflowUnavailable，由上层回退到内置工作流。
+- 只接受当前运行的主回答最终事件，过程单独实时下发；
+- sidecar 不可达时抛 DeerflowUnavailable，由上层直接报错（fail-fast，无旧链回退）。
 """
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ _HEALTH_TTL = 5.0
 
 
 class DeerflowUnavailable(Exception):
-    """sidecar 未启动或未就绪，调用方应回退到内置工作流。"""
+    """sidecar 未启动或未就绪；调用方直接报错（fail-fast），不回退旧链。"""
 
 
 def _filter_cited_citations(answer: str, citations: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -164,12 +164,11 @@ async def _generate_follow_ups(query: str, answer: str,
     if not cfg.get("follow_up_enabled", True) or not answer:
         return []
     try:
-        from .workflow import _build_llm
-        from . import prompts
+        from .llm import FOLLOW_UP_SYSTEM, build_llm
 
-        llm = _build_llm(llm_config or {}, cfg, temperature=0.7)
+        llm = build_llm(llm_config or {}, cfg, temperature=0.7)
         resp = await llm.ainvoke([
-            SystemMessage(content=prompts.FOLLOW_UP_SYSTEM),
+            SystemMessage(content=FOLLOW_UP_SYSTEM),
             HumanMessage(content=(
                 f"用户问题：{query}\n"
                 f"本次回答：\n{answer[:1500]}"
@@ -187,8 +186,9 @@ async def run_deerflow_stream(
     *,
     thread_id: str,
     dataset_ids: list[str] | None = None,
+    ragflow_dataset_ids: list[str] | None = None,
+    kb_ids: list[str] | None = None,
     top_k: int = 8,
-    deep_think: bool = False,
     plan_mode: bool = False,
     subagent_enabled: bool = False,
     disabled_tools: list[str] | None = None,
@@ -207,33 +207,45 @@ async def run_deerflow_stream(
     payload = {
         "thread_id": thread_id,
         "message": query,
-        "thinking_enabled": bool(deep_think),
+        "thinking_enabled": False,
         "plan_mode": bool(plan_mode),
         "subagent_enabled": bool(subagent_enabled),
         "recursion_limit": 80,
         "dataset_ids": dataset_ids or [],
+        "ragflow_dataset_ids": ragflow_dataset_ids or [],
+        "kb_ids": kb_ids or [],
         "top_k": max(int(top_k or 8), 5),
         "disabled_tools": disabled_tools or [],
+        "retrieval_mode": str((agent_config or {}).get("retrieval_mode", "smart") or "smart"),
+        "max_retrieval_rounds": int((agent_config or {}).get("max_retrieval_rounds", 2) or 2),
         "action": (action or "").strip().lower(),
     }
 
     answer_parts: list[str] = []
+    run_id: str | None = None
+    saw_end = False
+    tool_calls: dict[str, str] = {}
     citations: list[dict[str, Any]] = _load_thread_cites(thread_id)
+    # 每次 knowledge_search 调用内 ref 序号 → 引用文档（收尾把答案 [n] 重映射为文档级编号）
+    ref_maps: list[dict[int, dict[str, Any]]] = []
     # 已见文档去重签名：钉钉条目带 [钉钉] 前缀，需还原为去重时的原始签名
     seen_docs: set[str] = {
         ("dt:" + c["document_title"][len("[钉钉] "):]) if (c.get("document_title") or "").startswith("[钉钉] ") else c.get("document_title", "")
         for c in citations
     }
     search_count = 0
+    ding_calls = 0
+    ding_hits = 0
+    warnings: list[str] = []
     # 限时探索：智能体调用 ask_clarification 请求用户确认时，本轮以 choice_pause 结束
     choice_pending: dict[str, Any] | None = None
     usage: dict[str, Any] = {}
 
     yield _sse({
         "type": "step",
-        "node": "df_start",
-        "title": "🦌 DeerFlow 2.0 智能体",
-        "detail": "正在理解问题并规划检索…",
+        "node": "df_start", "step_id": "request", "status": "running",
+        "title": "处理问题",
+        "detail": "正在准备本轮问答",
         "data": {},
     })
 
@@ -245,17 +257,25 @@ async def run_deerflow_stream(
         except Exception:
             return 0
         hits = data.get("results") or []
-        for h in hits:
+        ref_map: dict[int, dict[str, Any]] = {}
+        for idx, h in enumerate(hits, 1):
             title = h.get("document_title") or "未知文档"
             sig = title
+            existing = next((c for c in citations if c.get("document_title") == title), None)
             if sig in seen_docs:
+                ref_map[idx] = existing or {}
                 continue
             seen_docs.add(sig)
             cite: dict[str, Any] = {
                 "document_title": title,
+                "document_id": h.get("document_id") or "",
+                "segment_id": h.get("segment_id") or "",
+                "dataset_id": h.get("dataset_id") or "",
                 "page_number": h.get("page_number"),
                 "score": h.get("score"),
                 "content": h.get("content") or "",
+                "evidence_read": bool(h.get("content")),
+                "source": h.get("source") or "dify",
             }
             # 同步自钉钉知识库的 Dify 文档：携带钉钉原始链接，引用来源点击跳钉钉预览
             if h.get("url"):
@@ -263,6 +283,9 @@ async def run_deerflow_stream(
                 cite["node_id"] = h.get("node_id") or ""
                 cite["source"] = h.get("source") or "dingtalk"
             citations.append(cite)
+            cite["citation_id"] = len(citations)
+            ref_map[idx] = cite
+        ref_maps.append(ref_map)
         return len(hits)
 
     def _absorb_dingtalk(content: str) -> int:
@@ -279,7 +302,7 @@ async def run_deerflow_stream(
             if sig in seen_docs:
                 continue
             seen_docs.add(sig)
-            citations.append({
+            cite = {
                 "document_title": f"[钉钉] {title}",
                 "page_number": None,
                 "score": None,
@@ -288,7 +311,9 @@ async def run_deerflow_stream(
                 "node_id": h.get("node_id") or "",
                 "extension": h.get("extension") or "",
                 "source": "dingtalk",
-            })
+            }
+            citations.append(cite)
+            cite["citation_id"] = len(citations)
         return len(hits)
 
     def _absorb_read_doc(content: str) -> None:
@@ -302,22 +327,24 @@ async def run_deerflow_stream(
         if not title:
             return
         sig = f"dt:{title}"
-        if sig in seen_docs:
+        existing = next((c for c in citations if c.get("document_title") == f"[钉钉] {title}"), None)
+        if existing is not None:
+            existing.update(content=data.get("content") or "", evidence_read=bool(data.get("content")))
             return
         seen_docs.add(sig)
-        citations.append({
-            "document_title": f"[钉钉] {title}",
-            "page_number": None,
-            "score": None,
-            "content": data.get("url") or "",
-            "url": data.get("url") or "",
-            "node_id": data.get("node_id") or "",
-            "extension": "",
-            "source": "dingtalk",
-        })
+        citations.append({"document_title": f"[钉钉] {title}", "page_number": None,
+                          "score": None, "content": data.get("content") or "",
+                          "evidence_read": bool(data.get("content")), "url": data.get("url") or "",
+                          "node_id": data.get("node_id") or "", "extension": "", "source": "dingtalk",
+                          "citation_id": len(citations) + 1})
+
+    titles = {"knowledge_search": "知识库检索", "dingtalk_search": "钉钉文档定位",
+              "dingtalk_read_doc": "读取文档正文", "dingtalk_browse": "浏览钉钉目录",
+              "knowledge_context_expand": "展开相关上下文", "task": "子任务处理",
+              "ask_clarification": "等待确认"}
 
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(connect=5.0, read=300.0, write=30.0, pool=10.0)) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(connect=5.0, read=660.0, write=30.0, pool=10.0)) as client:
             async with client.stream("POST", f"{DEERFLOW_URL}/v1/chat/stream", json=payload) as resp:
                 if resp.status_code != 200:
                     body = await resp.aread()
@@ -336,76 +363,104 @@ async def run_deerflow_stream(
                         except json.JSONDecodeError:
                             continue
                         etype = evt.get("type")
+                        if etype == "ready":
+                            if run_id is None and evt.get("thread_id") == thread_id:
+                                run_id = evt.get("run_id")
+                                yield _sse({"type": "step", "step_id": "request", "status": "completed",
+                                            "title": "处理问题", "detail": "已接收本轮问题"})
+                            continue
+                        if etype not in {"error", "cancelled"} and (not run_id or evt.get("run_id") != run_id
+                                                  or evt.get("thread_id") != thread_id):
+                            continue
                         if etype == "tool_start":
                             name = evt.get("name") or ""
                             args = evt.get("args") or {}
+                            call_id = evt.get("call_id")
+                            if not call_id or call_id in tool_calls:
+                                continue
+                            tool_calls[call_id] = name
+                            detail = str(args.get("query") or args.get("title") or args.get("directory") or "处理中")[:100]
                             if name == "knowledge_search":
                                 search_count += 1
-                                q = str(args.get("query") or "")[:60]
-                                detail = f"第 {search_count} 次检索：{q}" if search_count > 1 else f"检索知识库：{q}"
-                                yield _sse({"type": "step", "node": "retrieve",
-                                            "title": "📚 知识检索", "detail": detail,
-                                            "data": {"query": args.get("query", "")}})
-                            elif name == "dingtalk_search":
-                                q = str(args.get("query") or "")[:60]
-                                yield _sse({"type": "step", "node": "dingtalk_search",
-                                            "title": "📌 钉钉知识库检索", "detail": f"检索钉钉文档：{q}",
-                                            "data": {"query": args.get("query", "")}})
-                            elif name == "dingtalk_read_doc":
-                                title = str(args.get("title") or args.get("node_id") or "钉钉文档")[:50]
-                                yield _sse({"type": "step", "node": "dingtalk_read",
-                                            "title": "📖 读取钉钉文档", "detail": f"正在读取：{title}",
-                                            "data": {"title": args.get("title", "")}})
-                            elif name == "task":
-                                desc = str(args.get("description") or args.get("prompt") or "子任务")[:80]
-                                yield _sse({"type": "step", "node": "subagent",
-                                            "title": "🧩 子任务派发", "detail": desc, "data": {}})
-                            elif name == "ask_clarification":
+                            elif name in {"dingtalk_search", "dingtalk_browse"}:
+                                ding_calls += 1
+                            yield _sse({"type": "step", "step_id": call_id, "status": "running",
+                                        "title": titles.get(name, "处理资料"), "detail": detail})
+                            if name == "ask_clarification":
                                 q = str(args.get("question") or args.get("clarification") or "需要确认是否继续")
                                 opts = [str(o) for o in (args.get("options") or []) if str(o).strip()]
-                                choice_pending = {"question": q, "options": opts}
-                                yield _sse({"type": "step", "node": "clarify",
-                                            "title": "🙋 等待确认",
-                                            "detail": q[:80], "data": {}})
-                                # 选择按钮卡片：前端渲染选项，用户点选后以 action=continue/stop 续跑
-                                yield _sse({"type": "choice", "question": q, "options": opts})
+                                choice_pending = {"question": q, "options": opts,
+                                    "choice_kind": args.get("choice_kind", "clarification"),
+                                    "evidence_summary": args.get("evidence_summary", ""),
+                                    "confidence": args.get("confidence"),
+                                    "confidence_reason": args.get("confidence_reason", "")}
+                                yield _sse({"type": "choice", **choice_pending})
                         elif etype == "tool_end":
                             name = evt.get("name") or ""
-                            if name == "knowledge_search":
+                            call_id = evt.get("call_id")
+                            if not call_id:
+                                continue
+                            try:
+                                content = json.loads(evt.get("content") or "{}")
+                            except (ValueError, TypeError):
+                                content = {}
+                            if not isinstance(content, dict):
+                                content = {}
+                            failed = evt.get("status") == "error" or bool(content.get("error"))
+                            detail = "处理失败" if failed else "处理完成"
+                            if failed:
+                                warnings.append(f"{titles.get(name, '资料处理')}失败")
+                            elif name == "knowledge_search":
                                 n = _absorb_retrieval(evt.get("content") or "")
-                                yield _sse({"type": "step", "node": "retrieved",
-                                            "title": "✅ 检索完成",
-                                            "detail": f"本次召回 {n} 段，累计检索 {len(citations)} 篇文档",
-                                            "data": {"hit_count": n}})
+                                detail = f"找到 {n} 段参考内容"
                             elif name == "dingtalk_search":
                                 n = _absorb_dingtalk(evt.get("content") or "")
-                                yield _sse({"type": "step", "node": "dingtalk_done",
-                                            "title": "✅ 钉钉检索完成",
-                                            "detail": f"找到 {n} 个相关文档",
-                                            "data": {"hit_count": n}})
+                                ding_hits += n
+                                detail = f"找到 {n} 个候选文档"
                             elif name == "dingtalk_read_doc":
                                 _absorb_read_doc(evt.get("content") or "")
-                                yield _sse({"type": "step", "node": "dingtalk_read_done",
-                                            "title": "✅ 文档读取完成",
-                                            "detail": "已获取正文内容", "data": {}})
-                            elif name == "task":
-                                yield _sse({"type": "step", "node": "subagent_done",
-                                            "title": "📥 子任务返回", "detail": "子智能体调研结果已汇总",
-                                            "data": {}})
+                                ding_hits += bool(content.get("content"))
+                                detail = "已获取正文" if content.get("content") else "未获取到正文"
+                            elif name == "dingtalk_browse":
+                                detail = "目录读取完成"
+                            elif name == "knowledge_context_expand":
+                                detail = "相关上下文已展开"
+                            yield _sse({"type": "step", "step_id": call_id,
+                                        "status": "failed" if failed else "completed",
+                                        "title": titles.get(name, "处理资料"), "detail": detail})
+                            if name in {"knowledge_search", "dingtalk_search", "dingtalk_read_doc"}:
+                                yield _sse({"type": "citations", "citations": [dict(c) for c in citations]})
+                        elif etype == "phase":
+                            phase = evt.get("phase")
+                            if isinstance(phase, str) and phase.startswith("model:"):
+                                completed = evt.get("status") == "completed"
+                                yield _sse({"type": "step", "step_id": phase, "status": "completed" if completed else "running",
+                                            "title": "分析与整理", "detail": ("已确定下一步检索" if evt.get("has_tools") else "已整理本轮结论") if completed else "正在处理当前问题及可用资料"})
+                            elif phase == "context":
+                                yield _sse({"type": "step", "step_id": "context", "status": "completed",
+                                            "title": "整理会话上下文", "detail": "历史背景已整理"})
                         elif etype == "ai_text":
-                            text = evt.get("content") or ""
-                            if text.strip():
-                                answer_parts.append(text)
+                            text = str(evt.get("text") or "")
+                            if text:
                                 yield _sse({"type": "answer_delta", "delta": text})
+                        elif etype == "ai_discard":
+                            # 答案轮被判定为工具过渡轮：清空前端已流出的临时文本
+                            yield _sse({"type": "answer_delta", "delta": "", "reset": True})
+                        elif etype == "answer_final":
+                            if evt.get("source_node") == "model" and evt.get("message_id"):
+                                # 权威正文替换暂存结果；不拼接来自不同模型调用的内容。
+                                answer_parts = [evt.get("content") or ""]
                         elif etype == "cancelled":
                             # 用户手动中断（停止按钮/断连）：立即结束，不再生成追问/最终结果
                             logger.info("deerflow stream cancelled by user: %s", thread_id)
                             return
                         elif etype == "error":
+                            warnings.append(f"DeerFlow 智能体执行失败：{evt.get('message', '未知错误')}")
                             yield _sse({"type": "config_error", "code": "agent_failed",
                                         "message": f"🤖 DeerFlow 智能体执行失败：{evt.get('message', '未知错误')}"})
                             return
                         elif etype == "end":
+                            saw_end = True
                             u = evt.get("usage") or {}
                             if isinstance(u, dict):
                                 usage = {
@@ -424,23 +479,72 @@ async def run_deerflow_stream(
 
     # 限时探索暂停：智能体通过 ask_clarification 询问用户是否继续。
     # 本轮不下发 final（无答案），前端渲染选择按钮；用户点选后发起新请求（action=continue/stop）续跑。
-    if choice_pending is not None and not answer:
+    if choice_pending is not None and not answer and saw_end:
         # 暂停前落盘本流已累积的引用，供续跑流 seed（否则续跑后 final citations 为空）
         _store_thread_cites(thread_id, citations)
         yield _sse({
             "type": "choice_pause",
-            "question": choice_pending["question"],
-            "options": choice_pending["options"],
+            **choice_pending,
+            "citations": citations,
             "usage": usage,
         })
+        return
+
+    if not saw_end or not answer:
+        yield _sse({"type": "config_error", "code": "answer_incomplete",
+                    "message": "本轮回答未完整生成，请重试。"})
         return
 
     follow_ups = await _generate_follow_ups(query, answer, llm_config, agent_config)
 
     # 仅保留答案中真正引用到的文档：按文档标题/显著子串是否出现在答案中过滤
-    # 先落盘（未过滤的全量列表，供续跑周期累积），再过滤出答案真正引用的文档用于展示
+    # 先落盘（未过滤的全量列表，供续跑周期累积），再重建文档级引用：
+    # 答案中的 [n] 是 knowledge_search 单次调用内序号，按出现顺序重映射为文档级编号；
+    # 同一文档的多个 ref 合并为同一编号；无法解析的序号标记直接删除；
+    # 仅以标题提及（如钉钉"可参阅"）而无序号的文档追加在后。
     _store_thread_cites(thread_id, citations)
-    citations = _filter_cited_citations(answer, citations)
+    ordered: list[dict[str, Any]] = []
+
+    def _resolve_ref(n: int) -> dict[str, Any] | None:
+        for cm in reversed(ref_maps):
+            if n in cm:
+                return cm[n] or None
+        return None
+
+    def _repl(m: "re.Match") -> str:
+        cite = _resolve_ref(int(m.group(1)))
+        if not cite or not cite.get("document_title"):
+            return ""
+        if cite not in ordered:
+            ordered.append(cite)
+        return f"[{ordered.index(cite) + 1}]"
+
+    # 无条件重映射：本轮有检索时把单次调用内 ref 序号重映射为文档级编号；
+    # 本轮无检索（答案复用历史结论或模型自有知识）时 [n] 全部无法解析、直接删除，
+    # 避免前端出现没有引用区对应的悬空 [1]。
+    answer = re.sub(r"\[(\d+)\]", _repl, answer)
+    for c in _filter_cited_citations(answer, citations):
+        if c not in ordered:
+            ordered.append(c)
+    citations = ordered
+    for i, c in enumerate(citations, 1):
+        c["citation_id"] = i
+        c.setdefault("text", c.get("content", ""))
+        # 无服务端硬核验（提示词约束口径）：引用摘录取召回原文片段本身
+        c.setdefault("quote", c.get("content", ""))
+
+    searched = search_count > 0 or ding_calls > 0
+    if citations:
+        status = "answered"
+    elif searched:
+        status = "insufficient"
+    else:
+        status = "answered"  # 未触发检索的会话性回复（问候/闲聊）
+    reused = not searched and any(c.get("evidence_read") for c in citations)
+    if reused:
+        yield _sse({"type": "step", "step_id": "reuse", "status": "completed",
+                    "title": "复用本会话资料", "detail": "引用本会话此前已读取的正文，本轮未重新检索"})
+    dws_state = "hit" if ding_hits else ("searched" if ding_calls else "not_needed")
 
     yield _sse({
         "type": "final",
@@ -449,10 +553,16 @@ async def run_deerflow_stream(
             "citations": citations,
             "follow_ups": follow_ups,
             "classification": "deerflow2",
-            "sufficiency": {},
+            "engine": "deerflow",
+            "answer_status": status,
+            "sufficiency": {
+                "sufficient": status == "answered",
+                "missing": "" if citations else ("未检索到足以回答的原文" if searched else ""),
+            },
+            "quality": {"verification": "unverified", "dws": dws_state, "warnings": warnings},
             "rewritten_query": query,
             "last_query": query,
-            "last_answer": answer,
+            "last_answer": answer if status == "answered" else "",
             "usage": usage,
         },
     })

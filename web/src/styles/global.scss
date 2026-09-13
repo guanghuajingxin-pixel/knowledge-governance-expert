@@ -30,3 +30,75 @@ body {
   --el-color-danger: #f56c6c;
   --el-color-info: #909399;
 }
+
+/*
+ * el-table 表头字体统一规范（全站）
+ * 各页面表格混用 size="small"（表头 12px）与默认尺寸（表头 14px），
+ * 这里统一为 13px / 600，不区分尺寸与页面。
+ */
+.el-table th.el-table__cell {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/*
+ * 统一页面框架（kge-page）
+ *
+ * 所有业务页以该类为根，与外部门户框架（侧边栏 + 顶栏 + 门户页签）按比例自适应：
+ * - 宽度自适应：不使用 max-width 定宽居中容器，内容铺满整个内容区；
+ * - 高度自适应：根节点撑满内容区剩余高度；页内签（根节点直属 el-tabs）页签栏固定顶部、
+ *   页签内容区占剩余高度，每个 pane 内部自滚，避免整页滚动导致页签栏滚出视口；
+ * - kge-page--scroll：无页签的长文页（说明/表单/配置）在页面根部整体滚动。
+ *
+ * 列表型页签页配合 kge-fill 约定：组件根节点 height:100% + flex 纵向布局，
+ * 操作栏/筛选栏固定（flex-shrink:0），表格用 .table-fill 包裹并传 height="100%"
+ * 使表体内部滚动、分页吸底。
+ */
+.kge-page {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 16px 20px 20px;
+}
+
+.kge-page--scroll {
+  overflow: auto;
+}
+
+.kge-page > .el-tabs {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.kge-page > .el-tabs > .el-tabs__header {
+  flex-shrink: 0;
+}
+
+.kge-page > .el-tabs > .el-tabs__content {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.kge-page > .el-tabs > .el-tabs__content > .el-tab-pane {
+  height: 100%;
+  min-height: 0;
+  overflow: auto;
+}
+
+/* 列表型页签组件：撑满 pane，表体内部滚动 */
+.kge-fill {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.kge-fill .table-fill {
+  flex: 1;
+  min-height: 0;
+}

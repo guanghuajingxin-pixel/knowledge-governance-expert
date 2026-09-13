@@ -72,43 +72,78 @@ _corp_id_cache: dict[str, Any] = {"corp_id": "", "expire_at": 0.0}
 _name_cache: dict[str, str] = {}
 # 最近一次全量遍历的请求统计（requests=成功的节点请求数，failed_folders=重试耗尽仍失败的目录数）
 _walk_info: dict[str, int] = {"requests": 0, "failed_folders": 0}
+# 运行时配置（DB settings 表）读取缓存：TTL 内复用，避免每个请求都为读配置占一条 DB 连接
+_RUNTIME_CFG_TTL = 30.0
+_runtime_cfg_cache: dict[str, float] = {"loaded_at": 0.0}
+# 知识库列表缓存：变动极少但被高频读取（页面挂载 + 后台遍历），TTL 内直接复用
+_WS_TTL = 60.0
+_ws_cache: dict[str, Any] = {"at": 0.0, "items": None}
+_ws_lock = asyncio.Lock()
+# 后台刷新单飞标记：缓存过期时只允许一个刷新任务在飞
+_ws_refresh: dict[str, bool] = {"running": False}
 
 
 # ===================== 配置 =====================
 def configure(app_key: str = "", app_secret: str = "", operator_union_id: str = "",
               robot_code: str = "") -> None:
     """注入钉钉配置（来自 DB settings 表，覆盖 .env）。空值不覆盖。"""
-    if app_key:
-        _injected["dingtalk_app_key"] = app_key
-    if app_secret:
-        _injected["dingtalk_app_secret"] = app_secret
-    if operator_union_id:
-        _injected["dingtalk_operator_union_id"] = operator_union_id
-    if robot_code:
-        _injected["dingtalk_robot_code"] = robot_code
+    incoming = {
+        "dingtalk_app_key": app_key,
+        "dingtalk_app_secret": app_secret,
+        "dingtalk_operator_union_id": operator_union_id,
+        "dingtalk_robot_code": robot_code,
+    }
+    # 凭证/操作人真的变了才清缓存：换人后知识库可见范围不同，旧 token 也不再适用
+    identity_keys = ("dingtalk_app_key", "dingtalk_app_secret", "dingtalk_operator_union_id")
+    changed = any(incoming[k] and _injected.get(k) != incoming[k] for k in identity_keys)
+    for k, v in incoming.items():
+        if v:
+            _injected[k] = v
+    if changed:
+        _token_cache["token"] = ""
+        _token_cache["expire_at"] = 0.0
+        _corp_id_cache["corp_id"] = ""
+        _corp_id_cache["expire_at"] = 0.0
+        invalidate_workspaces_cache()
 
 
 async def sync_runtime_config() -> None:
-    """从 DB settings 表读取钉钉配置并即时生效（供知识中心/治理标准调用）。"""
+    """从 DB settings 表读取钉钉配置并即时生效（供知识中心/治理标准调用）。
+
+    带 30s TTL 缓存：运营看板/治理标准等接口每次请求都会调用本函数，
+    若每次都开一条新会话跑 SQL，会在连接池里额外占坑（曾是把池抽干的帮凶之一）。
+    「系统配置」页保存凭证后调用 invalidate_runtime_config() 立即生效，不受 TTL 影响。
+    """
     global STANDARDS_BASE_ID, STANDARDS_SHEET_ID
+    now = time.monotonic()
+    if _runtime_cfg_cache["loaded_at"] and now - _runtime_cfg_cache["loaded_at"] < _RUNTIME_CFG_TTL:
+        return
+
     from sqlalchemy import select
-    from kb_common.database import SessionLocal
+    from kb_common.database import short_session
     from kb_common.models import Setting
 
     keys = ["dingtalk_app_key", "dingtalk_app_secret", "dingtalk_operator_union_id",
             "dingtalk_robot_code"]
-    vals: dict[str, str] = {}
-    async with SessionLocal() as s:
-        for k in keys:
-            row = (await s.execute(select(Setting).where(Setting.key == k))).scalar_one_or_none()
-            vals[k] = row.value if row and row.value else ""
+    vals: dict[str, str] = {k: "" for k in keys}
+    async with short_session() as s:
+        rows = (await s.execute(select(Setting).where(Setting.key.in_(keys)))).scalars().all()
+    for row in rows:
+        if row.value:
+            vals[row.key] = str(row.value)
     configure(vals["dingtalk_app_key"], vals["dingtalk_app_secret"],
               vals["dingtalk_operator_union_id"], vals["dingtalk_robot_code"])
+    _runtime_cfg_cache["loaded_at"] = now
 
     import os
     # 空环境变量不应覆盖内置默认表；这样 .env.example 中保留的空配置也安全。
     STANDARDS_BASE_ID = os.getenv("DINGTALK_STANDARDS_BASE_ID", "").strip() or STANDARDS_BASE_ID
     STANDARDS_SHEET_ID = os.getenv("DINGTALK_STANDARDS_SHEET_ID", "").strip() or STANDARDS_SHEET_ID
+
+
+def invalidate_runtime_config() -> None:
+    """清空运行时配置缓存：系统配置页保存钉钉凭证后调用，保证下一次读取即拿到新值。"""
+    _runtime_cfg_cache["loaded_at"] = 0.0
 
 
 def _cfg(key: str) -> str:
@@ -161,15 +196,22 @@ def _headers(token: str) -> dict[str, str]:
 
 
 async def _request_with_retry(method: str, url: str, *, client: httpx.AsyncClient,
+                              max_retry: int | None = None,
                               **kwargs) -> httpx.Response:
     """带限流退避重试的 HTTP 请求。
 
     对限流（403/429）、服务端错误（5xx）、超时做指数退避重试；
     对明确的权限不足（permissionDenied/no.priviledge，body 可辨）不重试。
+
+    max_retry：重试次数预算。默认 5 次适合后台全量遍历（可以慢慢等）；
+    页面挂载时同步等待的轻量接口必须传小值（如 2）——5 次指数退避
+    (1+2+4+8+16s) 叠加每次最长 60s 超时，单次调用最坏能耗掉几分钟，
+    实测把「知识治理 / 钉钉知识同步」页卡住 50 秒。
     """
+    attempts = max_retry if max_retry and max_retry > 0 else _MAX_RETRY
     last_exc: Exception | None = None
     resp: httpx.Response | None = None
-    for attempt in range(_MAX_RETRY):
+    for attempt in range(attempts):
         try:
             resp = await client.request(method, url, **kwargs)
             # 限流 / 服务端错误 → 退避重试
@@ -182,7 +224,7 @@ async def _request_with_retry(method: str, url: str, *, client: httpx.AsyncClien
                     resp.raise_for_status()
                 delay = _RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 0.5)
                 logger.warning("钉钉请求被限流/错误 %s，%.1fs 后重试(%d/%d): %s",
-                               resp.status_code, delay, attempt + 1, _MAX_RETRY, url)
+                               resp.status_code, delay, attempt + 1, attempts, url)
                 await asyncio.sleep(delay)
                 continue
             return resp
@@ -197,8 +239,13 @@ async def _request_with_retry(method: str, url: str, *, client: httpx.AsyncClien
 
 
 # ===================== 知识库 =====================
-async def list_workspaces() -> list[dict[str, Any]]:
-    """获取操作人可见的知识库列表，自动分页。"""
+async def _list_workspaces_remote(timeout: float = 60.0,
+                                  max_retry: int | None = None) -> list[dict[str, Any]]:
+    """真正去钉钉拉知识库列表（自动分页，受全局节流约束）。
+
+    timeout / max_retry：后台刷新用默认宽松值；用户正在等的冷启动路径传小值，
+    避免钉钉抖动时把页面卡住几十秒。
+    """
     operator = _operator_id()
     if not operator:
         raise RuntimeError("钉钉操作人 UnionId 未配置")
@@ -206,10 +253,11 @@ async def list_workspaces() -> list[dict[str, Any]]:
     url = f"{API_BASE}/v2.0/wiki/workspaces"
     params = {"operatorId": operator, "maxResults": 30}
     out: list[dict[str, Any]] = []
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=timeout) as client:
         while True:
             await _throttle()
-            resp = await _request_with_retry("GET", url, client=client, params=params, headers=_headers(token))
+            resp = await _request_with_retry("GET", url, client=client, max_retry=max_retry,
+                                             params=params, headers=_headers(token))
             resp.raise_for_status()
             data = resp.json()
             out.extend(data.get("workspaces") or [])
@@ -220,6 +268,62 @@ async def list_workspaces() -> list[dict[str, Any]]:
     return out
 
 
+def _schedule_ws_refresh() -> None:
+    """后台单飞刷新知识库列表缓存：失败就保留旧数据，下次访问再试。"""
+    if _ws_refresh["running"]:
+        return
+    _ws_refresh["running"] = True
+
+    async def _run() -> None:
+        try:
+            items = await _list_workspaces_remote()
+            _ws_cache["at"] = time.monotonic()
+            _ws_cache["items"] = items
+        except Exception as e:  # noqa: BLE001 — 刷新失败不影响已缓存数据的展示
+            logger.warning("后台刷新钉钉知识库列表失败，沿用旧缓存: %s", e)
+        finally:
+            _ws_refresh["running"] = False
+
+    try:
+        asyncio.get_running_loop().create_task(_run())
+    except RuntimeError:      # 不在事件循环里（同步调用方）——放弃本次刷新
+        _ws_refresh["running"] = False
+
+
+async def list_workspaces(use_cache: bool = True) -> list[dict[str, Any]]:
+    """获取操作人可见的知识库列表（60s 缓存 + 过期后台刷新 + 冷启动单飞）。
+
+    知识库列表变动极少，但「钉钉知识同步」页每次挂载、后台全量遍历都会读它。
+    缓存过期时**先返回旧数据、再后台刷新**：钉钉限流/抖动（实测单次调用可达 50s）
+    不会再变成用户界面上的等待。只有进程内完全没有缓存时才同步等一次，
+    且用 15s 超时 + 2 次重试的短预算兜底。
+    需要强制取最新时传 use_cache=False，或在钉钉配置变更后调 invalidate_workspaces_cache()。
+    """
+    if not use_cache:
+        return await _list_workspaces_remote()
+
+    items = _ws_cache["items"]
+    if items is not None:
+        if time.monotonic() - _ws_cache["at"] >= _WS_TTL:
+            _schedule_ws_refresh()      # 过期：旧值先顶上，后台悄悄刷新
+        return items
+
+    # 冷启动没有任何缓存：只能同步等一次（短超时 + 小重试预算），并发请求共用同一次拉取
+    async with _ws_lock:
+        if _ws_cache["items"] is not None:
+            return _ws_cache["items"]
+        fetched = await _list_workspaces_remote(timeout=15.0, max_retry=2)
+        _ws_cache["at"] = time.monotonic()
+        _ws_cache["items"] = fetched
+        return fetched
+
+
+def invalidate_workspaces_cache() -> None:
+    """清空知识库列表缓存（钉钉操作人/凭证变更后调用）。"""
+    _ws_cache["at"] = 0.0
+    _ws_cache["items"] = None
+
+
 async def list_nodes(parent_node_id: str) -> list[dict[str, Any]]:
     """获取某父节点下的直接子节点，自动分页。"""
     operator = _operator_id()
@@ -227,7 +331,7 @@ async def list_nodes(parent_node_id: str) -> list[dict[str, Any]]:
     url = f"{API_BASE}/v2.0/wiki/nodes"
     params = {"parentNodeId": parent_node_id, "operatorId": operator, "maxResults": 50}
     out: list[dict[str, Any]] = []
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=60.0) as client:
         while True:
             await _throttle()
             resp = await _request_with_retry("GET", url, client=client,
@@ -333,18 +437,8 @@ async def download_document(node_id: str) -> tuple[bytes, str]:
 
         # 3. 从 OSS 下载文件内容
         resp = await client.get(urls[0], headers=dl_headers, timeout=120.0)
-        resp.raise_for_status()
-        content = resp.content
-
-    # 从 OSS 路径解析文件名
-    filename = ""
-    try:
-        from urllib.parse import urlparse, unquote
-        path = urlparse(urls[0]).path
-        filename = unquote(path.rsplit("/", 1)[-1])
-    except Exception:
-        filename = ""
-    return content, filename
+        from .source_integrity import downloaded_file
+        return downloaded_file(resp, urls[0])
 
 
 async def _walk_workspace_files(workspace: dict, sem: asyncio.Semaphore) -> list[dict]:
@@ -439,7 +533,7 @@ async def _get_org_storage_used_api() -> int:
     corp_id = await get_corp_id()
     token = await _get_access_token()
     url = f"{API_BASE}/v1.0/storage/orgs/{corp_id}"
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=60.0) as client:
         try:
             resp = await _request_with_retry(
                 "GET", url, client=client,
@@ -549,7 +643,7 @@ async def get_node_stats_via_cli(node_id: str) -> dict[str, int]:
         dws, "drive", "stats", "--node", str(node_id), "-f", "json",
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     try:
-        out, err = await asyncio.wait_for(proc.communicate(), timeout=30)
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=60)
     except asyncio.TimeoutError:
         proc.kill()
         raise RuntimeError("dws drive stats 调用超时")
@@ -684,11 +778,96 @@ async def send_text_message(user_ids: list[str], content: str) -> dict:
             return {}
 
 
+# ===================== 免登（H5 微应用） =====================
+async def get_user_info_by_code(code: str) -> dict:
+    """免登：authCode → 员工信息 {userid, name, unionid}。
+
+    POST https://oapi.dingtalk.com/topapi/v2/user/getuserinfo
+    需应用开通「通讯录个人信息读权限」。失败抛 RuntimeError（调用方转 401）。
+    """
+    token = await _get_access_token()
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.post(f"{OAPI_BASE}/topapi/v2/user/getuserinfo",
+                                 params={"access_token": token}, json={"code": code})
+        data = resp.json()
+    if data.get("errcode") != 0:
+        raise RuntimeError(f"钉钉免登失败(errcode={data.get('errcode')})：{data.get('errmsg')}")
+    r = data.get("result") or {}
+    userid = (r.get("userid") or "").strip()
+    if not userid:
+        raise RuntimeError(f"钉钉免登未返回 userid：{data}")
+    return {"userid": userid, "name": (r.get("name") or "").strip(),
+            "unionid": (r.get("unionid") or "").strip()}
+
+
+# ===================== 机器人回复（问答场景） =====================
+async def reply_session_webhook(webhook: str, title: str, text: str) -> None:
+    """通过消息回调自带的 sessionWebhook 回复 markdown（单聊/群 @ 通用）。"""
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.post(webhook, json={
+            "msgtype": "markdown",
+            "markdown": {"title": title, "text": text},
+        })
+        resp.raise_for_status()
+
+
+async def send_markdown_message(user_ids: list[str], title: str, text: str) -> dict:
+    """企业内部机器人单聊 markdown（msgKey=sampleMarkdown），sessionWebhook 失效时的兜底通道。"""
+    import json as _json
+    robot = _robot_code()
+    if not robot:
+        raise RuntimeError("钉钉 robotCode 未配置（系统配置 → 钉钉设置）")
+    if not user_ids:
+        raise RuntimeError("收件人为空，无法发送")
+    token = await _get_access_token()
+    url = f"{API_BASE}/v1.0/robot/oToMessages/send"
+    body = {"robotCode": robot, "userIds": user_ids, "msgKey": "sampleMarkdown",
+            "msgParam": _json.dumps({"title": title, "text": text}, ensure_ascii=False)}
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        await _throttle()
+        resp = await _request_with_retry("POST", url, client=client, headers=_headers(token), json=body)
+        if resp.status_code != 200:
+            raise RuntimeError(f"钉钉机器人单聊发送失败({resp.status_code})：{(resp.text or '')[:200]}")
+        try:
+            return resp.json() or {}
+        except Exception:
+            return {}
+
+
+async def send_group_markdown(open_conversation_id: str, title: str, text: str) -> dict:
+    """企业内部机器人向群会话发 markdown（robot/groupMessages/send），群聊兜底通道。"""
+    import json as _json
+    robot = _robot_code()
+    if not robot:
+        raise RuntimeError("钉钉 robotCode 未配置（系统配置 → 钉钉设置）")
+    if not open_conversation_id:
+        raise RuntimeError("群会话 ID 为空，无法发送")
+    token = await _get_access_token()
+    url = f"{API_BASE}/v1.0/robot/groupMessages/send"
+    body = {"robotCode": robot, "openConversationId": open_conversation_id,
+            "msgKey": "sampleMarkdown",
+            "msgParam": _json.dumps({"title": title, "text": text}, ensure_ascii=False)}
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        await _throttle()
+        resp = await _request_with_retry("POST", url, client=client, headers=_headers(token), json=body)
+        if resp.status_code != 200:
+            raise RuntimeError(f"钉钉机器人群聊发送失败({resp.status_code})：{(resp.text or '')[:200]}")
+        try:
+            return resp.json() or {}
+        except Exception:
+            return {}
+
+
 # ===================== AI 表格（多维表） =====================
-async def list_aitable_records(base_id: str, sheet_id: str) -> list[dict]:
+async def list_aitable_records(base_id: str, sheet_id: str, timeout: float = 20.0,
+                               max_retry: int = 2) -> list[dict]:
     """读取 AI 表格（多维表）指定数据表的全部记录，自动分页。
 
     返回 [{id, fields: {字段名: 值, ...}}, ...]。需「AI 表格应用读权限」。
+
+    timeout/max_retry 默认取「交互接口」的短预算（20s × 2 次）：目前唯一调用方是
+    治理标准页的同步等待接口，若沿用后台遍历的 60s × 5 次退避，
+    一次钉钉限流就会变成界面上几十秒的白屏。
     """
     if not base_id or not sheet_id:
         raise RuntimeError(
@@ -701,9 +880,9 @@ async def list_aitable_records(base_id: str, sheet_id: str) -> list[dict]:
     params = {"operatorId": operator}
     body: dict[str, Any] = {"maxResults": 100}
     records: list[dict] = []
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=timeout) as client:
         while True:
-            resp = await _request_with_retry("POST", url, client=client,
+            resp = await _request_with_retry("POST", url, client=client, max_retry=max_retry,
                                              params=params, json=body, headers=_headers(token))
             resp.raise_for_status()
             data = resp.json()

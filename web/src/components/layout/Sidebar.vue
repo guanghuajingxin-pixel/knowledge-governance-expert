@@ -3,7 +3,8 @@ import { useRoute, useRouter } from 'vue-router'
 import { useAppStore } from '@/stores/app'
 import { useUserStore } from '@/stores/user'
 import * as Icons from '@element-plus/icons-vue'
-import { computed, ref } from 'vue'
+import { computed, ref, onMounted, onUnmounted } from 'vue'
+import { getMenuVisibility, getSiteBranding } from '@/api/settings'
 
 const route = useRoute()
 const router = useRouter()
@@ -12,6 +13,41 @@ const userStore = useUserStore()
 
 const userRole = computed(() => userStore.userInfo?.role)
 
+// 菜单显示配置：后端配置的隐藏菜单路径列表（默认空 = 全部显示）
+const hiddenMenus = ref<string[]>([])
+// 站点外观：名称与 Logo（系统配置可改；空 = 默认「知识治理专家」+ 默认图标）
+const siteName = ref('')
+const siteLogo = ref('')
+async function loadSiteBranding() {
+  try {
+    const site = await getSiteBranding()
+    siteName.value = site.site_name || ''
+    siteLogo.value = site.site_logo || ''
+  } catch {
+    // 站点外观读取失败时保持默认
+  }
+}
+
+function onBrandingChanged() {
+  loadSiteBranding()
+}
+
+onMounted(async () => {
+  // 两个请求互不依赖，并发拉取：侧边栏是首屏必现内容，串行会白等一个来回
+  await Promise.all([
+    getMenuVisibility()
+      .then((res) => { hiddenMenus.value = res.hidden || [] })
+      .catch(() => { hiddenMenus.value = [] }),  // 读取失败时回退为全部显示，不阻塞侧边栏
+    loadSiteBranding(),
+  ])
+  // 系统配置页保存站点名称/图标后即时刷新（免刷新页面）
+  window.addEventListener('site-branding-changed', onBrandingChanged)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('site-branding-changed', onBrandingChanged)
+})
+
 interface MenuItem {
   path: string
   title: string
@@ -19,6 +55,7 @@ interface MenuItem {
   group: string
   parent?: string
   roles?: string[]
+  menuOrder?: number
 }
 
 interface MenuGroup {
@@ -39,6 +76,7 @@ const allMenuItems = computed<MenuItem[]>(() =>
       group: (r.meta!.group as string) || 'feature',
       parent: r.meta!.parent as string | undefined,
       roles: r.meta!.roles as string[] | undefined,
+      menuOrder: r.meta!.menuOrder as number | undefined,
     })),
 )
 
@@ -52,9 +90,11 @@ function filterByRole(items: MenuItem[]): MenuItem[] {
   })
 }
 
-// 功能区：feature 组（含二级分组）
+// 功能区：feature 组（含二级分组，受菜单显示配置控制）
 const featureMenuGroups = computed<MenuGroup[]>(() => {
-  const items = filterByRole(allMenuItems.value.filter((i) => i.group === 'feature'))
+  const items = filterByRole(allMenuItems.value.filter(
+    (i) => i.group === 'feature' && !hiddenMenus.value.includes(i.path),
+  ))
   const groupMap = new Map<string, MenuGroup>()
   const parents: MenuItem[] = []
   const children: MenuItem[] = []
@@ -77,20 +117,25 @@ const featureMenuGroups = computed<MenuGroup[]>(() => {
     })
   }
 
-  // 子项归入对应父分组
+  // 子项归入对应父分组（menuOrder 显式排序，未设置时保持路由顺序）
   for (const child of children) {
     if (child.parent && groupMap.has(child.parent)) {
       groupMap.get(child.parent)!.children.push(child)
     }
+  }
+  for (const group of groupMap.values()) {
+    group.children.sort((a, b) => (a.menuOrder ?? 999) - (b.menuOrder ?? 999))
   }
 
   // 没有子项的分组降级为单独项（children 为空时仍以分组形式展示但不展开）
   return Array.from(groupMap.values())
 })
 
-// 所有独立功能菜单项（没有 parent 的）
+// 所有独立功能菜单项（没有 parent 的，受菜单显示配置控制）
 const standaloneFeatureItems = computed(() => {
-  const items = filterByRole(allMenuItems.value.filter((i) => i.group === 'feature' && !i.parent))
+  const items = filterByRole(allMenuItems.value.filter(
+    (i) => i.group === 'feature' && !i.parent && !hiddenMenus.value.includes(i.path),
+  ))
   return items.filter((item) => !featureMenuGroups.value.some((g) => g.key === item.path))
 })
 
@@ -144,9 +189,10 @@ const aboutUrl = `${import.meta.env.BASE_URL}about.html`
   <aside class="sidebar" :class="{ collapsed: appStore.sidebarCollapsed }">
     <div class="logo" @click="router.push('/chat')">
       <div class="logo-icon">
-        <el-icon :size="22" color="#fff"><Icons.Stamp /></el-icon>
+        <img v-if="siteLogo" :src="siteLogo" alt="站点图标" />
+        <el-icon v-else :size="22" color="#fff"><Icons.Stamp /></el-icon>
       </div>
-      <span v-show="!appStore.sidebarCollapsed" class="logo-text">知识治理专家</span>
+      <span v-show="!appStore.sidebarCollapsed" class="logo-text">{{ siteName || '知识治理专家' }}</span>
     </div>
 
     <nav class="menu-container">
@@ -160,10 +206,11 @@ const aboutUrl = `${import.meta.env.BASE_URL}about.html`
             v-if="group.children.length > 0"
             class="menu-group-wrapper"
           >
+            <!-- 父级行：点击整行展开/收起，右侧内嵌箭头指示状态 -->
             <div
               class="menu-item menu-item--parent"
               :class="{ active: isGroupActive(group.key) }"
-              @click="navigate(group.key)"
+              @click="toggleGroup(group.key)"
               @contextmenu.prevent
             >
               <span class="menu-icon">
@@ -172,16 +219,14 @@ const aboutUrl = `${import.meta.env.BASE_URL}about.html`
                 </el-icon>
               </span>
               <span v-show="!appStore.sidebarCollapsed" class="menu-title">{{ group.parentTitle }}</span>
+              <el-icon
+                v-show="!appStore.sidebarCollapsed"
+                class="menu-expand"
+                :class="{ expanded: isGroupExpanded(group.key) }"
+              >
+                <Icons.ArrowDown />
+              </el-icon>
             </div>
-            <!-- 展开箭头（点击切换子项显示） -->
-            <el-icon
-              v-show="!appStore.sidebarCollapsed"
-              class="menu-expand"
-              :class="{ expanded: isGroupExpanded(group.key) }"
-              @click.stop="toggleGroup(group.key)"
-            >
-              <Icons.ArrowDown />
-            </el-icon>
             <!-- 子项列表 -->
             <transition name="submenu">
               <div v-show="isGroupExpanded(group.key) && !appStore.sidebarCollapsed" class="submenu">
@@ -310,6 +355,12 @@ const aboutUrl = `${import.meta.env.BASE_URL}about.html`
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
+  overflow: hidden;
+}
+.logo-icon img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
 .logo-text {
@@ -375,7 +426,7 @@ const aboutUrl = `${import.meta.env.BASE_URL}about.html`
 }
 
 .menu-item--parent {
-  padding-right: 30px; /* 给展开箭头留空间 */
+  padding-right: 12px;
 }
 
 .menu-item--child {
@@ -413,23 +464,18 @@ const aboutUrl = `${import.meta.env.BASE_URL}about.html`
 }
 
 .menu-expand {
-  position: absolute;
-  right: 10px;
-  top: 50%;
-  transform: translateY(-50%);
+  margin-left: auto;
   font-size: 12px;
   color: #999;
-  cursor: pointer;
   padding: 4px;
   transition: transform 0.2s ease;
-  z-index: 1;
 }
 
 .menu-expand.expanded {
-  transform: translateY(-50%) rotate(180deg);
+  transform: rotate(180deg);
 }
 
-.menu-expand:hover {
+.menu-item--parent:hover .menu-expand {
   color: #2b6bff;
 }
 

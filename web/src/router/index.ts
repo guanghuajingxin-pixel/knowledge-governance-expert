@@ -9,6 +9,14 @@ const routes: RouteRecordRaw[] = [
     meta: { public: true },
   },
   {
+    // 独立问答页：全屏复用问答视图（会话历史+问答区），供新窗口/钉钉 H5 微应用接入
+    // hidden：不进侧边栏菜单（仅经新窗口按钮/独立地址/钉钉微应用进入）
+    path: '/qa',
+    name: 'StandaloneQA',
+    component: () => import('@/views/chat/index.vue'),
+    meta: { title: '智能问答', standalone: true, hidden: true },
+  },
+  {
     path: '/',
     component: () => import('@/layouts/AppLayout.vue'),
     redirect: '/chat',
@@ -23,13 +31,22 @@ const routes: RouteRecordRaw[] = [
       {
         path: 'hiagent',
         name: 'HiAgent',
-        component: () => import('@/views/hiagent/index.vue'),
+        component: () => import('@/views/embed-agent/index.vue'),
+        props: { platform: 'hiagent' },
         meta: { title: 'HiAgent智能问答', icon: 'ChatDotRound', group: 'feature' },
       },
       {
+        path: 'dify',
+        name: 'DifyAgent',
+        component: () => import('@/views/embed-agent/index.vue'),
+        props: { platform: 'dify' },
+        meta: { title: 'Dify智能问答', icon: 'ChatDotSquare', group: 'feature' },
+      },
+      {
+        // 知识采集：页面已拆分为二级页（钉钉知识同步/本地上传），父级仅作分组，重定向到首个子页
         path: 'collection',
         name: 'Collection',
-        component: () => import('@/views/governance/collection.vue'),
+        redirect: '/knowledge-sources',
         meta: { title: '知识采集', icon: 'Download', group: 'feature' },
       },
       {
@@ -39,10 +56,24 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '知识加工', icon: 'Setting', group: 'feature' },
       },
       {
+        // 知识应用：拆分为二级页（应用总览/知识库），父级仅作分组，重定向到首个子页
         path: 'apply',
         name: 'Apply',
-        component: () => import('@/views/governance/apply.vue'),
+        redirect: '/apply/overview',
         meta: { title: '知识应用', icon: 'Connection', group: 'feature' },
+      },
+      {
+        path: 'apply/overview',
+        name: 'ApplyOverview',
+        component: () => import('@/views/governance/apply.vue'),
+        meta: { title: '应用总览', icon: 'Connection', group: 'feature', parent: '/apply', menuOrder: 1 },
+      },
+      {
+        // 知识库：检索抽象层镜像（RAGFlow / DIFY），仅供智能体检索选库，不支持导入解析
+        path: 'apply/knowledge-libraries',
+        name: 'KnowledgeLibraries',
+        component: () => import('@/views/knowledge-libraries/index.vue'),
+        meta: { title: '知识库', icon: 'Collection', group: 'feature', parent: '/apply', menuOrder: 2, roles: ['super_admin', 'admin', 'editor'] },
       },
       {
         path: 'operate',
@@ -57,16 +88,25 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '知识治理', icon: 'Stamp', group: 'feature' },
       },
       {
-        path: 'knowledge-center',
-        name: 'KnowledgeCenter',
-        component: () => import('@/views/knowledge-center/index.vue'),
-        meta: { title: '知识中心', icon: 'Reading', group: 'feature' },
-      },
-      {
+        // 知识源管理：原「知识中心」子菜单，知识中心页签迁入知识加工后挂到知识采集分组下
         path: 'knowledge-sources',
         name: 'KnowledgeSources',
         component: () => import('@/views/knowledge-sources/index.vue'),
-        meta: { title: '知识源管理', icon: 'Connection', group: 'feature', parent: '/knowledge-center', roles: ['super_admin', 'admin', 'editor'] },
+        meta: { title: '知识源管理', icon: 'Connection', group: 'feature', parent: '/collection', menuOrder: 1, roles: ['super_admin', 'admin', 'editor'] },
+      },
+      {
+        // 钉钉知识同步：原「知识采集」页钉钉页签下沉为二级页（定时同步 + 指定目录同步）
+        path: 'collection/dingtalk',
+        name: 'CollectionDingtalk',
+        component: () => import('@/views/governance/collection/DingtalkSync.vue'),
+        meta: { title: '钉钉知识同步', icon: 'Clock', group: 'feature', parent: '/collection', menuOrder: 2 },
+      },
+      {
+        // 本地上传：原「知识采集」页上传页签下沉为二级页（本地文档手动上传到 Dify）
+        path: 'collection/upload',
+        name: 'CollectionUpload',
+        component: () => import('@/views/governance/collection/ManualUpload.vue'),
+        meta: { title: '本地上传', icon: 'Upload', group: 'feature', parent: '/collection', menuOrder: 3 },
       },
       {
         path: 'model',
@@ -127,10 +167,9 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '统一检索', icon: 'Search', hidden: true },
       },
       {
+        // 模型配置页已并入系统配置页（/model），旧地址重定向避免书签失效
         path: 'settings',
-        name: 'Settings',
-        component: () => import('@/views/settings/index.vue'),
-        meta: { title: '模型配置', icon: 'Setting', roles: ['super_admin', 'admin'], hidden: true },
+        redirect: '/model',
       },
     ],
   },
@@ -157,7 +196,12 @@ router.beforeEach((to, _from, next) => {
   }
 
   if (!userStore.token) {
-    next('/login')
+    // 独立页：钉钉内放行由视图免登；浏览器回登录页并记录回跳地址
+    if (to.meta.standalone && /DingTalk/i.test(navigator.userAgent)) {
+      next()
+      return
+    }
+    next(to.meta.standalone ? `/login?redirect=${encodeURIComponent(to.fullPath)}` : '/login')
     return
   }
 

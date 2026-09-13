@@ -132,27 +132,43 @@ async function sendNotify() {
 onMounted(() => { loadKbOptions(); load() })
 
 // ===== 钉钉知识库文件夹快照：刷新按钮触发后台遍历，轮询进度 =====
+// 遍历任务跑在后端，前端只镜像状态：running 以后端 status 为准，
+// 切换知识库不中断任务，切回仍在遍历的库时恢复「正在遍历」展示与按钮禁用
 const dtStatus = ref<DingtalkRefreshStatus | null>(null)
-const dtRefreshing = ref(false)
+// 点击「刷新数据」到后端状态可读之间的过渡态，防止按钮短暂可点
+const dtStarting = ref(false)
+const dtRefreshing = computed(() => dtStarting.value || !!dtStatus.value?.running)
 let pollTimer: number | undefined
+let statusSeq = 0
 const isDingtalkSelected = computed(() => !!filters.kb_id)
 
 function stopPolling() {
   if (pollTimer) { clearTimeout(pollTimer); pollTimer = undefined }
-  dtRefreshing.value = false
 }
 
 async function fetchDtStatus() {
-  if (!isDingtalkSelected.value) { dtStatus.value = null; return }
-  try { dtStatus.value = await getDingtalkRefreshStatus(filters.kb_id!) } catch { /* 忽略状态查询失败 */ }
+  const kb = filters.kb_id
+  if (!kb) { dtStatus.value = null; return }
+  const seq = ++statusSeq
+  try {
+    const st = await getDingtalkRefreshStatus(kb)
+    if (seq !== statusSeq) return // 已切换知识库，丢弃过期结果
+    dtStatus.value = st
+  } catch { /* 忽略状态查询失败 */ }
 }
 
 function pollStatus() {
+  stopPolling()
   pollTimer = window.setTimeout(async () => {
+    const kb = filters.kb_id
+    const wasRunning = !!dtStatus.value?.running
     await fetchDtStatus()
+    if (filters.kb_id !== kb) return // 轮询期间切库，由 onKbChange 接管
     const st = dtStatus.value
     if (st?.running) { pollStatus(); return }
     stopPolling()
+    dtStarting.value = false
+    if (!wasRunning) return // 切入时已是 idle 状态，不做完成提示
     if (st?.error) { ElMessage.error(`刷新失败：${st.error}`); return }
     ElMessage.success(`刷新完成，共 ${st?.folder_count ?? 0} 个文件夹`)
     load()
@@ -160,17 +176,23 @@ function pollStatus() {
 }
 
 async function refreshDingtalk() {
-  if (!filters.kb_id || dtRefreshing.value) return
-  try { await refreshDingtalkFolders(filters.kb_id) } catch { return }
-  dtRefreshing.value = true
+  const kb = filters.kb_id
+  if (!kb || dtRefreshing.value) return
+  try { await refreshDingtalkFolders(kb) } catch { return }
+  if (filters.kb_id !== kb) return // 点击后立即切库，状态由 onKbChange 接管
+  dtStarting.value = true
   await fetchDtStatus()
   pollStatus()
 }
 
-// 切换知识库时停止旧轮询并拉取新库快照状态
-function onKbChange() {
+// 切换知识库：仅切换轮询对象，不中断后端任务；新库仍在遍历则立即恢复「正在遍历」
+async function onKbChange() {
   stopPolling()
-  fetchDtStatus()
+  dtStarting.value = false
+  const kb = filters.kb_id
+  await fetchDtStatus()
+  if (filters.kb_id !== kb) return
+  if (dtStatus.value?.running) pollStatus()
 }
 
 onUnmounted(stopPolling)
@@ -213,7 +235,6 @@ onUnmounted(stopPolling)
       <el-button type="primary" :loading="importing" @click="input?.click()">导入 Owner</el-button>
       <el-button :loading="exporting" @click="exportFile(true)">下载导入模板</el-button>
       <input ref="input" type="file" accept=".csv,.xlsx" hidden @change="importFile" />
-      <span>支持 CSV / XLSX（≤5MB）：按目录ID（或知识库＋目录路径）匹配，本地目录与钉钉知识库文件夹均可导入，重复导入更新 Owner。选中钉钉知识库后下载的模板即为该库文件夹清单。</span>
     </div>
     <el-table :data="rows" v-loading="loading" style="width: 100%">
       <el-table-column label="知识库" min-width="180" show-overflow-tooltip>

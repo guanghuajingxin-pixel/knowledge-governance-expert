@@ -24,6 +24,9 @@ web/dist/
 
 # 备份文件
 *.bak
+*.backup-*
+.env.backup-*
+dify-env.backup-*
 
 # Agent 运行时生成产物
 output/

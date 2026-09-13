@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routes import auth, users, internal, knowledge_base, directory, document, search, settings_route, knowledge_center, dify_route, operate, governance, agent_route, agent_internal, chat_session_route, qa_route, sync_route, process_route, knowledge_gaps
+from app.routes import auth, users, internal, knowledge_base, directory, document, search, settings_route, knowledge_center, knowledge_library, dify_route, ragflow_route, operate, governance, agent_route, agent_internal, chat_session_route, qa_route, sync_route, process_route, knowledge_gaps, metrics_route
 
 
 @asynccontextmanager
@@ -21,6 +21,8 @@ async def lifespan(app: FastAPI):
         "mineru_api_key": "MINERU_API_KEY",
         "dify_base_url": "DIFY_BASE_URL",
         "dify_api_key": "DIFY_API_KEY",
+        "ragflow_base_url": "RAGFLOW_BASE_URL",
+        "ragflow_api_key": "RAGFLOW_API_KEY",
         "dingtalk_app_key": "DINGTALK_APP_KEY",
         "dingtalk_app_secret": "DINGTALK_APP_SECRET",
         "dingtalk_operator_union_id": "DINGTALK_OPERATOR_UNION_ID",
@@ -36,6 +38,42 @@ async def lifespan(app: FastAPI):
     except Exception:
         pass  # 表不存在/数据库未就绪时静默降级到 .env 默认值
 
+    # 连接池预热（两段式）：启动阶段最多阻塞 8s 建连接，剩下的交给后台补齐。
+    # 新建一条 PG 连接常态 22~40ms，但本机 Docker VM 抖动时实测要 6~39s；
+    # 纯后台预热来不及——重启后的第一个请求实测被拖到 34s。
+    # 尽量把这笔开销放在「还没开始接请求」的启动阶段，用户第一次点击就不必替我们买单。
+    try:
+        import asyncio
+        import logging
+        from kb_common.database import warm_pool
+        _perf_log = logging.getLogger(__name__)
+
+        try:
+            warmed = await asyncio.wait_for(warm_pool(batch=3), timeout=8)
+            _perf_log.info("启动阶段连接池预热：%s 条常驻连接", warmed)
+        except Exception as exc:  # noqa: BLE001 — 预热超时/失败都不该阻塞启动
+            _perf_log.warning("启动阶段连接池预热未完成，转后台继续: %r", exc)
+
+        async def _warm_pool_bg() -> None:
+            try:
+                warmed = await warm_pool()
+                _perf_log.info("数据库连接池预热完成：%s 条常驻连接", warmed)
+            except Exception as exc:  # noqa: BLE001
+                _perf_log.warning("连接池预热中断（不影响服务）: %r", exc)
+
+        asyncio.create_task(_warm_pool_bg())
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("连接池预热任务启动失败（不影响启动）: %r", e)
+
+    # 旧版单值配置 → LLM/Dify profiles 表一次性迁移（模型配置页下线后存量配置仍可见可管理）
+    try:
+        from app.routes.settings_route import seed_profiles_from_legacy_settings
+        async with SessionLocal() as s:
+            await seed_profiles_from_legacy_settings(s)
+    except Exception:
+        pass  # 迁移失败不阻塞启动；系统配置页读取列表时会再次尝试
+
     # 运营看板：每日 0 点定时统计（缺今日数据则启动即补统计）
     from app.routes import operate
     operate.start_operate_scheduler()
@@ -49,6 +87,14 @@ async def lifespan(app: FastAPI):
         import logging
         logging.getLogger(__name__).warning("同步调度器启动失败: %s", e)
 
+    # 钉钉机器人 Stream 长连接（开关/凭证齐全才启动，fail fast 不假跑）
+    try:
+        from app.services import dingtalk_bot
+        await dingtalk_bot.refresh_bot()
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("钉钉机器人启动检查失败: %s", e)
+
     try:
         yield
     finally:
@@ -58,11 +104,38 @@ async def lifespan(app: FastAPI):
             shutdown_sync_scheduler()
         except Exception:
             pass
+        try:
+            from app.services import dingtalk_bot
+            await dingtalk_bot.stop_bot()
+        except Exception:
+            pass
 
 
 app = FastAPI(title="KB API", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173"],
                    allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+
+
+# 慢请求日志：把「哪个接口把界面拖住了」直接打在日志里，默认阈值 1s。
+import logging as _logging
+import os as _os
+import time as _time
+
+_perf_logger = _logging.getLogger("kbapi.perf")
+_SLOW_REQUEST_MS = float(_os.getenv("KGE_SLOW_REQUEST_MS", "1000"))
+
+
+@app.middleware("http")
+async def log_slow_requests(request, call_next):
+    t0 = _time.perf_counter()
+    response = await call_next(request)
+    ms = (_time.perf_counter() - t0) * 1000
+    if ms >= _SLOW_REQUEST_MS:
+        _perf_logger.warning("SLOW %s %s %.0fms status=%s",
+                             request.method, request.url.path, ms, response.status_code)
+    return response
+
+
 app.include_router(auth.router)
 app.include_router(users.router)
 app.include_router(internal.router)
@@ -72,7 +145,9 @@ app.include_router(document.router)
 app.include_router(search.router)
 app.include_router(settings_route.router)
 app.include_router(knowledge_center.router)
+app.include_router(knowledge_library.router)
 app.include_router(dify_route.router)
+app.include_router(ragflow_route.router)
 app.include_router(operate.router)
 app.include_router(governance.router)
 app.include_router(knowledge_gaps.router)
@@ -82,6 +157,28 @@ app.include_router(chat_session_route.router)
 app.include_router(qa_route.router)
 app.include_router(sync_route.router)
 app.include_router(process_route.router)
+app.include_router(metrics_route.router)
 
 @app.get("/health")
 def health(): return {"status": "ok"}
+
+
+@app.get("/health/pool")
+def health_pool():
+    """连接池水位诊断：排查「点任何菜单都卡几秒」时先看这里。
+
+    checked_out 长期贴近 pool_size+overflow，说明有请求/后台任务长时间占着连接。
+    """
+    from kb_common.database import engine as async_engine, settings as _s
+    from app.services.sync.sync_database import sync_engine
+
+    def _stat(p) -> dict:
+        return {"pool_size": p.size(), "checked_in": p.checkedin(),
+                "checked_out": p.checkedout(), "overflow": p.overflow()}
+
+    return {
+        "async": _stat(async_engine.pool),
+        "sync": _stat(sync_engine.pool),
+        "config": {"pool_size": _s.db_pool_size, "max_overflow": _s.db_max_overflow,
+                   "pool_timeout": _s.db_pool_timeout},
+    }

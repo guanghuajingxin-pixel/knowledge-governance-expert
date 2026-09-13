@@ -1,9 +1,18 @@
 import request from './request'
 
 /** 杰克百晓生智能体配置（与后端 services/kb-api/app/services/agent/config.py 对应） */
+/** 外部平台智能体（嵌入网页接入） */
+export interface EmbedAgentConfig {
+  enabled: boolean
+  embed_code: string   // 平台复制的嵌入代码（iframe 片段或页面 URL）
+  url: string          // 解析出的嵌入页面地址
+}
+
 export interface AgentConfig {
   agent_name: string
+  bot_avatar?: string            // 机器人头像（data: 图片或 http(s) 链接；空=默认图标）
   models: string[]               // 参与调度的模型（最多 10）
+  default_model: string          // 智能体默认模型（须为 models 之一；空串跟随列表首个）
   retrieval_mode: 'smart' | 'force'  // 智能调用 / 强制调用
   greeting_enabled: boolean
   greeting: string
@@ -13,12 +22,12 @@ export interface AgentConfig {
   planning_enabled: boolean      // 任务规划
   subagent_enabled: boolean      // 子智能体协作（DeerFlow Lead → Sub-Agent 并行调研）
   long_memory_enabled: boolean   // 长期记忆
-  deep_think_default: boolean    // 默认深度思考
   temperature: number
   top_p: number
   max_tokens: number
   top_k: number
   max_retrieval_rounds: number
+  external_agents: Record<'hiagent' | 'dify', EmbedAgentConfig>  // 外部平台智能体嵌入配置
 }
 
 /** 智能问答可用工具 */
@@ -64,14 +73,15 @@ export const importSkillDoc = (file: File, enabled = true) => {
 
 export interface GreetingInfo {
   agent_name: string
+  bot_avatar?: string
   greeting_enabled: boolean
   greeting: string
   suggested_questions: string[]
   models: string[]
+  default_model: string
   follow_up_enabled: boolean
   planning_enabled: boolean
   long_memory_enabled: boolean
-  deep_think_default: boolean
 }
 
 export const getAgentConfig = () => request.get<unknown, AgentConfig>('/agent/config')

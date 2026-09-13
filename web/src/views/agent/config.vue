@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   getAgentConfig, updateAgentConfig,
@@ -12,11 +12,13 @@ import { listEnabledLlmModels } from '@/api/settings'
 const loading = ref(false)
 const saving = ref(false)
 const activeTab = ref('basic')
-const activeCollapse = ref(['model', 'knowledge', 'tools', 'greeting', 'planning', 'subagent', 'memory', 'deep', 'hyper'])
+const activeCollapse = ref(['model', 'knowledge', 'tools', 'avatar', 'greeting', 'planning', 'memory', 'deep', 'hyper'])
 
 const form = reactive<AgentConfig>({
   agent_name: '杰克百晓生',
+  bot_avatar: '',
   models: [],
+  default_model: '',
   retrieval_mode: 'smart',
   greeting_enabled: true,
   greeting: '',
@@ -26,12 +28,52 @@ const form = reactive<AgentConfig>({
   planning_enabled: true,
   subagent_enabled: false,
   long_memory_enabled: true,
-  deep_think_default: false,
   temperature: 0,
   top_p: 0.9,
   max_tokens: 4096,
   top_k: 8,
   max_retrieval_rounds: 2,
+  external_agents: {
+    hiagent: { enabled: false, embed_code: '', url: '' },
+    dify: { enabled: false, embed_code: '', url: '' },
+  },
+})
+
+// ============ 智能体类型页签（内置 / HiAgent / Dify） ============
+type AgentKind = 'builtin' | 'hiagent' | 'dify'
+const agentKind = ref<AgentKind>('builtin')
+
+const EXTERNAL_META: Record<'hiagent' | 'dify', { title: string; icon: string; cls: string; desc: string; placeholder: string }> = {
+  hiagent: {
+    title: 'HiAgent 智能体',
+    icon: '🤖',
+    cls: 'ico-model',
+    desc: '粘贴 HiAgent 平台「嵌入网页」处复制的 iframe 代码（或页面链接），将平台发布的智能体接入本系统；更换智能体时只需替换嵌入代码。',
+    placeholder: '<iframe\n  src="https://hiagent.example.com/share/xxxx"\n  style="width: 100%; height: 100%; min-height: 700px"\n  frameborder="0"\n  allow="microphone;clipboard-write">\n</iframe>',
+  },
+  dify: {
+    title: 'Dify 智能体',
+    icon: '🌐',
+    cls: 'ico-kb',
+    desc: '粘贴 Dify 平台「嵌入网站」处复制的 iframe 代码（或页面链接），将 Dify 应用接入本系统；更换智能体时只需替换嵌入代码。',
+    placeholder: '<iframe\n src="http://127.0.0.1/agent/eDE91u43v5UPpbt0"\n style="width: 100%; height: 100%; min-height: 700px"\n frameborder="0"\n allow="microphone;clipboard-write">\n</iframe>',
+  },
+}
+
+const currentExternal = computed(() =>
+  form.external_agents[agentKind.value === 'dify' ? 'dify' : 'hiagent']
+)
+
+const externalMeta = computed(() => EXTERNAL_META[agentKind.value === 'dify' ? 'dify' : 'hiagent'])
+
+// 从嵌入代码实时解析页面地址：iframe 片段取 src；直接粘贴 URL 亦可
+const parsedEmbedUrl = computed(() => {
+  const code = (currentExternal.value.embed_code || '').trim()
+  if (!code) return ''
+  const m = code.match(/src\s*=\s*["']([^"']+)["']/i)
+  if (m) return m[1].trim()
+  if (/^https?:\/\//i.test(code)) return code
+  return ''
 })
 
 // 工具目录（名称/描述来自后端 /agent/tools，开关状态保存于 form.tools_enabled）
@@ -39,12 +81,23 @@ const toolCatalog = ref<AgentTool[]>([])
 
 // 仅可选择系统已接入（生效）的模型；is_default 为系统配置里的默认模型
 const modelOptions = ref<Array<{ model: string; profile_id: string; profile_name: string; is_default: boolean }>>([])
+// 智能体生效默认模型：管理员点选的 default_model，未设置时跟随列表首个
+const effectiveDefaultModel = computed(() => form.default_model || form.models[0] || '')
+watch(() => form.models, (models) => {
+  if (form.default_model && !models.includes(form.default_model)) form.default_model = ''
+}, { deep: true })
 
 async function load() {
   loading.value = true
   try {
     const [cfg, toolsRes] = await Promise.all([getAgentConfig(), getAgentTools().catch(() => null)])
     Object.assign(form, cfg)
+    // 外部智能体配置兜底（旧数据可能缺平台 key）
+    const ext = (form.external_agents || {}) as Record<string, Partial<AgentConfig['external_agents']['hiagent']>>
+    form.external_agents = {
+      hiagent: { enabled: false, embed_code: '', url: '', ...ext.hiagent },
+      dify: { enabled: false, embed_code: '', url: '', ...ext.dify },
+    }
     toolCatalog.value = toolsRes?.tools || []
     // 目录补齐 form.tools_enabled 中缺失的 key（默认启用）
     toolCatalog.value.forEach((t) => {
@@ -137,7 +190,7 @@ async function savePersonaDoc() {
     const res = await savePersona({ content: persona.content })
     persona.saved = persona.content
     persona.custom = res.custom
-    ElMessage.success('人格已保存至兼容服务')
+    ElMessage.success('人格已保存，新对话生效')
   } catch (e: any) {
     ElMessage.error(e?.response?.data?.detail || '保存失败')
   } finally {
@@ -171,7 +224,7 @@ async function saveSkillDoc() {
     const res = await saveSkill({ content: skill.content })
     skill.saved = skill.content
     skill.custom = res.custom
-    ElMessage.success('技能已保存至兼容服务')
+    ElMessage.success('技能已保存，新对话生效')
   } catch (e: any) {
     ElMessage.error(e?.response?.data?.detail || '保存失败')
   } finally {
@@ -277,7 +330,7 @@ async function saveSkillForm() {
       content: skillForm.content,
       enabled: skillForm.enabled,
     })
-    ElMessage.success('技能已保存至兼容服务')
+    ElMessage.success('技能已保存，新对话生效')
     skillDialogVisible.value = false
     await loadSkills()
   } catch (e: any) {
@@ -312,6 +365,55 @@ function triggerImport() {
   importInput.value?.click()
 }
 
+// ============ 机器人头像：本地上传 → canvas 压缩为 128×128 data URL ============
+const avatarInput = ref<HTMLInputElement | null>(null)
+
+function triggerAvatarUpload() {
+  avatarInput.value?.click()
+}
+
+function onAvatarFile(e: Event) {
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+  if (!file.type.startsWith('image/')) {
+    ElMessage.warning('请选择图片文件（PNG / JPG / WebP 等）')
+    return
+  }
+  if (file.size > 8 * 1024 * 1024) {
+    ElMessage.warning('图片过大（超过 8MB），请更换较小的图片')
+    return
+  }
+  const reader = new FileReader()
+  reader.onload = () => {
+    const img = new Image()
+    img.onload = () => {
+      // 居中裁剪为正方形并缩放到 128×128，避免超大 base64 写入配置
+      const size = Math.min(img.width, img.height)
+      const canvas = document.createElement('canvas')
+      canvas.width = 128
+      canvas.height = 128
+      const ctx = canvas.getContext('2d')
+      if (!ctx) {
+        ElMessage.error('图片处理失败')
+        return
+      }
+      ctx.drawImage(img, (img.width - size) / 2, (img.height - size) / 2, size, size, 0, 0, 128, 128)
+      form.bot_avatar = canvas.toDataURL('image/png')
+      ElMessage.success('头像已生成，保存配置后生效')
+    }
+    img.onerror = () => ElMessage.error('图片读取失败')
+    img.src = String(reader.result)
+  }
+  reader.onerror = () => ElMessage.error('图片读取失败')
+  reader.readAsDataURL(file)
+}
+
+function clearAvatar() {
+  form.bot_avatar = ''
+}
+
 async function onImportFile(e: Event) {
   const input = e.target as HTMLInputElement
   const file = input.files?.[0]
@@ -335,16 +437,25 @@ async function onImportFile(e: Event) {
 </script>
 
 <template>
-  <div class="agent-config-page" v-loading="loading">
+  <div class="kge-page kge-page--scroll" v-loading="loading">
     <div class="page-head">
       <div>
         <h2 class="page-title">智能体配置</h2>
-        <p class="page-sub">配置企业知识检索、钉钉补查与会话上下文；回答须通过原文依据核验。</p>
+        <p class="page-sub">内置智能体策略配置，或通过嵌入代码接入 HiAgent / Dify 平台智能体。</p>
       </div>
       <el-button type="primary" :loading="saving" @click="save">保存配置</el-button>
     </div>
 
-    <el-tabs v-model="activeTab" class="cfg-tabs" @tab-change="onTabChange">
+    <!-- 智能体类型切换 -->
+    <div class="kind-bar">
+      <el-radio-group v-model="agentKind">
+        <el-radio-button value="builtin">内置智能体</el-radio-button>
+        <el-radio-button value="hiagent">HiAgent智能体</el-radio-button>
+        <el-radio-button value="dify">Dify智能体</el-radio-button>
+      </el-radio-group>
+    </div>
+
+    <el-tabs v-show="agentKind === 'builtin'" v-model="activeTab" class="cfg-tabs" @tab-change="onTabChange">
       <!-- ============ 基础设置 ============ -->
       <el-tab-pane label="基础设置" name="basic">
         <el-collapse v-model="activeCollapse" class="cfg-collapse">
@@ -352,7 +463,7 @@ async function onImportFile(e: Event) {
           <el-collapse-item name="model">
             <template #title>
               <span class="card-title"><span class="card-ico ico-model">🧊</span> 模型
-                <span class="card-hint">仅可选择系统已接入的模型（最多 10 个）；问答页模型下拉仅展示此列表</span>
+                <span class="card-hint">仅可选择系统已接入的模型（最多 10 个）；问答页模型下拉仅展示此列表；点击模型右侧标记设置智能体默认模型（DeerFlow 问答与问答页预选，未设置时跟随列表首个），保存后热更新至服务</span>
               </span>
             </template>
             <el-select
@@ -366,11 +477,17 @@ async function onImportFile(e: Event) {
               <el-option
                 v-for="m in modelOptions"
                 :key="`${m.profile_id}-${m.model}`"
-                :label="m.profile_name ? `${m.model}（${m.profile_name}）` : m.model"
+                :label="m.model"
                 :value="m.model"
               >
                 <span>{{ m.model }}</span>
-                <span v-if="m.is_default" style="float: right; color: #409eff; font-size: 12px">默认</span>
+                <span
+                  v-if="form.models.includes(m.model)"
+                  :style="{ float: 'right', color: m.model === effectiveDefaultModel ? '#409eff' : '#c0c4cc', fontSize: '12px', cursor: 'pointer' }"
+                  :title="m.model === effectiveDefaultModel ? '智能体默认模型' : '点击设为智能体默认模型'"
+                  @click.stop="form.default_model = m.model"
+                >{{ m.model === effectiveDefaultModel ? '默认' : '设为默认' }}</span>
+                <span v-else-if="m.is_default" style="float: right; color: #909399; font-size: 12px">系统默认</span>
               </el-option>
             </el-select>
           </el-collapse-item>
@@ -386,8 +503,8 @@ async function onImportFile(e: Event) {
               </span>
             </template>
             <div class="mode-desc">
-              <p><b>强制调用</b>：每个问题（含问候寒暄）都检索知识库后再回答，答案严格来自知识库。</p>
-              <p><b>智能调用</b>：闲聊问候直接应答，业务问题先检索知识库；原文不能覆盖问题时补查，仍不足则尝试钉钉 DWS。</p>
+              <p><b>强制调用</b>：每个问题（含问候寒暄）都必须先检索知识库再回答（平台注入强制约束），答案严格来自知识库。</p>
+              <p><b>智能调用</b>：闲聊问候直接应答；业务问题先检索 Dify 知识库，召回不足时智能体自主补查、再不足兜底钉钉知识库。</p>
             </div>
           </el-collapse-item>
 
@@ -404,7 +521,25 @@ async function onImportFile(e: Event) {
                   <span class="tool-name">{{ t.name }}</span>
                   <span class="tool-desc">{{ t.desc }}</span>
                 </div>
-                <el-switch v-model="form.tools_enabled[t.key]" :disabled="t.key === 'present_files'" :aria-label="t.name" />
+                <el-switch v-model="form.tools_enabled[t.key]" :aria-label="t.name" />
+              </div>
+            </div>
+          </el-collapse-item>
+
+          <!-- 机器人头像 -->
+          <el-collapse-item name="avatar">
+            <template #title>
+              <span class="card-title"><span class="card-ico ico-greet">🖼️</span> 机器人头像</span>
+            </template>
+            <div class="avatar-row">
+              <div class="avatar-preview">
+                <img v-if="form.bot_avatar" :src="form.bot_avatar" alt="机器人头像" />
+                <el-icon v-else><MagicStick /></el-icon>
+              </div>
+              <div class="avatar-actions">
+                <el-button size="small" @click="triggerAvatarUpload">上传图片</el-button>
+                <el-button v-if="form.bot_avatar" size="small" text type="danger" @click="clearAvatar">恢复默认</el-button>
+                <div class="mode-desc"><p>问答页顶部与助手消息显示的头像；自动裁剪压缩为 128×128，保存后生效。</p></div>
               </div>
             </div>
           </el-collapse-item>
@@ -444,7 +579,7 @@ async function onImportFile(e: Event) {
               </span>
             </template>
             <div class="mode-desc">
-              <p>完整回答通过核验后，提供查看原文依据的追问入口，点击即可提问。</p>
+              <p>完整回答后提供查看原文依据的追问入口，点击即可提问。</p>
             </div>
           </el-collapse-item>
         </el-collapse>
@@ -456,24 +591,12 @@ async function onImportFile(e: Event) {
           <!-- 任务规划 -->
           <el-collapse-item name="planning">
             <template #title>
-              <span class="card-title"><span class="card-ico ico-plan">📋</span> 补查规划
+              <span class="card-title"><span class="card-ico ico-plan">📋</span> 任务规划
                 <el-switch v-model="form.planning_enabled" class="title-switch" @click.stop />
               </span>
             </template>
             <div class="mode-desc">
-              <p>问题始终会拆分为最多 3 个检索查询。开启此项且检索轮数为 2 时，利用标签、摘要和文档关系补查缺失要点；关闭后仍保留钉钉兜底和答案核验。</p>
-            </div>
-          </el-collapse-item>
-
-          <!-- 子智能体协作 -->
-          <el-collapse-item name="subagent">
-            <template #title>
-              <span class="card-title"><span class="card-ico ico-plan">🧩</span> 子智能体协作（兼容配置）
-                <el-switch v-model="form.subagent_enabled" disabled class="title-switch" @click.stop />
-              </span>
-            </template>
-            <div class="mode-desc">
-              <p>此设置仅供旧版 DeerFlow 服务使用。当前问答执行固定的检索、补查与核验流程，不受此开关影响。</p>
+              <p>开启后 DeerFlow 智能体对复杂问题先生成任务计划（TodoList）再逐步检索执行；关闭后直接检索作答。检索轮数上限见「超参维护」。</p>
             </div>
           </el-collapse-item>
 
@@ -485,19 +608,7 @@ async function onImportFile(e: Event) {
               </span>
             </template>
             <div class="mode-desc">
-              <p>使用当前会话最近 8 条消息理解「它/那个/上一条」等指代，事实仍需重新检索原文。关闭后每轮独立，不共享其他会话的记忆。</p>
-            </div>
-          </el-collapse-item>
-
-          <!-- 默认深度思考 -->
-          <el-collapse-item name="deep">
-            <template #title>
-              <span class="card-title"><span class="card-ico ico-deep">⚡</span> 默认深度思考
-                <el-switch v-model="form.deep_think_default" class="title-switch" @click.stop />
-              </span>
-            </template>
-            <div class="mode-desc">
-              <p>新会话默认扩大检索范围，召回条数至少为 12；事实生成温度保持为 0，回答中的事实仍须逐项核验。</p>
+              <p>开启后同一会话共享 DeerFlow 会话记忆（按会话隔离），用于理解「它/那个/上一条」等指代；关闭后每轮问答使用独立线程，不携带上文。</p>
             </div>
           </el-collapse-item>
 
@@ -528,13 +639,16 @@ async function onImportFile(e: Event) {
                 <el-input-number v-model="form.max_tokens" :min="3000" :max="8192" :step="256" />
               </div>
             </div>
+            <div class="mode-desc">
+              <p>Top-P 与 Tokens 上限保存后热更新至 DeerFlow 服务、新对话生效；召回条数与检索轮数逐问即时生效（单轮 knowledge_search 调用上限 = 轮数 × 3）。</p>
+            </div>
           </el-collapse-item>
         </el-collapse>
       </el-tab-pane>
 
       <!-- ============ 人格与技能（DeerFlow SOUL / SKILL 提示词） ============ -->
-      <el-tab-pane label="人格与技能（兼容）" name="prompt">
-        <el-alert title="以下设置仅作用于旧版 DeerFlow 服务。当前企业问答的检索与核验规则由程序维护。" type="info" :closable="false" show-icon />
+      <el-tab-pane label="人格与技能" name="prompt">
+        <el-alert title="人格（SOUL）与技能（SKILL）即问答智能体（DeerFlow）的系统提示词与工作流指令：保存后在新对话中生效，自定义内容持久化，服务重启不丢失。" type="info" :closable="false" show-icon />
         <div v-loading="promptLoading">
           <!-- 人格 SOUL.md -->
           <div class="prompt-card">
@@ -552,7 +666,7 @@ async function onImportFile(e: Event) {
             </div>
             <p class="prompt-desc">
               定义智能体的身份、职责与行为准则（DeerFlow 系统提示词）。例如：双源检索策略、
-              答案风格、引用规范。修改后<strong>在旧版服务的新对话中生效</strong>，进行中的会话不受影响；自定义内容持久化，服务重启不丢失。
+              答案风格、引用规范。修改后<strong>在问答智能体的新对话中生效</strong>，进行中的会话不受影响；自定义内容持久化，服务重启不丢失。
             </p>
             <el-input
               v-model="persona.content"
@@ -580,7 +694,7 @@ async function onImportFile(e: Event) {
             <p class="prompt-desc">
               定义「企业知识库问答」技能的工作流指令（DeerFlow Skill）：意图判断、检索策略、
               作答规范、引用来源等。<strong>头部 frontmatter（name/description/version）需保留</strong>；
-              修改后在旧版服务的新对话中生效，自定义内容持久化。
+              修改后在问答智能体的新对话中生效，自定义内容持久化。
             </p>
             <el-input
               v-model="skill.content"
@@ -594,12 +708,12 @@ async function onImportFile(e: Event) {
       </el-tab-pane>
 
       <!-- ============ 技能库（ClawHub 通用 SKILL.md 结构） ============ -->
-      <el-tab-pane label="技能库（兼容）" name="skills">
+      <el-tab-pane label="技能库" name="skills">
         <div class="skill-page" v-loading="skillsLoading">
           <div class="skill-toolbar">
             <div class="skill-toolbar-hint">
               兼容 ClawHub 通用技能结构：每个技能为一个目录 + <code>SKILL.md</code>（含 name/description frontmatter）。
-              仅供旧版 DeerFlow 服务按需调用，当前企业问答不加载这些自定义技能。
+              问答智能体（DeerFlow）在新对话中按启用状态加载这些技能；内置问答技能在「人格与技能」页签单独维护。
             </div>
             <div class="skill-toolbar-ops">
               <input
@@ -642,6 +756,63 @@ async function onImportFile(e: Event) {
       </el-tab-pane>
     </el-tabs>
 
+    <!-- ============ 外部平台智能体（HiAgent / Dify 嵌入接入） ============ -->
+    <input ref="avatarInput" type="file" accept="image/*" style="display: none" @change="onAvatarFile" />
+    <div v-if="agentKind !== 'builtin'" class="embed-panel">
+      <div class="embed-card">
+        <div class="embed-head">
+          <div class="embed-head-info">
+            <span class="card-title">
+              <span class="card-ico" :class="externalMeta.cls">{{ externalMeta.icon }}</span>
+              {{ externalMeta.title }}
+            </span>
+            <el-tag :type="currentExternal.enabled && parsedEmbedUrl ? 'success' : 'info'" size="small">
+              {{ currentExternal.enabled && parsedEmbedUrl ? '已启用' : '未启用' }}
+            </el-tag>
+          </div>
+          <el-switch v-model="currentExternal.enabled" :disabled="!parsedEmbedUrl" active-text="启用" />
+        </div>
+        <p class="embed-desc">{{ externalMeta.desc }}</p>
+
+        <div class="sub-label">嵌入代码（iframe 片段或页面链接）</div>
+        <el-input
+          v-model="currentExternal.embed_code"
+          type="textarea"
+          :rows="7"
+          spellcheck="false"
+          class="embed-editor"
+          :placeholder="externalMeta.placeholder"
+        />
+
+        <div class="embed-parsed">
+          <span class="embed-parsed-label">页面地址（自动解析）</span>
+          <el-input
+            :model-value="parsedEmbedUrl"
+            readonly
+            size="small"
+            placeholder="粘贴嵌入代码后自动提取"
+          />
+        </div>
+        <div v-if="currentExternal.embed_code && !parsedEmbedUrl" class="embed-error">
+          无法识别页面地址：请粘贴完整的 iframe 代码，或直接粘贴以 http(s):// 开头的链接
+        </div>
+
+        <div v-if="parsedEmbedUrl" class="embed-preview">
+          <div class="embed-preview-head">
+            <span class="embed-preview-title">嵌入预览</span>
+            <el-link :href="parsedEmbedUrl" target="_blank" type="primary">在新窗口打开</el-link>
+          </div>
+          <iframe
+            :src="parsedEmbedUrl"
+            class="embed-frame"
+            frameborder="0"
+            allow="microphone;clipboard-write"
+          />
+          <p class="embed-note">预览空白通常是平台禁止被嵌套（X-Frame-Options），请用「在新窗口打开」验证链接有效性；保存后同样以 iframe 方式嵌入。</p>
+        </div>
+      </div>
+    </div>
+
     <!-- 技能新建/编辑弹窗 -->
     <el-dialog
       v-model="skillDialogVisible"
@@ -679,11 +850,6 @@ async function onImportFile(e: Event) {
 </template>
 
 <style scoped>
-.agent-config-page {
-  padding: 20px 24px;
-  max-width: 960px;
-  margin: 0 auto;
-}
 .page-head {
   display: flex;
   align-items: flex-start;
@@ -705,6 +871,88 @@ async function onImportFile(e: Event) {
 .cfg-tabs :deep(.el-tabs__item) {
   font-size: 15px;
   font-weight: 600;
+}
+.kind-bar {
+  margin-bottom: 14px;
+}
+.kind-bar :deep(.el-radio-button__inner) {
+  font-weight: 600;
+}
+/* —— 外部平台智能体（嵌入接入）—— */
+.embed-panel {
+  margin-top: 4px;
+}
+.embed-card {
+  background: #f7f8fa;
+  border: 1px solid #eef0f4;
+  border-radius: 12px;
+  padding: 18px 20px;
+}
+.embed-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+.embed-head-info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.embed-desc {
+  margin: 10px 0 4px;
+  font-size: 13px;
+  line-height: 1.8;
+  color: #606266;
+}
+.embed-editor :deep(textarea) {
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+  font-size: 12.5px;
+  line-height: 1.7;
+}
+.embed-parsed {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+}
+.embed-parsed-label {
+  flex-shrink: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: #606266;
+}
+.embed-error {
+  margin-top: 8px;
+  font-size: 12.5px;
+  color: #f56c6c;
+}
+.embed-preview {
+  margin-top: 16px;
+}
+.embed-preview-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.embed-preview-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #1a1a2e;
+}
+.embed-frame {
+  display: block;
+  width: 100%;
+  height: 560px;
+  border: 1px solid #e4e7ed;
+  border-radius: 8px;
+  background: #fff;
+}
+.embed-note {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: #909399;
 }
 .cfg-collapse {
   border: none;
@@ -752,7 +1000,6 @@ async function onImportFile(e: Event) {
 .ico-follow { background: #fff4e0; }
 .ico-plan { background: #eef0ff; }
 .ico-mem { background: #f0e8ff; }
-.ico-deep { background: #ffe8e8; }
 .ico-hyper { background: #e8f6ff; font-weight: 700; font-size: 13px; color: #2b6bff; }
 .card-hint {
   font-size: 12px;
@@ -773,6 +1020,35 @@ async function onImportFile(e: Event) {
 }
 .mode-desc p {
   margin: 4px 0;
+}
+/* 机器人头像配置 */
+.avatar-row {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+}
+.avatar-preview {
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  font-size: 28px;
+  color: #fff;
+  background: linear-gradient(135deg, #409EFF 0%, #79bbff 100%);
+  overflow: hidden;
+}
+.avatar-preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.avatar-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: flex-start;
 }
 .full-width {
   width: 100%;

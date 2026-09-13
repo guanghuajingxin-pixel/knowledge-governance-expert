@@ -146,7 +146,7 @@
       <div class="content">
         <section class="page active" id="page-dash">
           <div class="page-head"><div><h2>工作台</h2><div class="desc">同步服务运行概览</div></div>
-            <button class="btn primary" onclick="switchPage('sources')">＋ 新增同步源</button></div>
+            <button class="btn primary" onclick="switchPage('sources')">＋ 新增同步任务</button></div>
           <div class="stat-grid">
             <div class="stat"><div class="label">同步源</div><div class="num" id="statSources">-</div><div class="extra">知识库接入数</div></div>
             <div class="stat"><div class="label">定时任务</div><div class="num" id="statJobs">-</div><div class="extra" id="statJobsExtra">-</div></div>
@@ -161,7 +161,7 @@
 
         <section class="page" id="page-sources">
           <div class="page-head"><div><h2>同步源管理</h2><div class="desc">配置钉钉知识库到 Dify 知识库的映射</div></div>
-            <button class="btn primary" onclick="openSourceModal()">＋ 新增同步源</button></div>
+            <button class="btn primary" onclick="openSourceModal()">＋ 新增同步任务</button></div>
           <div class="card" style="padding:0">
             <table><thead><tr><th>名称</th><th>钉钉知识库</th><th>Dify 数据集</th><th>删除策略</th><th>状态</th><th style="width:280px">操作</th></tr></thead>
             <tbody id="sourceTbody"></tbody></table>
@@ -374,7 +374,7 @@ async function loadSources() {
 }
 function openSourceModal(id) {
   const s = id ? sources.find(x => x.id === id) : null;
-  let html = '<h3>' + (s ? '编辑同步源' : '新增同步源') + '</h3>';
+  let html = '<h3>' + (s ? '编辑同步任务' : '新增同步任务') + '</h3>';
   html += '<form onsubmit="saveSource(event, ' + (id || 0) + ')"><div class="form-grid">';
   html += '<div class="form-item"><label>名称</label><input id="sName" required value="' + esc(s ? s.name : '') + '" placeholder="如：品质流程IT部"></div>';
   html += '<div class="form-item"><label>Dify 数据集名称</label><input id="sDataset" required value="' + esc(s ? s.dify_dataset_name : '') + '" placeholder="不存在会自动创建"></div>';

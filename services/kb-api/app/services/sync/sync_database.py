@@ -6,8 +6,6 @@
 """
 from __future__ import annotations
 
-from pathlib import Path
-
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
 
@@ -25,12 +23,20 @@ def _sync_database_url() -> str:
     return url
 
 
-def _default_data_dir() -> Path:
-    base = Path(__file__).resolve().parents[3]  # services/kb-api
-    return base / "data"
+_s = get_settings()
+# 新建连接超时：数据库/容器侧抖动时 psycopg 默认会长时间挂住，
+# 而同步路由跑在线程池里，一个挂住的连接会连带拖慢整批 /api/v1/sync/* 请求。
+_connect_args: dict = {}
+if _sync_database_url().startswith("postgresql+psycopg://"):
+    _connect_args["connect_timeout"] = _s.db_pool_timeout
 
-
-sync_engine = create_engine(_sync_database_url(), pool_pre_ping=True, echo=False, future=True)
+# 与异步引擎共用同一套池参数：/api/v1/sync/* 全是同步 def 路由（跑在线程池里），
+# 前端同步页每 3 秒并发 2+N 个请求，后台同步任务还会长时间持有会话，
+# 默认 5+10/30s 同样会被抽干，表现为整站点击卡顿。
+sync_engine = create_engine(_sync_database_url(), pool_pre_ping=True, echo=False, future=True,
+                            pool_size=_s.db_pool_size, max_overflow=_s.db_max_overflow,
+                            pool_timeout=_s.db_pool_timeout, pool_recycle=_s.db_pool_recycle,
+                            connect_args=_connect_args)
 SyncSessionLocal = sessionmaker(bind=sync_engine, expire_on_commit=False, class_=Session)
 
 

@@ -1,7 +1,7 @@
 """DeerFlow 2.0 QA Sidecar 的内部接口（服务间调用，X-Internal-Token 鉴权）。
 
 - GET  /api/v1/agent/bootstrap           向 sidecar 提供 LLM 引导配置
-- POST /api/v1/internal/kb/retrieve       供 sidecar 的 knowledge_search 工具调用 Dify 检索
+- POST /api/v1/internal/kb/retrieve       供 sidecar 的 knowledge_search 工具调用统一知识库检索
 - POST /api/v1/internal/dingtalk/search   供 sidecar 的 dingtalk_search 工具调用钉钉知识库检索
 - POST /api/v1/internal/dingtalk/content  供 sidecar 的 dingtalk_read_doc 工具读取钉钉文档正文
 """
@@ -50,7 +50,9 @@ async def _effective_setting(s: AsyncSession, key: str) -> str:
 
 class RetrieveIn(BaseModel):
     query: str
-    dataset_ids: list[str] | None = None
+    dataset_ids: list[str] | None = None          # Dify 数据集
+    ragflow_dataset_ids: list[str] | None = None   # RAGFlow 数据集
+    kb_ids: list[str] | None = None                # 平台本地 ES 知识库
     top_k: int = 8
 
 
@@ -61,23 +63,83 @@ async def internal_kb_retrieve(body: RetrieveIn, s: AsyncSession = Depends(get_s
     检索结果会自动附带知识加工元数据（文档摘要、标签、文档类型），
     帮助智能体理解命中文档的全貌，而不仅仅是片段内容。
     """
-    from kb_common.clients import dify_client
+    from kb_common.clients import dify_client, ragflow_client
     from kb_common.config import get_settings
-    from kb_common.models import ProcessedDocument
+    from kb_common.models import ProcessedDocument, KnowledgeLibrary, KnowledgeSource
 
     settings = get_settings()
     # 运行时写入 lru_cached settings（与问答链路一致）
     settings.dify_base_url = await _effective_setting(s, "dify_base_url")
     settings.dify_api_key = await _effective_setting(s, "dify_api_key")
+    settings.ragflow_base_url = await _effective_setting(s, "ragflow_base_url")
+    settings.ragflow_api_key = await _effective_setting(s, "ragflow_api_key")
 
-    dataset_ids = body.dataset_ids or []
-    if not dataset_ids:
-        dataset_ids = [d.strip() for d in (await _effective_setting(s, "dify_dataset_ids") or "").split(",") if d.strip()]
+    dataset_ids = list(body.dataset_ids or [])
+    ragflow_ids = list(body.ragflow_dataset_ids or [])
+    # 兜底：未显式指定任何检索目标时，优先用知识库抽象层（knowledge_libraries）里
+    # 全部启用的库（platform 决定通道）；抽象层为空时回退知识源注册表（过渡保护）
+    if not dataset_ids and not ragflow_ids and not (body.kb_ids or []):
+        libs = (await s.execute(select(KnowledgeLibrary).where(
+            KnowledgeLibrary.enabled == True,  # noqa: E712
+        ))).scalars().all()
+        for r in libs:
+            (dataset_ids if r.platform == "dify" else ragflow_ids).append(r.dataset_id)
+        if not libs:
+            rows = (await s.execute(select(KnowledgeSource).where(
+                KnowledgeSource.enabled == True,  # noqa: E712
+                KnowledgeSource.source_type.in_(["dify_dataset", "ragflow_dataset"]),
+            ))).scalars().all()
+            for r in rows:
+                (dataset_ids if r.source_type == "dify_dataset" else ragflow_ids).append(r.external_id)
 
-    try:
-        hits = await dify_client.retrieve(dataset_ids, body.query, top_k=body.top_k)
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(status_code=502, detail=f"dify retrieve failed: {e.__class__.__name__}: {e}") from e
+    hits: list[dict] = []
+    if dataset_ids:
+        try:
+            hits = await dify_client.retrieve(dataset_ids, body.query, top_k=body.top_k)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=502, detail=f"dify retrieve failed: {e.__class__.__name__}: {e}") from e
+    if ragflow_ids:
+        try:
+            hits = hits + await ragflow_client.retrieve(ragflow_ids, body.query, top_k=body.top_k)
+        except ragflow_client.RagflowNotConfigured:
+            pass  # RAGFlow 未配置：跳过该来源，不影响 Dify/本地结果（fail-soft 于多源并集）
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=502, detail=f"ragflow retrieve failed: {e.__class__.__name__}: {e}") from e
+
+    # 本地知识库通道（ES hybrid + rerank）：与 Dify 并列，回查 DB 校验软删除可见性
+    kb_ids = [k for k in (body.kb_ids or []) if k]
+    local_hits: list[dict] = []
+    if kb_ids:
+        from uuid import UUID
+
+        from kb_common.database import SessionLocal
+        from kb_common.models import Document
+        from kb_common.rag import searcher
+        try:
+            raw = await asyncio.wait_for(
+                searcher.hybrid(kb_ids, body.query, body.top_k, rerank=True), 60)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=502,
+                               detail=f"local kb retrieve failed: {e.__class__.__name__}: {e}") from e
+        ids = []
+        for h in raw:
+            try:
+                ids.append(UUID(str(h.get("document_id"))))
+            except ValueError:
+                continue
+        async with SessionLocal() as session:
+            docs = (await session.execute(select(Document).where(
+                Document.id.in_(ids),
+                Document.kb_id.in_([UUID(k) for k in kb_ids]),
+                Document.is_deleted.is_(False),
+            ))).scalars().all()
+        allowed = {str(d.id): d for d in docs}
+        for h in raw:
+            doc = allowed.get(str(h.get("document_id")))
+            if not doc:
+                continue
+            local_hits.append({**h, "content": h.get("text", "") or h.get("content", ""),
+                               "document_title": doc.original_filename, "source": "local"})
 
     # 富化：为命中的文档附加加工元数据（摘要/标签/类型）
     doc_ids = list({h.get("document_id") for h in hits if h.get("document_id")})
@@ -126,6 +188,8 @@ async def internal_kb_retrieve(body: RetrieveIn, s: AsyncSession = Depends(get_s
             h["node_id"] = mapping[0]
             h["source"] = "dingtalk"
 
+    if local_hits:
+        hits = hits + local_hits
     return {"results": hits, "total": len(hits)}
 
 
@@ -148,13 +212,15 @@ class DingTalkSearchIn(BaseModel):
 
 
 @router.post("/internal/dingtalk/search", dependencies=[Depends(_verify_internal_token)])
-async def internal_dingtalk_search(body: DingTalkSearchIn):
+async def internal_dingtalk_search(body: DingTalkSearchIn,
+                                   s: AsyncSession = Depends(get_session)):
     """钉钉知识库关键词检索：供 DeerFlow dingtalk_search 工具调用。
 
-    基于已缓存的钉钉知识库文件列表做关键词模糊匹配（文件名 + 目录路径）。
-    钉钉开放平台无语义检索 API，仅支持按元数据匹配。
+    基于**持久化快照**（知识加工 →「钉钉知识」页手动刷新写入）做关键词模糊匹配
+    （文件名 + 目录路径）。钉钉开放平台无语义检索 API，仅支持按元数据匹配。
+    本接口只读快照，不触发钉钉全量遍历（遍历仅由「刷新」按钮触发）。
     """
-    from app.routes.knowledge_center import _dingtalk_cache, _trigger_dingtalk_refresh
+    from app.routes.knowledge_center import _dingtalk_cache, ensure_dingtalk_files_loaded
     from kb_common.clients import dingtalk_client
 
     # 确保钉钉配置已加载
@@ -165,8 +231,8 @@ async def internal_dingtalk_search(body: DingTalkSearchIn):
     except Exception as e:  # noqa: BLE001
         return {"results": [], "total": 0, "error": f"钉钉配置加载失败：{e}"}
 
-    # 触发后台刷新（首次或过期时）
-    _trigger_dingtalk_refresh(force=False)
+    # 只读持久化快照（首次访问时从库载入）
+    await ensure_dingtalk_files_loaded(s)
     cached_files = _dingtalk_cache.get("files") or []
 
     if not cached_files:
@@ -216,14 +282,15 @@ async def agent_bootstrap(s: AsyncSession = Depends(get_session)):
     if not api_key or not model:
         raise HTTPException(status_code=409, detail="LLM not configured in system settings")
 
-    from app.services.agent.config import load_agent_config
+    from app.services.agent.config import load_agent_config, resolve_agent_model
 
     agent_cfg = await load_agent_config(s)
     return {
-        "model": model,
+        "model": resolve_agent_model(agent_cfg, model),
         "base_url": base_url or "https://api.deepseek.com/v1",
         "api_key": api_key,
         "temperature": float(agent_cfg.get("temperature", 0.7)),
+        "top_p": float(agent_cfg.get("top_p", 0.9)),
         "max_tokens": int(agent_cfg.get("max_tokens", 4096)),
         "agent_name": agent_cfg.get("agent_name", "杰克百晓生"),
     }
@@ -245,10 +312,10 @@ _DT_ONLINE_EXTS = {"adoc", "md", "markdown", "txt", "html", "htm"}
 _DT_OFFICE_EXTS = {"doc", "docx", "pdf", "xlsx", "xls", "ppt", "pptx", "csv", "rtf", "wps"}
 
 
-def _dingtalk_cached_files():
-    """获取钉钉缓存文件列表（触发加载快照，不等待后台刷新）。"""
-    from app.routes.knowledge_center import _dingtalk_cache, _load_dingtalk_snapshot
-    _load_dingtalk_snapshot()
+async def _dingtalk_cached_files(s: AsyncSession):
+    """获取钉钉快照文件列表（首次访问时从数据库载入；不触发遍历）。"""
+    from app.routes.knowledge_center import _dingtalk_cache, ensure_dingtalk_files_loaded
+    await ensure_dingtalk_files_loaded(s)
     return _dingtalk_cache.get("files") or [], _dingtalk_cache.get("loading", False)
 
 
@@ -259,20 +326,20 @@ class DingTalkBrowseIn(BaseModel):
 
 
 @router.post("/internal/dingtalk/browse", dependencies=[Depends(_verify_internal_token)])
-async def internal_dingtalk_browse(body: DingTalkBrowseIn):
+async def internal_dingtalk_browse(body: DingTalkBrowseIn,
+                                   s: AsyncSession = Depends(get_session)):
     """钉钉知识库目录浏览：供 DeerFlow dingtalk_browse 工具调用。
 
     - action=map：返回知识库→目录结构（2 级）及文档数/在线文档数，
       供智能体预判问题答案可能在哪个目录；
     - action=list：列出匹配目录下的文档，在线文档（adoc/md/txt）优先，
       返回 node_id/title/extension，供 dingtalk_read_doc 逐篇读取。
+    只读持久化快照，不触发钉钉全量遍历。
     """
-    from app.routes.knowledge_center import _trigger_dingtalk_refresh
-    _trigger_dingtalk_refresh(force=False)
-    files, loading = _dingtalk_cached_files()
+    files, loading = await _dingtalk_cached_files(s)
     if not files:
         return {"results": [], "loading": loading,
-                "error": "钉钉文件列表加载中" if loading else "钉钉知识库暂无数据"}
+                "error": "钉钉文件列表加载中" if loading else "钉钉知识库暂无快照，请在「知识加工 → 钉钉知识」点「刷新」同步"}
 
     if body.action == "map":
         return _browse_map(files)

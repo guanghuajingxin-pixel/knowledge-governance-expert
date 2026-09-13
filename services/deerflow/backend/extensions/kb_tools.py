@@ -1,7 +1,8 @@
 """企业知识库检索工具（DeerFlow 扩展工具）。
 
 DeerFlow Lead Agent / Sub-Agent 通过本工具访问知识治理平台 kb-api
-背后的 Dify 知识库，实现基于企业内部资料的可信问答与引用溯源。
+背后的统一知识库层（覆盖企业已接入的各平台知识库），
+实现基于企业内部资料的可信问答与引用溯源。
 
 运行时上下文（数据集选择等）由 qa_server 按 thread_id 注入 RUNTIME_CTX，
 工具通过 LangChain 注入的 RunnableConfig 获取 thread_id。
@@ -34,15 +35,24 @@ def _headers() -> dict[str, str]:
     }
 
 
+def _dingtalk_budget(config) -> float:
+    from deerflow.agents.middlewares.exploration_timeout_middleware import ExplorationTimeoutMiddleware
+    tid = ((config or {}).get("configurable") or {}).get("thread_id", "default")
+    return ExplorationTimeoutMiddleware.dingtalk_budget(tid)
+
+
+def _blocked() -> str:
+    return json.dumps({"error": "钉钉探索尚未获用户同意、已停止或到达本阶段时限。请先总结知识库内容并等待用户选择。", "results": []}, ensure_ascii=False)
+
+
 @tool("knowledge_search", parse_docstring=True)
 def knowledge_search_tool(query: str, top_k: int = 8, config: RunnableConfig = None) -> str:
-    """检索企业内部知识库，涵盖管理制度、流程规范、产品技术文档、审批规则、
-    操作手册等公司内部资料。
+    """检索企业内部知识库，涵盖管理制度、流程规范、产品技术文档、审批规则、操作手册等公司内部资料。
 
     使用规则：
     - 凡涉及公司内部信息的问题，必须先调用本工具检索，再严格依据召回内容回答，
       不得编造知识库中不存在的信息；
-    - 回答中引用召回内容时，用 [1][2] 形式标注对应的 ref 序号；
+    - 回答中引用召回内容时，用 [1][2] 形式标注对应的ref 序号。最后ref如果是同一个文档，则只标注文档序号.例如[1][2]来自同一个文档，则统一成[1]；
     - 一次调用只传一个检索词；复杂/多方面问题应拆分成多个检索词，
       分多次调用（可并行），最后综合各次结果作答；
     - 若召回结果与问题无关，可换一种表述再次检索；仍无结果时明确告知
@@ -56,30 +66,60 @@ def knowledge_search_tool(query: str, top_k: int = 8, config: RunnableConfig = N
     thread_id = cfg.get("thread_id", "default")
     ctx = RUNTIME_CTX.get(thread_id, {})
     dataset_ids = ctx.get("dataset_ids") or []
+    ragflow_dataset_ids = ctx.get("ragflow_dataset_ids") or []
+    kb_ids = ctx.get("kb_ids") or []
     effective_top_k = min(max(int(top_k or 8), 1), 15)
+
+    from deerflow.agents.middlewares.exploration_timeout_middleware import ExplorationTimeoutMiddleware
+    ExplorationTimeoutMiddleware.record_evidence(thread_id, [])
+
+    # 单轮检索轮数硬限（配置页 max_retrieval_rounds）：上限=轮数×3 次调用
+    rounds = max(1, int(ctx.get("max_retrieval_rounds", 2)))
+    cap = rounds * 3
+    calls = int(ctx.get("search_calls", 0))
+    if calls >= cap:
+        return json.dumps(
+            {"error": f"本轮 knowledge_search 调用已达上限（{cap} 次，max_retrieval_rounds={rounds}）。"
+                      f"请总结现有证据；不足时询问用户是否同意钉钉探索，禁止自动调用钉钉工具。",
+             "results": [], "cap_reached": True},
+            ensure_ascii=False,
+        )
+    ctx["search_calls"] = calls + 1
 
     payload: dict[str, Any] = {
         "query": query,
         "dataset_ids": dataset_ids,
+        "ragflow_dataset_ids": ragflow_dataset_ids,
+        "kb_ids": kb_ids,
         "top_k": effective_top_k,
     }
-    try:
-        with httpx.Client(timeout=60.0) as client:
-            resp = client.post(
-                f"{_kb_api_url()}/api/v1/internal/kb/retrieve",
-                json=payload,
-                headers=_headers(),
-            )
-            resp.raise_for_status()
-            data = resp.json()
-    except Exception as e:  # noqa: BLE001 - 工具异常需回传给 Agent 处理
-        logger.warning("knowledge_search failed: %s", e)
+    data: dict[str, Any] | None = None
+    last_err: Exception | None = None
+    # 冷启动/并行召回叠加时首调可能超过单次超时（实测冷启动首调 30s+），
+    # 一次 ReadTimeout 不应让本轮丢失引用证据：单次 40s、失败自动重试一次。
+    for _attempt in range(2):
+        try:
+            with httpx.Client(timeout=40.0) as client:
+                resp = client.post(
+                    f"{_kb_api_url()}/api/v1/internal/kb/retrieve",
+                    json=payload,
+                    headers=_headers(),
+                )
+                resp.raise_for_status()
+                data = resp.json()
+            break
+        except Exception as e:  # noqa: BLE001 - 工具异常需回传给 Agent 处理
+            last_err = e
+            logger.warning("knowledge_search attempt %d failed: %s", _attempt + 1, e)
+    if data is None:
         return json.dumps(
-            {"error": f"知识库检索失败：{e.__class__.__name__}，请稍后重试或换个检索词", "results": []},
+            {"error": f"知识库检索失败：{last_err.__class__.__name__}，请稍后重试或换个检索词", "results": []},
             ensure_ascii=False,
         )
 
     hits = data.get("results") or []
+    from deerflow.agents.middlewares.exploration_timeout_middleware import ExplorationTimeoutMiddleware
+    ExplorationTimeoutMiddleware.record_evidence(thread_id, hits)
     slim = [
         {
             "ref": i + 1,
@@ -105,14 +145,14 @@ def knowledge_search_tool(query: str, top_k: int = 8, config: RunnableConfig = N
 def dingtalk_search_tool(query: str, top_k: int = 10, config: RunnableConfig = None) -> str:
     """检索钉钉知识库中的文档，按文件名和目录路径做关键词匹配。
 
-    钉钉知识库是企业知识的两个指定检索来源之一，与 knowledge_search（Dify 知识库）
-    并列。回答涉及公司内部信息的问题时，应主动检索本工具，无需征得用户同意。
+    钉钉知识库是企业知识的两个指定检索来源之一，与 knowledge_search
+    配合。仅在知识库证据不足且用户点击继续从钉钉知识库探索后调用。
     钉钉知识库支持文档、表格、演示文稿等文件类型，按文件名/目录路径关键词匹配
     （非语义检索），返回文件元数据（名称、所属知识库、目录、链接）。
 
     使用规则：
-    - 与 knowledge_search 配合使用：同一问题先检索 Dify 获取正文内容，
-      再检索钉钉发现 Dify 未收录的相关文档；
+    - 与 knowledge_search 配合使用：同一问题先检索知识库获取正文内容，
+      再检索钉钉发现知识库未收录的相关文档；
     - 检索词使用能命中文档名的关键词，多个词空格分隔（全部需命中）；
       结果不理想时换同义词/上位词再次检索；
     - 返回的是文件元数据而非正文：在答案末尾以"可参阅"形式列出文档名和链接，
@@ -122,6 +162,10 @@ def dingtalk_search_tool(query: str, top_k: int = 10, config: RunnableConfig = N
         query: 检索关键词，多个词以空格分隔。
         top_k: 返回结果数，默认 10。
     """
+    budget = _dingtalk_budget(config)
+    if budget <= 0:
+        return _blocked()
+
     cfg = (config or {}).get("configurable", {}) or {}
     thread_id = cfg.get("thread_id", "default")
 
@@ -130,7 +174,7 @@ def dingtalk_search_tool(query: str, top_k: int = 10, config: RunnableConfig = N
         "top_k": min(max(int(top_k or 10), 1), 30),
     }
     try:
-        with httpx.Client(timeout=30.0) as client:
+        with httpx.Client(timeout=min(60.0, budget)) as client:
             resp = client.post(
                 f"{_kb_api_url()}/api/v1/internal/dingtalk/search",
                 json=payload,
@@ -147,7 +191,7 @@ def dingtalk_search_tool(query: str, top_k: int = 10, config: RunnableConfig = N
 
     if data.get("error"):
         err = data["error"]
-        # 钉钉未配置/配置失败：告知智能体该来源不可用，直接基于 Dify 结果作答，无需重试
+        # 钉钉未配置/配置失败：告知智能体该来源不可用，直接基于知识库结果作答，无需重试
         if "未配置" in err or "配置" in err:
             return json.dumps(
                 {"error": f"钉钉知识库暂不可用（{err}），请直接基于 knowledge_search 的结果作答，不要再调用本工具。",
@@ -209,13 +253,17 @@ def dingtalk_browse_tool(action: str, directory: str = "", top_k: int = 30, conf
         directory: action="list" 时的目录关键词（目录路径或知识库名片段），如 "差旅"、"财务"。
         top_k: list 时最多返回文档数，默认 30。
     """
+    budget = _dingtalk_budget(config)
+    if budget <= 0:
+        return _blocked()
+
     payload: dict[str, Any] = {
         "action": action if action in ("map", "list") else "map",
         "directory": directory or "",
         "top_k": min(max(int(top_k or 30), 1), 50),
     }
     try:
-        with httpx.Client(timeout=30.0) as client:
+        with httpx.Client(timeout=min(60.0, budget)) as client:
             resp = client.post(
                 f"{_kb_api_url()}/api/v1/internal/dingtalk/browse",
                 json=payload,
@@ -255,13 +303,17 @@ def dingtalk_read_doc_tool(node_id: str, title: str = "", extension: str = "", c
         title: 文档标题（来自 dingtalk_search 的 results[].title），可选。
         extension: 文档扩展名（来自 dingtalk_search 的 results[].extension），如 docx/pdf/adoc，可选。
     """
+    budget = _dingtalk_budget(config)
+    if budget <= 0:
+        return _blocked()
+
     payload: dict[str, Any] = {
         "node_id": node_id,
         "title": title or "",
         "extension": extension or "",
     }
     try:
-        with httpx.Client(timeout=600.0) as client:
+        with httpx.Client(timeout=min(60.0, budget)) as client:
             resp = client.post(
                 f"{_kb_api_url()}/api/v1/internal/dingtalk/content",
                 json=payload,
@@ -323,7 +375,7 @@ def knowledge_context_expand_tool(document_ids: str, query: str = "", max_relate
         "max_related": min(max(int(max_related or 3), 1), 10),
     }
     try:
-        with httpx.Client(timeout=30.0) as client:
+        with httpx.Client(timeout=60.0) as client:
             resp = client.post(
                 f"{_kb_api_url()}/api/v1/internal/process/context-expand",
                 json=payload,

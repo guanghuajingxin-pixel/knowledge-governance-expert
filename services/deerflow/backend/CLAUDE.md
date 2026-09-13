@@ -513,3 +513,9 @@ See `docs/` directory for detailed documentation:
 - [PATH_EXAMPLES.md](docs/PATH_EXAMPLES.md) - Path types and usage
 - [summarization.md](docs/summarization.md) - Context summarization
 - [plan_mode_usage.md](docs/plan_mode_usage.md) - Plan mode with TodoList
+
+### Knowledge governance QA stream projection
+
+`app/qa_events.py` owns the QA-only event projection. `values` establishes the per-run history baseline and authoritative final state; root `model` updates authorize answer message IDs. `messages` metadata is used only for progress, never token content. Summary, title, memory and nested-agent model text must never enter the user answer. `answer_final` carries thread/run/message identity and is emitted only after graph completion; downstream kb-api rejects missing/foreign origins and incomplete streams. Tool start/end progress is correlated by call ID. The current question and runtime persona output scope keep historical summaries subordinate to the current request without overwriting custom persona files.
+
+Regression: `uv run pytest tests/test_qa_events.py tests/test_qa_sidecar_config.py -q` includes a real LangGraph two-turn summary/checkpoint test.

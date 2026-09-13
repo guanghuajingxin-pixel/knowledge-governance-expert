@@ -44,7 +44,7 @@ onMounted(() => { app.refreshAll().catch(() => {}) })
     <div class="page-head">
       <div><h2>工作台</h2><div class="desc">各同步源运行状态与最近同步情况</div></div>
       <div style="display:flex;gap:10px">
-        <el-button @click="router.push('/sources')">+ 新增同步源</el-button>
+        <el-button @click="router.push('/sources')">+ 新增同步任务</el-button>
         <el-button type="primary" @click="runAll">立即同步全部</el-button>
       </div>
     </div>

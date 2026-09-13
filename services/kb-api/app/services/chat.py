@@ -45,5 +45,5 @@ async def answer(query: str, kb_ids: list[str], top_k: int, s: AsyncSession) -> 
     except Exception as e:
         # 服务端记录原始异常（含上游状态/响应体），对客户端返回固定友好提示避免信息泄漏
         logger.warning("LLM chat failed: %s", e)
-        ans = "（LLM 问答暂不可用，请在 设置 页检查 LLM API Key 配置。）"
+        ans = "（LLM 问答暂不可用，请在 系统配置 页检查 LLM 模型配置。）"
     return {"answer": ans, "citations": cited}

@@ -1,12 +1,21 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { syncSource, updatePreviewSettings } from '@/api/sync'
 import type { PreviewItem } from '@/types/sync'
 
-const props = defineProps<{ visible: boolean; name: string; sourceId: number; items: PreviewItem[] }>()
-const emit = defineEmits<{ (e: 'update:visible', v: boolean): void; (e: 'done'): void }>()
+const props = defineProps<{ visible: boolean; name: string; sourceId: number; items: PreviewItem[]; loading?: boolean }>()
+const emit = defineEmits<{ (e: 'update:visible', v: boolean): void; (e: 'done'): void; (e: 'refresh'): void }>()
 const running = ref(false)
+
+// 前端分页：预演结果可能上千行，表格只渲染当前页
+const page = ref(1)
+const pageSize = 20
+const pagedItems = computed(() =>
+  props.items.slice((page.value - 1) * pageSize, page.value * pageSize))
+watch(() => props.visible, (v) => { if (v) page.value = 1 })
+// 刷新后数据整体替换，回到第一页
+watch(() => props.items, () => { page.value = 1 })
 
 function badge(action: string) {
   if (action === '新增') return 'ok'
@@ -29,10 +38,12 @@ async function confirm() {
 </script>
 
 <template>
-  <el-dialog :model-value="visible" width="680px" :title="`预演（dry-run）结果 · ${name}`" @close="emit('update:visible', false)">
-    <div style="font-size:13px;color:var(--el-text-color-secondary);margin-bottom:10px">只采集与比对，未写入 Dify。以下为本次将执行的变更清单：</div>
-    <el-table :data="items" size="small" border>
-      <el-table-column label="动作" width="90">
+  <el-dialog :model-value="visible" width="680px" :title="`同步列表 · ${name}`" @close="emit('update:visible', false)">
+    <div style="font-size:13px;color:var(--el-text-color-secondary);margin-bottom:10px">
+      『新增』＝未同步过；『更新』＝上一轮已同步；『删除』＝钉钉侧已移除。开关打开的文档本次都会重新同步。目录快照缓存 10 分钟，「刷新列表」强制重新拉取。
+    </div>
+    <el-table :data="pagedItems" size="small" border>
+      <el-table-column label="动作" width="80">
         <template #default="{ row }">
           <span class="preview-pill" :class="badge(row.action)">{{ row.action }}</span>
         </template>
@@ -44,14 +55,31 @@ async function confirm() {
             <el-switch v-model="row.enabled" :aria-label="`${row.doc}参与同步`" />
             <span>{{ row.enabled ? '参与同步' : '不参与' }}</span>
           </div>
-          <span v-else style="font-size:12px;color:var(--el-text-color-secondary)">{{ row.note || '无需操作' }}</span>
+          <span v-else style="font-size:12px;color:var(--el-text-color-secondary)">—</span>
         </template>
       </el-table-column>
-      <template #empty><div style="padding:20px;color:var(--el-text-color-secondary)">无待处理变更</div></template>
+      <template #empty><div style="padding:20px;color:var(--el-text-color-secondary)">该目录下没有可同步的文档</div></template>
     </el-table>
+    <div style="display:flex;justify-content:flex-end;margin-top:10px">
+      <el-pagination
+        v-model:current-page="page"
+        :total="items.length"
+        :page-size="pageSize"
+        layout="total, prev, pager, next, jumper"
+        background
+        size="small"
+      />
+    </div>
     <template #footer>
-      <el-button @click="emit('update:visible', false)">关闭</el-button>
-      <el-button type="primary" :loading="running" @click="confirm">确认并开始同步</el-button>
+      <div style="display:flex;justify-content:space-between;align-items:center;width:100%">
+        <el-tooltip content="绕过缓存，重新遍历钉钉目录树（会保留已调整的开关状态）" placement="top">
+          <el-button :loading="props.loading" @click="emit('refresh')">刷新列表</el-button>
+        </el-tooltip>
+        <div>
+          <el-button @click="emit('update:visible', false)">关闭</el-button>
+          <el-button type="primary" :loading="running" :disabled="props.loading" @click="confirm">确认并开始同步</el-button>
+        </div>
+      </div>
     </template>
   </el-dialog>
 </template>

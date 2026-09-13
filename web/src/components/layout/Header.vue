@@ -1,20 +1,37 @@
 <script setup lang="ts">
+import { onMounted, ref } from 'vue'
 import { useAppStore } from '@/stores/app'
 import { useUserStore } from '@/stores/user'
 import { useRouter } from 'vue-router'
 import { Expand, Fold, ArrowDown } from '@element-plus/icons-vue'
 import Breadcrumb from './Breadcrumb.vue'
+import { getOverviewMetrics } from '@/api/metrics'
 
 const appStore = useAppStore()
 const userStore = useUserStore()
 const router = useRouter()
 
-const metrics = [
-  { label: '今日新增', value: 12 },
-  { label: '今日加工', value: 8 },
-  { label: '累计采纳', value: 5 },
-  { label: '累计反馈', value: 23 },
-]
+// 顶栏运营指标：value 为 null 时表示尚未取到数，展示占位符而非假数字
+const metrics = ref<[string, number | null][]>([
+  ['今日新增', null],
+  ['今日加工', null],
+  ['累计采纳', null],
+  ['累计反馈', null],
+])
+
+onMounted(async () => {
+  try {
+    const data = await getOverviewMetrics()
+    metrics.value = [
+      ['今日新增', data.today_new],
+      ['今日加工', data.today_processed],
+      ['累计采纳', data.total_adopted],
+      ['累计反馈', data.total_feedback],
+    ]
+  } catch {
+    // 取数失败保持占位符，避免展示误导性的数字
+  }
+})
 
 function handleCommand(command: string) {
   if (command === 'logout') {
@@ -37,8 +54,8 @@ function handleCommand(command: string) {
     <div class="header-center">
       <!-- 关键指标 -->
       <div class="metrics">
-        <span v-for="m in metrics" :key="m.label" class="metric-item">
-          {{ m.label }} <b>{{ m.value }}</b>
+        <span v-for="[label, value] in metrics" :key="label" class="metric-item">
+          {{ label }} <b>{{ value ?? '--' }}</b>
         </span>
       </div>
     </div>

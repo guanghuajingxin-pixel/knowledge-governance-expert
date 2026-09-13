@@ -20,6 +20,8 @@ export interface ChatSessionMessage {
   detail?: {
     quality?: { verification: string; dws: string; warnings: string[] }
     answer_status?: string
+    assessment?: { confidence: number; reason: string }
+    choice?: { question: string; options: string[]; answered: boolean }
     steps?: { title?: string; detail?: string; done?: boolean }[]
     retrieval?: Record<string, unknown>[]
     model?: string

@@ -3,16 +3,31 @@
 通过 Dify Service API 实现知识库检索与数据集管理。
 - 检索端点：POST {base_url}/datasets/{dataset_id}/retrieve
 - 数据集列表：GET {base_url}/datasets
+- 文档上传：
+  * 普通数据集（runtime_mode=general）：POST /datasets/{id}/document/create-by-file
+  * 流水线数据集（runtime_mode=rag_pipeline）：三步接口
+      1. GET  /datasets/{id}/pipeline/datasource-plugins?is_published=true 拿 local_file 节点 ID
+      2. POST /datasets/pipeline/file-upload 上传文件到暂存区拿 reference
+      3. POST /datasets/{id}/pipeline/run 阻塞运行流水线
+    流水线数据集若误用 create-by-file 会报 "No subchunk segmentation found in rules"。
 鉴权使用 Dataset API Key（单个数据集）或拥有多数据集权限的 App/Console Key。
 """
 import json
 import logging
+import mimetypes
+import time
 from typing import Any
 
 import httpx
 from kb_common.config import get_settings
+from .dify_document import dataset_runtime, file_payload, pipeline_payload, pipeline_result
 
 logger = logging.getLogger(__name__)
+
+# 流水线数据集的 local_file 起始节点 ID 缓存：dataset_id → (monotonic_ts, node_id)
+# 手动上传 100 个文件到同一流水线库时避免重复查询节点接口。
+_PIPELINE_NODE_CACHE: dict[str, tuple[float, str]] = {}
+_PIPELINE_NODE_TTL = 300.0  # 5 分钟
 
 
 def _base_url() -> str:
@@ -143,7 +158,7 @@ async def retrieve(
 async def list_datasets() -> list[dict[str, Any]]:
     """列出当前 API Key 可访问的 Dify 数据集，失败时抛出异常由调用方处理。"""
     url = f"{_base_url()}/datasets"
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=60.0) as client:
         resp = await client.get(url, headers=_headers())
         resp.raise_for_status()
         data = resp.json()
@@ -153,67 +168,206 @@ async def list_datasets() -> list[dict[str, Any]]:
 async def create_dataset(name: str) -> dict[str, Any]:
     """在 Dify 中新建知识库（数据集），失败抛异常。"""
     url = f"{_base_url()}/datasets"
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=60.0) as client:
         resp = await client.post(url, json={"name": name}, headers=_headers())
         resp.raise_for_status()
         return resp.json()
 
 
-async def upload_document(dataset_id: str, filename: str, content: bytes) -> dict[str, Any]:
-    """上传文档到指定 Dify 知识库：直接向 create-by-file 端点提交文件（自动分段索引）。
+def _upload_headers() -> dict[str, str]:
+    """multipart 上传请求头：只保留 Authorization，不能带 Content-Type: application/json。"""
+    return {"Authorization": f"Bearer {_api_key()}"}
 
-    create-by-file 端点接受 multipart/form-data，内含 file 与 data（JSON 字符串），
-    使用 Dataset API Key 鉴权，无需先调用 /files/upload（该端点需 App API Key）。
 
-    返回 document 创建结果（含 document.id / batch）。
+def _format_dify_http_error(e: httpx.HTTPStatusError, action: str) -> str:
+    """把 Dify HTTP 错误格式化为带中文提示的字符串。"""
+    body = e.response.text
+    try:
+        err_json = e.response.json()
+        code = err_json.get("code", "")
+        msg = err_json.get("message", "") or body
+        detail = f"{code}: {msg}" if code else msg
+    except Exception:
+        detail = body
+    hints = {
+        401: "请检查系统配置中的 Dataset API Key。",
+        403: "当前 API Key 无权写入此知识库。",
+        404: "知识库或流水线节点不存在，请确认 dataset_id 与流水线已发布。",
+        413: "文件超过 Dify 或网关限制，请压缩或拆分文件。",
+        415: "此 Dify 实例不支持该格式，请另存为 DOCX、PDF 或 TXT。",
+        429: "Dify 请求频率或配额受限，请稍后检查配额再重试。",
+    }
+    hint = hints.get(e.response.status_code, "")
+    return f"{action}失败（HTTP {e.response.status_code}）：{detail[:800]}。{hint}".strip()
+
+
+async def _local_file_node_id(client: httpx.AsyncClient, dataset_id: str) -> str:
+    """取流水线数据集的本地文件数据源节点 ID（start_node_id），5 分钟内存缓存。"""
+    now = time.monotonic()
+    cached = _PIPELINE_NODE_CACHE.get(dataset_id)
+    if cached and now - cached[0] < _PIPELINE_NODE_TTL:
+        return cached[1]
+    resp = await client.get(
+        f"{_base_url()}/datasets/{dataset_id}/pipeline/datasource-plugins",
+        params={"is_published": "true"},
+        headers=_headers(),
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    nodes = data if isinstance(data, list) else (data.get("data") or [])
+    for node in nodes:
+        if node.get("datasource_type") == "local_file" and node.get("node_id"):
+            node_id = str(node["node_id"])
+            _PIPELINE_NODE_CACHE[dataset_id] = (now, node_id)
+            return node_id
+    raise RuntimeError(
+        "Dify 知识流水线未配置本地文件数据源节点，无法通过 API 同步文档。"
+        "请在 Dify 流水线编辑器中添加『本地文件』数据源节点并点击『发布』。"
+    )
+
+
+async def _upload_via_pipeline(
+    client: httpx.AsyncClient, dataset_id: str, filename: str, content: bytes,
+    inputs: dict | None = None,
+) -> dict[str, Any]:
+    """流水线数据集上传：Step2 file-upload → Step3 pipeline/run（阻塞模式）。
+
+    ⚠️ 真实响应结构（2026-09-11 本地 Dify 1.16.1 实测）与官方文档/源码不一致：
+    实际返回 `{batch, dataset, documents: [{id, name, indexing_status, ...}]}` 顶层结构，
+    而不是 WorkflowAppBlockingResponse 的 `{task_id, workflow_run_id, data: {outputs}}`。
+    本实现按真实响应解析，同时保留 data.outputs 兜底路径以兼容未来版本。
+
+    ⚠️ `inputs` 必须携带流水线定义的必填变量（如 max_chunk_length / parent_mode /
+    child_length），缺失会报 500 "xxx is required in input form"。不同流水线的变量
+    完全不同，值由调用方传入；未传时由已发布流水线使用自己的默认值。
+
+    返回结构与 create-by-file 对齐：{"document": {...}, "batch": "..."}，
+    额外带 runtime_mode="rag_pipeline" 便于上层日志/审计。
     """
+    start_node_id = await _local_file_node_id(client, dataset_id)
+
+    # Step 2：上传到流水线暂存区，拿 reference（文件 ID）
+    # 必须用三元组 (filename, content, mimetype) 显式传 MIME 类型：
+    # Dify FileService.upload_file 靠 filename 的扩展名 + mimetype 识别文件类型，
+    # httpx 二元组对中文文件名 + .pptx/.docx 等扩展名可能猜错或退化成
+    # application/octet-stream，导致 Dify 侧存储时扩展名/类型丢失。
+    mime, _ = mimetypes.guess_type(filename)
+    mime = mime or "application/octet-stream"
+    logger.info(
+        "Dify pipeline file-upload: dataset=%s filename=%r mimetype=%s size=%d",
+        dataset_id, filename, mime, len(content),
+    )
+    upload_resp = await client.post(
+        f"{_base_url()}/datasets/pipeline/file-upload",
+        files={"file": (filename, content, mime)},
+        headers=_upload_headers(),
+    )
+    upload_resp.raise_for_status()
+    uploaded = upload_resp.json()
+    reference = uploaded.get("id")
+    if not reference:
+        raise RuntimeError(f"Dify 流水线文件上传未返回文件 ID：{uploaded}")
+    logger.info(
+        "Dify pipeline file-upload ok: reference=%s name=%r extension=%r mime_type=%r",
+        reference, uploaded.get("name"), uploaded.get("extension"), uploaded.get("mime_type"),
+    )
+
+    # Step 3：阻塞运行流水线（含解析+分段+索引，可能持续数分钟）
+    # inputs 必须包含流水线定义的输入变量；不同流水线变量不同（max_chunk_length /
+    # parent_mode / child_length 等），值由调用方传入；缺失必填变量 Dify 报 500。
+    run_payload = pipeline_payload(start_node_id, str(reference), filename, inputs)
+    run_resp = await client.post(
+        f"{_base_url()}/datasets/{dataset_id}/pipeline/run",
+        json=run_payload,
+        headers=_headers(),
+    )
+    run_resp.raise_for_status()
+    result = run_resp.json()
+
+    try:
+        return pipeline_result(result, filename)
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
+
+
+async def _upload_via_create_by_file(
+    client: httpx.AsyncClient, dataset: dict[str, Any], dataset_id: str,
+    filename: str, content: bytes,
+) -> dict[str, Any]:
+    """普通数据集：走 create-by-file 端点，复用数据集自身的分段规则。"""
+    data = file_payload(dataset)
     url = f"{_base_url()}/datasets/{dataset_id}/document/create-by-file"
-    async with httpx.AsyncClient(timeout=180.0) as client:
+    # 与 pipeline 分支保持一致：三元组显式传 mimetype，避免中文文件名 + 特殊扩展名
+    # 场景下 httpx 二元组猜错类型导致 Dify 侧识别异常。
+    mime, _ = mimetypes.guess_type(filename)
+    mime = mime or "application/octet-stream"
+    logger.info(
+        "Dify create-by-file: dataset=%s filename=%r mimetype=%s size=%d",
+        dataset_id, filename, mime, len(content),
+    )
+    resp = await client.post(
+        url,
+        files={"file": (filename, content, mime)},
+        data={"data": json.dumps(data)},
+        headers=_upload_headers(),
+    )
+    resp.raise_for_status()
+    result = resp.json()
+    doc = result.get("document") or {}
+    logger.info(
+        "Dify create-by-file ok: document_id=%s document_name=%r batch=%s (original filename=%r)",
+        doc.get("id"), doc.get("name"), result.get("batch"), filename,
+    )
+    return result
+
+
+async def upload_document(dataset_id: str, filename: str, content: bytes,
+                          inputs: dict | None = None) -> dict[str, Any]:
+    """上传文档到指定 Dify 知识库，按 dataset.runtime_mode 自动分流。
+
+    - `rag_pipeline`（流水线数据集）：三步接口 datasource-plugins → file-upload → pipeline/run
+      （阻塞模式，含解析+分段+索引，耗时数十秒到数分钟）。
+      流水线数据集若误用 create-by-file 会报 "No subchunk segmentation found in rules"，
+      或控制台预览报 PublishedWorkflowRunPayload 校验错误。
+      `inputs` 为流水线 input form 变量值（分段参数），缺失必填变量 Dify 报 500。
+    - `general`（普通数据集）：create-by-file 端点，Dify 按数据集自身分段规则处理，
+      忽略 inputs。
+
+    返回：{"document": {...}, "batch": "..."}；流水线分支额外带 runtime_mode 字段。
+    """
+    # 流水线阻塞模式含解析+分段+索引，可能持续数分钟；create-by-file 通常几秒完成。
+    # 统一把 client timeout 拉到 600s，覆盖两条路径的最坏情况。
+    async with httpx.AsyncClient(timeout=600.0) as client:
         try:
             dataset_response = await client.get(
                 f"{_base_url()}/datasets/{dataset_id}", headers=_headers()
             )
             dataset_response.raise_for_status()
             dataset = dataset_response.json()
-            data = {
-                "indexing_technique": dataset.get("indexing_technique") or "high_quality",
-                "doc_form": dataset.get("doc_form") or dataset.get("chunk_structure") or "text_model",
-                "doc_language": "Chinese",
-            }
-            # Existing datasets inherit their saved processing rules, including
-            # hierarchical segmentation. Only a new ordinary dataset needs defaults.
-            if not dataset.get("document_count") and data["doc_form"] == "text_model":
-                data["process_rule"] = {"mode": "automatic"}
-            resp = await client.post(url, files={"file": (filename, content)},
-                                     data={"data": json.dumps(data)},
-                                     headers={"Authorization": f"Bearer {_api_key()}"})
-            resp.raise_for_status()
         except httpx.HTTPStatusError as e:
-            body = e.response.text
-            try:
-                err_json = e.response.json()
-                code = err_json.get("code", "")
-                msg = err_json.get("message", "") or body
-                detail = f"{code}: {msg}" if code else msg
-            except Exception:
-                detail = body
-            hints = {
-                401: "请检查系统配置中的 Dataset API Key。",
-                403: "当前 API Key 无权写入此知识库。",
-                413: "文件超过 Dify 或网关限制，请压缩或拆分文件。",
-                415: "此 Dify 实例不支持该格式，请另存为 DOCX、PDF 或 TXT。",
-                429: "Dify 请求频率或配额受限，请稍后检查配额再重试。",
-            }
-            raise RuntimeError(f"Dify 上传失败（HTTP {e.response.status_code}）：{detail[:800]}。{hints.get(e.response.status_code, '')}") from e
+            raise RuntimeError(_format_dify_http_error(e, "获取 Dify 知识库信息")) from e
         except httpx.TimeoutException as e:
-            raise RuntimeError("Dify 响应超时，请先到目标知识库确认文档是否已创建，再决定是否重试，避免重复上传。") from e
-        return resp.json()
+            raise RuntimeError("获取 Dify 知识库信息超时，请检查 Dify 服务是否可达。") from e
+
+        runtime_mode = dataset_runtime(dataset)
+        action = "Dify 流水线上传" if runtime_mode == "rag_pipeline" else "Dify 上传"
+        try:
+            if runtime_mode == "rag_pipeline":
+                return await _upload_via_pipeline(client, dataset_id, filename, content,
+                                                  inputs=inputs)
+            return await _upload_via_create_by_file(client, dataset, dataset_id, filename, content)
+        except httpx.HTTPStatusError as e:
+            raise RuntimeError(_format_dify_http_error(e, action)) from e
+        except httpx.TimeoutException as e:
+            raise RuntimeError(
+                "Dify 响应超时，请先到目标知识库确认文档是否已创建，再决定是否重试，避免重复上传。"
+            ) from e
 
 
 async def list_documents(dataset_id: str) -> list[dict[str, Any]]:
     """列出指定 Dify 数据集下的所有文档。"""
     url = f"{_base_url()}/datasets/{dataset_id}/documents"
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=60.0) as client:
         resp = await client.get(url, headers=_headers())
         resp.raise_for_status()
         data = resp.json()
@@ -234,60 +388,10 @@ async def get_dataset(dataset_id: str) -> dict[str, Any] | None:
     """获取单个数据集信息。"""
     url = f"{_base_url()}/datasets/{dataset_id}"
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.get(url, headers=_headers())
             resp.raise_for_status()
             return resp.json()
     except Exception as e:
         logger.warning("Dify get_dataset failed for %s: %s", dataset_id, e)
         return None
-
-
-async def upload_document_by_text(
-    dataset_id: str,
-    name: str,
-    text: str,
-    indexing_technique: str | None = None,
-) -> dict[str, Any]:
-    """通过文本内容创建 Dify 文档（适用于大文件经 MinerU 解析后的 Markdown）。
-
-    Dify create-by-file 对单文件有大小限制（通常 15MB），超大二进制文档
-    可先经 MinerU 解析为 Markdown，再通过本接口写入知识库，Dify 自动分块索引。
-    """
-    if not text or not text.strip():
-        raise RuntimeError("文本内容为空，无法创建文档")
-    url = f"{_base_url()}/datasets/{dataset_id}/document/create-by-text"
-    # Dify KnowledgeConfig 要求 indexing_technique 必填；doc_form 必须与数据集一致，
-    # 否则 400（doc_form is different from the dataset doc_form）。
-    # 均从数据集读取，与该知识库已有的索引方式（含 create-by-file 路径）保持一致。
-    dataset = await get_dataset(dataset_id) or {}
-    if not indexing_technique:
-        indexing_technique = dataset.get("indexing_technique") or "high_quality"
-    doc_form = dataset.get("doc_form") or dataset.get("chunk_structure") or "text_model"
-    data: dict[str, Any] = {
-        "name": name,
-        "text": text,
-        "doc_form": doc_form,
-        "doc_language": "Chinese",
-        "indexing_technique": indexing_technique,
-    }
-    # 与 create-by-file (_file_payload) 一致：空知识库 + 普通分段时使用自动分段规则。
-    if not dataset.get("document_count") and doc_form == "text_model":
-        data["process_rule"] = {"mode": "automatic"}
-    async with httpx.AsyncClient(timeout=180.0) as client:
-        try:
-            resp = await client.post(url, json=data, headers=_headers())
-            resp.raise_for_status()
-        except httpx.HTTPStatusError as e:
-            body = e.response.text
-            try:
-                err_json = e.response.json()
-                code = err_json.get("code", "")
-                msg = err_json.get("message", "") or body
-                detail = f"{code}: {msg}" if code else msg
-            except Exception:
-                detail = body
-            raise RuntimeError(f"Dify create-by-text 失败（HTTP {e.response.status_code}）：{detail[:800]}") from e
-        except httpx.TimeoutException as e:
-            raise RuntimeError("Dify create-by-text 响应超时") from e
-        return resp.json()

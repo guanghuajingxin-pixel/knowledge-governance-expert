@@ -46,7 +46,7 @@ function goSearch() {
 </script>
 
 <template>
-  <div class="page">
+  <div class="kge-page kge-page--scroll">
     <h2 class="pg-title">知识应用</h2>
     <p class="pg-sub">应用是治理的基础。三端共用统一检索服务（Dify 承载），每次问答都带引用、可反馈——问答日志是治理最重要的数据来源。</p>
 
@@ -98,7 +98,6 @@ function goSearch() {
 </template>
 
 <style scoped>
-.page { padding: 20px 24px 48px; max-width: 1320px; margin: 0 auto; }
 .pg-title { font-size: 19px; margin-bottom: 4px; }
 .pg-sub { color: #6b7280; font-size: 13px; margin-bottom: 16px; line-height: 1.8; }
 .channel-card { height: 100%; }

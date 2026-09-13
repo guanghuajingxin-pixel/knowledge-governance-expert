@@ -39,13 +39,13 @@ const notConfigured = computed(() => overview.value?.dingtalk_configured === fal
 async function loadAll() {
   loading.value = true
   try {
-    const [ov, dist] = await Promise.all([getOverview(), getKnowledgeDistribution()])
+    // 三个请求互不依赖，一起并发（原先热门知识串在前两个之后，白等一个来回）
+    const [ov, dist] = await Promise.all([getOverview(), getKnowledgeDistribution(), loadHot()])
     overview.value = ov
     distData.value = dist.items || []
     distLoading.value = !!dist.loading
     // 知识数量/分布的错误与存储权限错误分开：存储权限错误只在存储卡片上提示
     distError.value = dist.error || ''
-    await loadHot()
     await nextTick()
     renderChart()
     // 统计任务进行中（或某指标仍在加载）时，20 秒后轮询一次
@@ -381,7 +381,7 @@ const ownerStats = [
 </template>
 
 <style scoped>
-.page { padding: 20px 24px 48px; max-width: 1320px; margin: 0 auto; }
+.page { padding: 4px 0 24px; }
 .page-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
 .pg-title { font-size: 19px; margin: 0; }
 .warn-bar { display: flex; align-items: center; gap: 8px; background: #FFFBEB; border: 1px solid #FDE68A; color: #92400E; padding: 8px 14px; border-radius: 8px; font-size: 13px; margin-bottom: 16px; }

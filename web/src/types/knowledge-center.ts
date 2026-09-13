@@ -136,13 +136,15 @@ export interface DingTalkDocResult {
   /** 后台正在遍历钉钉知识库时为 true（前端轮询） */
   loading?: boolean
   error?: string | null
+  /** 最近一次成功刷新（持久化快照）的时间（UTC ISO），用于展示数据新鲜度 */
+  cached_at?: string | null
 }
 
 /** 知识源登记（企业知识库注册表） */
 export interface KnowledgeSource {
   id: number
   name: string
-  source_type: 'dingtalk_workspace' | 'dify_dataset' | 'business_system'
+  source_type: 'dingtalk_workspace' | 'dify_dataset' | 'ragflow_dataset' | 'business_system'
   external_id: string
   description: string
   config: Record<string, any> | null

@@ -48,7 +48,7 @@ export function fetchUploaders(kbType?: string) {
   })
 }
 
-/** 钉钉知识库文件列表（实时拉取钉钉开放平台，首次/手动刷新遍历较慢，超时 10 分钟） */
+/** 钉钉知识库文件列表（读取服务端持久化快照；refresh=true 才后台重新遍历钉钉） */
 export function fetchDingTalkDocuments(params: {
   page: number
   size: number
@@ -58,10 +58,9 @@ export function fetchDingTalkDocuments(params: {
   directory?: string
   refresh?: boolean
 }) {
-  return request.get<unknown, DingTalkDocResult>('/knowledge-center/dingtalk/documents', {
-    params,
-    timeout: 600000,
-  })
+  // 后端读持久化快照即返回（refresh=true 也是立即返回 + 后台遍历），
+  // 无需 10 分钟超时；回落全局 60s，避免异常时长时间挂住一条请求占后端连接。
+  return request.get<unknown, DingTalkDocResult>('/knowledge-center/dingtalk/documents', { params })
 }
 
 /** 实时列出钉钉团队知识库（单次 API 调用，轻量） */
@@ -104,5 +103,12 @@ export function fetchKnowledgeSourceDirectories(sourceId: number, parentNodeId?:
   return request.get<unknown, { source_type: string; root_node_id: string; items: any[] }>(
     `/knowledge-center/knowledge-sources/${sourceId}/directories`,
     { params: parentNodeId ? { parent_node_id: parentNodeId } : {} },
+  )
+}
+
+/** 钉钉知识库文件夹快照（dingtalk_folder_stats 表，只读 DB 不调钉钉，秒开） */
+export function fetchDingtalkFolderSnapshot(sourceId: number) {
+  return request.get<unknown, { external_id: string; fetched_at: string | null; count: number; folders: Array<{ node_id: string; path: string }> }>(
+    `/knowledge-center/knowledge-sources/${sourceId}/dingtalk-folder-snapshot`,
   )
 }

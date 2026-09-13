@@ -253,7 +253,7 @@ onMounted(load)
 </script>
 
 <style scoped>
-.qa-page { padding: 16px 20px; }
+.qa-page { padding: 4px 0 24px; }
 .filter-bar {
   display: flex; align-items: center; flex-wrap: wrap; gap: 12px;
   background: #fff; border: 1px solid var(--line, #E5E7EB); border-radius: 10px;

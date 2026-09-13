@@ -65,10 +65,11 @@ const standards = ref<StandardDoc[]>([
 const standardsLoading = ref(false)
 const standardsSyncedAt = ref('')
 
-async function loadStandards() {
+async function loadStandards(force = false) {
   standardsLoading.value = true
   try {
-    const res = await getStandards()
+    // 进页面用服务端缓存（毫秒级）；点「刷新」才强制重拉钉钉多维表
+    const res = await getStandards(force)
     if (res.error) {
       ElMessage.error(res.error)
       return
@@ -80,7 +81,7 @@ async function loadStandards() {
   }
 }
 
-onMounted(loadStandards)
+onMounted(() => loadStandards())
 
 // 文档状态标签配色（与多维表选项：草稿/评审中/已发布/已废止/修订中/审核中）
 const statusTag: Record<string, string> = {
@@ -94,8 +95,7 @@ const statusTag: Record<string, string> = {
 </script>
 
 <template>
-  <div class="page">
-    <h2 class="pg-title">知识治理</h2>
+  <div class="kge-page">
     <el-tabs v-model="activeTab">
       <el-tab-pane label="知识缺口" name="gaps" lazy><KnowledgeGaps /></el-tab-pane>
       <!-- 工单智能分诊 -->
@@ -213,7 +213,7 @@ const statusTag: Record<string, string> = {
               <span>知识治理标准 <el-tag size="small" type="info">钉钉多维表 · 单一维护入口</el-tag></span>
               <div class="src">
                 <span class="srcinfo">源：<b>钉钉多维表《杰克知识管理规范》</b><template v-if="standardsSyncedAt"> · 同步于 {{ standardsSyncedAt }}</template></span>
-                <el-button size="small" :loading="standardsLoading" @click="loadStandards">🔄 刷新</el-button>
+                <el-button size="small" :loading="standardsLoading" @click="loadStandards(true)">🔄 刷新</el-button>
               </div>
             </div>
           </template>
@@ -241,7 +241,6 @@ const statusTag: Record<string, string> = {
 </template>
 
 <style scoped>
-.page { padding: 20px 24px 48px; max-width: 1320px; margin: 0 auto; }
 .pg-title { font-size: 19px; margin-bottom: 16px; }
 .card { margin-bottom: 16px; }
 .card-header { display: flex; align-items: center; justify-content: space-between; }

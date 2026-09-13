@@ -17,10 +17,16 @@ export interface StandardsResponse {
   total: number
   error?: string | null
   fetched_at?: string
+  /** 后端 60s 缓存：true=本次返回的是缓存数据 */
+  from_cache?: boolean
+  /** true=缓存已过期，旧数据先展示、后台正在重新拉取 */
+  stale?: boolean
 }
 
-export const getStandards = () =>
-  request.get<unknown, StandardsResponse>('/governance/standards')
+/** refresh=true 时绕过服务端缓存强制重拉钉钉多维表（页面「刷新」按钮用） */
+export const getStandards = (refresh = false) =>
+  request.get<unknown, StandardsResponse>('/governance/standards',
+    { params: refresh ? { refresh: true } : undefined })
 
 export interface KnowledgeGap {
   directory_id: string

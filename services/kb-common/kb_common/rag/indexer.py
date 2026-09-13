@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 async def _embed_internal(texts: list[str]) -> list[list[float]]:
     """通过 kb-api 的 /internal/embed 复用其常驻 BGE-M3（避免 worker 重复加载模型）。"""
     s = get_settings()
-    async with httpx.AsyncClient(timeout=300) as c:
+    async with httpx.AsyncClient(timeout=600) as c:
         r = await c.post(f"{s.kb_api_internal_url}/internal/embed", json={"texts": texts})
         r.raise_for_status()
         return r.json()["vectors"]

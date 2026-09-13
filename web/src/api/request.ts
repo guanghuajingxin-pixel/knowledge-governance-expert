@@ -4,7 +4,8 @@ import { useUserStore } from '@/stores/user'
 
 const service: AxiosInstance = axios.create({
   baseURL: import.meta.env.VITE_API_BASE_URL,
-  timeout: 30000,
+  // 全局 60s（原 30s 偏短：大列表/慢接口易超时）；个别长任务在各自 api 模块单独放宽
+  timeout: 60000,
 })
 
 service.interceptors.request.use(
@@ -24,9 +25,9 @@ service.interceptors.response.use(
     const detail = error.response?.data?.detail
     const message = (typeof detail === 'string' ? detail : '') || error.response?.data?.message || error.message || '请求失败'
     if (error.response?.status === 401) {
-      // 登录接口 401（用户名/密码错误）：不登出/不重载，交由登录页 catch 提示
+      // 登录/免登接口 401（凭证错误）：不登出/不重载，交由调用方 catch 提示或回退
       const reqUrl = error.config?.url || ''
-      if (reqUrl.includes('/auth/login')) {
+      if (reqUrl.includes('/auth/login') || reqUrl.includes('/auth/dingtalk-login')) {
         return Promise.reject(error)
       }
       const userStore = useUserStore()

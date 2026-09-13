@@ -1,9 +1,11 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage, type UploadUserFile, type UploadFile } from 'element-plus'
 import { UploadFilled, Refresh, FolderOpened } from '@element-plus/icons-vue'
-import { listDifyDatasets, uploadDifyDocument, type DifyDataset } from '@/api/dify'
+import { listDifyDatasets, listSupportedExtensions, uploadDifyDocument, type DifyDataset } from '@/api/dify'
 import { getSettings } from '@/api/settings'
+
+import PipelineInputs from '@/components/collection/PipelineInputs.vue'
 
 const datasets = ref<DifyDataset[]>([])
 const targetId = ref('')
@@ -11,21 +13,33 @@ const loading = ref(false)
 const error = ref('')
 const files = ref<UploadUserFile[]>([])
 const uploading = ref(false)
-const currentFile = ref('')
+const activeFiles = ref<string[]>([])
 const results = ref<{ name: string; ok: boolean; message: string }[]>([])
-const extensions = ['doc', 'docx', 'ppt', 'pptx', 'xls', 'md', 'html', 'csv', 'markdown', 'pdf', 'mdx', 'xlsx', 'txt', 'vtt', 'properties', 'htm']
-const accept = extensions.map((extension) => `.${extension}`).join(',')
+// Dify 内置 ETL 白名单兜底；挂载时从后端拉真实白名单（随 ETL_TYPE 切换）
+const extensions = ref<string[]>(['txt', 'markdown', 'md', 'mdx', 'pdf', 'html', 'htm', 'xlsx', 'xls', 'docx', 'csv', 'vtt', 'properties'])
+const etlType = ref('dify')
+const accept = computed(() => extensions.value.map((extension) => `.${extension}`).join(','))
 const completed = ref(0)
 const batchSize = ref(0)
 const percent = computed(() => batchSize.value ? Math.round(completed.value / batchSize.value * 100) : 0)
 const target = computed(() => datasets.value.find((item) => item.id === targetId.value))
 const validation = ref('')
+// 单批最多 100 个文件，同时在跑的请求最多 5 个。
+// 流水线数据集（rag_pipeline）走 pipeline/run 阻塞模式，单个文档 30s~数分钟；
+// 并发 5 是「打爆 Dify/MinerU」与「用户等待时间」之间的折中。
+const MAX_BATCH = 100
+const CONCURRENCY = 5
+
+const pipelineForm = ref<InstanceType<typeof PipelineInputs>>()
+const pipelineInputs = ref<Record<string, any>>({})
+const maxUploadBytes = ref(15 * 1024 * 1024)
+watch(targetId, () => { pipelineInputs.value = {}; loadSupportedExtensions() })
 
 function validateFile(file: UploadFile) {
   const extension = file.name.split('.').pop()?.toLowerCase() || ''
-  const message = !extensions.includes(extension) ? `「${file.name}」格式不支持，请参考右侧格式说明。`
+  const message = !extensions.value.includes(extension) ? `「${file.name}」格式不支持（当前 Dify ETL=${etlType.value}），请参考右侧格式说明。`
     : !file.size ? `「${file.name}」为空文件，无法上传。`
-      : file.size > 15 * 1024 * 1024 ? `「${file.name}」超过 15 MB，请压缩或拆分。` : ''
+      : file.size > maxUploadBytes.value ? `「${file.name}」超过 ${maxUploadBytes.value / 1024 / 1024} MB，请核对上传上限。` : ''
   validation.value = message
   if (message) {
     files.value = files.value.filter((item) => item.uid !== file.uid)
@@ -62,6 +76,7 @@ async function openDify() {
 async function upload() {
   if (uploading.value) return
   if (!targetId.value) { ElMessage.warning('请选择目标知识库'); return }
+  if (pipelineForm.value && !pipelineForm.value.validate()) return
   const selected = files.value.map((item) => item.raw).filter((item): item is NonNullable<typeof item> => !!item)
   if (!selected.length) { ElMessage.warning('请选择文档'); return }
   const datasetId = targetId.value
@@ -70,28 +85,38 @@ async function upload() {
   completed.value = 0
   batchSize.value = selected.length
   uploading.value = true
+  activeFiles.value = []
   const succeeded = new Set<number>()
-  try {
-    for (const file of selected) {
-      if (file.size > 15 * 1024 * 1024 || !extensions.includes(file.name.split('.').pop()?.toLowerCase() || '')) {
-        results.value.push({ name: file.name, ok: false, message: '文件格式不支持或超过 15 MB，请移除后重新选择' })
+  // 共享游标：多个 worker 抢占式取下一个待上传文件，天然实现「上限 CONCURRENCY 并发」。
+  let cursor = 0
+  async function worker() {
+    while (cursor < selected.length) {
+      const index = cursor++
+      const file = selected[index]
+      if (file.size > maxUploadBytes.value || !extensions.value.includes(file.name.split('.').pop()?.toLowerCase() || '')) {
+        results.value.push({ name: file.name, ok: false, message: `文件格式不支持或超过 ${maxUploadBytes.value / 1024 / 1024} MB` })
         completed.value++
         continue
       }
-      currentFile.value = file.name
+      activeFiles.value.push(file.name)
       try {
-        await uploadDifyDocument(datasetId, file)
+        await uploadDifyDocument(datasetId, file, pipelineInputs.value)
         succeeded.add(file.uid)
         results.value.push({ name: file.name, ok: true, message: `已上传至「${datasetName}」，Dify 正在分段与索引` })
       } catch (e: any) {
         results.value.push({ name: file.name, ok: false, message: e?.code === 'ECONNABORTED' ? '请求超时，请先到 Dify 确认文档是否已创建，再决定是否重试。' : e?.response?.data?.detail || e?.message || '上传失败，请检查网络后重试' })
       } finally {
         completed.value++
+        activeFiles.value = activeFiles.value.filter((name) => name !== file.name)
       }
     }
+  }
+  try {
+    const workerCount = Math.min(CONCURRENCY, selected.length)
+    await Promise.all(Array.from({ length: workerCount }, () => worker()))
     files.value = files.value.filter((item) => !succeeded.has(item.uid!))
   } finally {
-    currentFile.value = ''
+    activeFiles.value = []
     uploading.value = false
   }
   const count = results.value.filter((item) => item.ok).length
@@ -100,12 +125,24 @@ async function upload() {
   await refresh()
 }
 
-onMounted(refresh)
+async function loadSupportedExtensions() {
+  try {
+    const datasetId = targetId.value
+    const r = await listSupportedExtensions(datasetId)
+    if (datasetId !== targetId.value) return
+    maxUploadBytes.value = r.max_upload_bytes
+    etlType.value = r.etl_type || 'dify'
+    if (r.extensions?.length) extensions.value = r.extensions
+  } catch {
+    /* 拉取失败保持内置 ETL 默认白名单 */
+  }
+}
+
+onMounted(() => { refresh(); loadSupportedExtensions() })
 </script>
 
 <template>
-  <div class="manual-upload">
-    <div class="page-heading"><div><h3>上传本地文档</h3><p>将文档添加到指定知识库，沿用该知识库的索引与分段配置。</p></div><el-button link type="primary" @click="$router.push('/settings')">系统配置</el-button></div>
+  <div class="kge-page kge-page--scroll">
     <div class="upload-grid">
     <el-card shadow="never" class="main-card">
     <template #header><span class="section-title"><span class="step">1</span>选择目标知识库</span></template>
@@ -123,14 +160,23 @@ onMounted(refresh)
     <el-empty v-else-if="!loading && !datasets.length" description="暂无可用知识库" :image-size="64"><el-button type="primary" plain @click="openDify">去 Dify 新建知识库</el-button></el-empty>
     <div v-if="target" class="target-summary"><el-icon><FolderOpened /></el-icon><span>{{ target.name }}</span><el-tag type="info" size="small">已有 {{ target.document_count }} 篇文档</el-tag></div>
     <el-divider />
-    <div class="section-title"><span class="step">2</span>添加文档<span class="file-count">{{ files.length }} / 5 个</span></div>
-    <el-upload v-model:file-list="files" class="upload" drag multiple :auto-upload="false" :disabled="uploading || !targetId || loading" :accept="accept" :limit="5" :on-change="validateFile" :on-exceed="() => ElMessage.warning('每批最多上传 5 个文件，请分批上传')">
+    <PipelineInputs ref="pipelineForm" :dataset-id="targetId" v-model="pipelineInputs" :disabled="uploading" />
+    <div class="section-title"><span class="step">2</span>添加文档<span class="file-count">{{ files.length }} / {{ MAX_BATCH }} 个</span></div>
+    <el-upload v-model:file-list="files" class="upload" drag multiple :auto-upload="false" :disabled="uploading || !targetId || loading" :accept="accept" :limit="MAX_BATCH" :on-change="validateFile" :on-exceed="() => ElMessage.warning(`每批最多上传 ${MAX_BATCH} 个文件，请分批上传`)">
       <el-icon class="upload-icon"><UploadFilled /></el-icon>
       <div class="drop-title">拖拽文档到此处，或 <em>点击选择</em></div>
-      <div class="drop-hint">{{ targetId ? '支持多个文件，每个文件不超过 15 MB' : '请先选择上方的目标知识库' }}</div>
+      <div class="drop-hint">{{ targetId ? `支持多个文件（每批 ≤ ${MAX_BATCH} 个，单个 ≤ ${maxUploadBytes / 1024 / 1024} MB），并发 ${CONCURRENCY} 上传` : '请先选择上方的目标知识库' }}</div>
     </el-upload>
     <el-alert v-if="validation" :title="validation" type="warning" show-icon :closable="false" class="validation" />
-    <div v-if="uploading" class="progress"><div class="hint">正在处理 {{ completed + 1 > batchSize ? batchSize : completed + 1 }} / {{ batchSize }}：{{ currentFile }}</div><el-progress :percentage="percent" /></div>
+    <div v-if="uploading" class="progress">
+      <div class="hint">
+        已完成 {{ completed }} / {{ batchSize }}
+        <span v-if="activeFiles.length">
+          ，正在处理 {{ activeFiles.length }} 个：{{ activeFiles.slice(0, 3).join('、') }}<span v-if="activeFiles.length > 3">…</span>
+        </span>
+      </div>
+      <el-progress :percentage="percent" />
+    </div>
     <div class="upload-footer">
       <span class="hint">上传成功后，Dify 将异步解析与索引</span>
       <el-button type="primary" :loading="uploading" :disabled="!targetId || !files.length || loading" @click="upload">{{ uploading ? '上传中' : '开始上传' }}</el-button>
@@ -138,13 +184,16 @@ onMounted(refresh)
     </el-card>
     <el-card shadow="never" class="guide-card">
       <template #header><span class="section-title">上传说明</span></template>
-      <div class="limit-tags"><el-tag effect="plain">单个 ≤ 15 MB</el-tag><el-tag type="info" effect="plain">每批 ≤ 5 个</el-tag></div>
-      <h4>常见文档格式</h4>
-      <dl><dt>文档</dt><dd>PDF、DOCX、TXT</dd><dt>表格</dt><dd>XLS、XLSX、CSV</dd><dt>演示</dt><dd>PPTX（按页提取文本）</dd><dt>其他</dt><dd>MD、MARKDOWN、MDX、HTML、HTM、VTT、PROPERTIES</dd></dl>
+      <div class="limit-tags"><el-tag effect="plain">单个 ≤ {{ maxUploadBytes / 1024 / 1024 }} MB</el-tag><el-tag type="info" effect="plain">每批 ≤ {{ MAX_BATCH }} 个</el-tag></div>
+      <h4>当前支持的文档格式</h4>
+      <p>Dify ETL 类型：<b>{{ etlType }}</b>{{ etlType.toLowerCase() === 'unstructured' ? '（Unstructured 服务解析）' : '（Dify 内置解析）' }}</p>
+      <p>{{ extensions.map((e) => e.toUpperCase()).join('、') }}</p>
+      <p v-if="etlType.toLowerCase() !== 'unstructured'">PPTX / PPT / DOC / EML 等格式需 Dify 配置 ETL_TYPE=Unstructured 后才支持；当前会被 Dify 拒收。</p>
       <h4>解析与限制</h4>
       <p>PPTX 自动转换为 Markdown 上传，保留页序与文字，不包含图片、动画和版式。</p>
       <p>旧版 DOC、PPT 依赖 Dify 的 Unstructured 解析器；建议另存为 DOCX、PPTX。请勿直接修改扩展名。</p>
-      <p>扫描件、纯图片文档需先 OCR；加密文件需解除密码。Dify 或网关的大小限制可能低于 15 MB。</p>
+      <p>原文件交由目标知识库解析；扫描件需要流水线配置 OCR。上传上限须与 Dify 服务及网关保持一致。</p>
+      <p>目标为「知识流水线」类型的 Dify 知识库时，走 pipeline/run 阻塞模式（含解析+分段+索引），单个文档可能需要数十秒到几分钟，进度看似缓慢属正常，请勿中途刷新页面。</p>
       <p>“已上传”表示文档已创建，索引结果请到 Dify 查看。超时后先检查目标知识库，避免重复上传。</p>
       <el-button link type="primary" @click="openDify">打开 Dify 知识库</el-button>
     </el-card>
@@ -164,9 +213,6 @@ onMounted(refresh)
 .upload { margin: 16px 0; }
 .hint { color: var(--el-text-color-secondary); font-size: 12px; }
 .results { margin-top: 16px; }
-.page-heading { display:flex; justify-content:space-between; align-items:center; margin:8px 0 20px; }
-.page-heading h3 { font-size:18px; margin:0 0 8px; color:var(--el-text-color-primary); }
-.page-heading p { margin:0; font-size:13px; color:var(--el-text-color-secondary); }
 .upload-grid { display:grid; grid-template-columns:minmax(0, 1fr) 300px; gap:20px; align-items:start; }
 .section-title { display:flex; align-items:center; gap:10px; font-size:14px; font-weight:600; }
 .step { display:inline-flex; align-items:center; justify-content:center; width:24px; height:24px; border-radius:50%; background:var(--el-color-primary-light-9); color:var(--el-color-primary); }

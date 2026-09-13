@@ -215,11 +215,13 @@ onMounted(() => {
       <span class="queue-item">失败({{ stats.failed }})</span>
     </div>
 
-    <!-- 表格 -->
+    <!-- 表格：撑满剩余高度，表体内部滚动 -->
+    <div class="table-fill">
     <el-table
       :data="documents"
       v-loading="loading"
       style="width: 100%"
+      height="100%"
       stripe
       @selection-change="handleSelectionChange"
     >
@@ -282,6 +284,7 @@ onMounted(() => {
         </template>
       </el-table-column>
     </el-table>
+    </div>
 
     <!-- 分页 -->
     <div class="pagination-wrap">
@@ -301,7 +304,7 @@ onMounted(() => {
 
 <style scoped>
 .kc-manage {
-  flex: 1;
+  height: 100%;
   background: #fff;
   padding: 16px;
   display: flex;
@@ -364,8 +367,9 @@ onMounted(() => {
 }
 
 /* 表格容器 */
-:deep(.el-table) {
+.table-fill {
   flex: 1;
+  min-height: 0;
 }
 
 /* 分页 */

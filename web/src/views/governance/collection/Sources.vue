@@ -1,12 +1,15 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { deleteSource, listSources, previewSource, sourceStats, syncSource, updateSource } from '@/api/sync'
+import { ArrowDown } from '@element-plus/icons-vue'
+import { deleteSource, listSources, previewSource, sourcesStatsAll, syncSource, updateSource } from '@/api/sync'
+import type { SourceStatsItem } from '@/api/sync'
 import type { PreviewItem, Source, SourceStats, Workspace } from '@/types/sync'
 import { listWorkspaces } from '@/api/sync'
 import StatusPill from './components/StatusPill.vue'
 import SourceFormDialog from './components/SourceFormDialog.vue'
 import PreviewDialog from './components/PreviewDialog.vue'
+import { cronLabel } from './components/cron'
 
 const sources = ref<Source[]>([])
 const workspaces = ref<Workspace[]>([])
@@ -19,6 +22,7 @@ const editingSource = ref<Source | null>(null)
 const previewVisible = ref(false)
 const previewItems = ref<PreviewItem[]>([])
 const previewSourceObj = ref<Source | null>(null)
+const previewLoading = ref(false)
 
 const emit = defineEmits<{ (e: 'refresh-monitor'): void }>()
 
@@ -31,12 +35,19 @@ async function refresh(silent = false) {
   if (loading.value) return
   if (!silent) loading.value = true
   try {
-    const list = await listSources()
-    const ws = await listWorkspaces().catch(() => [])
+    // 一次并发拿回：源列表 + 全部源的统计（原先还要逐源请求 /sources/{id}/stats，
+    // N 个源就是 N 个请求，运行中每 3 秒重复一轮，后端连接池会被瞬间打满）
+    // 知识库名称仅用于展示，静默轮询且本地已有时不再重复拉（钉钉侧接口较重）
+    const needWs = !silent || workspaces.value.length === 0
+    const [list, statsRes, ws] = await Promise.all([
+      listSources(),
+      sourcesStatsAll().catch(() => ({ items: [] as SourceStatsItem[] })),
+      needWs ? listWorkspaces().catch(() => []) : Promise.resolve(workspaces.value),
+    ])
     const next: Record<number, SourceStats> = {}
-    await Promise.all(list.map(async (s) => {
-      try { next[s.id] = await sourceStats(s.id) } catch { /* ignore */ }
-    }))
+    for (const it of statsRes.items) {
+      next[it.source_id] = { doc_count: it.doc_count, last_run: it.last_run }
+    }
     sources.value = list
     workspaces.value = ws
     statsMap.value = next
@@ -53,15 +64,16 @@ async function onSaved() { await refresh(); emit('refresh-monitor') }
 
 async function toggle(s: any) {
   try {
+    // 启用 → 停用：二次确认；停用 → 启用：直接执行
     if (s.enabled) {
-      await ElMessageBox.confirm(`确定停用同步源「${s.name}」吗？停用后不参与定时同步，也无法立即同步。`, '停用同步源', {
+      await ElMessageBox.confirm(`确定停用同步任务「${s.name}」吗？停用后不参与定时同步，也无法立即同步。`, '停用同步任务', {
         confirmButtonText: '确定停用', cancelButtonText: '取消', type: 'warning',
       })
     }
     await updateSource(s.id, { enabled: !s.enabled })
     ElMessage.success(`已${s.enabled ? '停用' : '启用'}「${s.name}」`)
     await refresh()
-  } catch { /* 拦截器已提示 */ }
+  } catch { /* 取消或拦截器已提示 */ }
 }
 async function remove(s: any) {
   try {
@@ -76,11 +88,39 @@ async function remove(s: any) {
   } catch (e) { if (e !== 'cancel') { /* 拦截器已提示 */ } }
 }
 async function preview(s: any) {
+  if (previewLoading.value) return
+  // 点击立即弹窗，加载在弹窗内等待（行内按钮不转圈）
+  previewSourceObj.value = s
+  previewItems.value = []
+  previewVisible.value = true
+  previewLoading.value = true
   try {
-    previewSourceObj.value = s
+    // 服务端目录树快照缓存 10 分钟，命中秒回；未命中并发遍历（≤3）。
     previewItems.value = await previewSource(s.id)
-    previewVisible.value = true
-  } catch { /* 拦截器已提示 */ }
+  } catch {
+    previewVisible.value = false // 加载失败直接收起弹窗，错误由拦截器提示
+  } finally {
+    previewLoading.value = false
+  }
+}
+async function refreshPreview() {
+  // 强制刷新：绕过服务端缓存重新遍历钉钉目录树，在弹窗内等待；
+  // 保留用户在弹窗里已调整的「参与同步」开关状态
+  const s = previewSourceObj.value
+  if (!s || previewLoading.value) return
+  previewLoading.value = true
+  try {
+    const enabledMap = new Map(previewItems.value
+      .filter((item) => item.node_id)
+      .map((item) => [item.node_id!, item.enabled !== false]))
+    previewItems.value = (await previewSource(s.id, true)).map((item) =>
+      item.node_id && enabledMap.has(item.node_id)
+        ? { ...item, enabled: enabledMap.get(item.node_id) ?? true }
+        : item)
+    ElMessage.success('列表已刷新')
+  } catch { /* 拦截器已提示 */ } finally {
+    previewLoading.value = false
+  }
 }
 async function runNow(s: Source) {
   if (!s.enabled || isRunning(s.id)) return
@@ -105,18 +145,22 @@ async function runNow(s: Source) {
 }
 function onPreviewDone() { refresh(); emit('refresh-monitor') }
 
+function onMore(command: string, row: Source) {
+  if (command === 'toggle') toggle(row)
+  else if (command === 'edit') openEdit(row)
+  else if (command === 'delete') remove(row)
+}
+
 onMounted(refresh)
 onBeforeUnmount(() => { if (polling.value !== null) { window.clearInterval(polling.value); polling.value = null } })
 </script>
 
 <template>
   <div>
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-      <div>
-        <h3 style="margin:0 0 4px">目录同步源</h3>
-        <div style="font-size:12px;color:var(--el-text-color-secondary)">维护钉钉知识库目录与目标 Dify 知识库的映射；每个目录可独立配置 cron 定时同步</div>
-      </div>
-      <el-button type="primary" @click="openAdd">+ 新增同步源</el-button>
+    <div class="sec-header">
+      <b class="sec-title">从钉钉选择目录</b>
+      <span class="sec-hint">维护钉钉知识库目录与目标知识库的映射，每个目录可独立配置定时同步</span>
+      <el-button type="primary" style="margin-left:auto" @click="openAdd">+ 新增同步任务</el-button>
     </div>
 
     <el-table :data="sources" v-loading="loading" border size="small">
@@ -129,13 +173,15 @@ onBeforeUnmount(() => { if (polling.value !== null) { window.clearInterval(polli
           <div style="color:var(--el-text-color-secondary);font-size:12px">{{ row.start_dir || '根目录' }}</div>
         </template>
       </el-table-column>
-      <el-table-column label="Dify 知识库" min-width="120">
+      <el-table-column label="目标知识库" min-width="120">
         <template #default="{ row }">
           <span style="font-size:12px">{{ row.dify_dataset_name || row.start_dir || '—' }}</span>
         </template>
       </el-table-column>
-      <el-table-column label="cron" width="130">
-        <template #default="{ row }"><span style="font-size:12px">{{ row.cron }}</span></template>
+      <el-table-column label="定时任务" width="150">
+        <template #default="{ row }">
+          <span style="font-size:12px">{{ cronLabel(row.cron) }}</span>
+        </template>
       </el-table-column>
       <el-table-column label="状态" width="70">
         <template #default="{ row }"><StatusPill :status="statusOf(row)" /></template>
@@ -143,19 +189,54 @@ onBeforeUnmount(() => { if (polling.value !== null) { window.clearInterval(polli
       <el-table-column label="文档数" width="70">
         <template #default="{ row }">{{ docsOf(row.id) }}</template>
       </el-table-column>
-      <el-table-column label="操作" width="320" fixed="right">
+      <el-table-column label="操作" width="200" fixed="right">
         <template #default="{ row }">
-          <el-button size="small" link type="primary" :disabled="!row.enabled || isRunning(row.id)" @click="runNow(row as Source)">{{ isRunning(row.id) ? '同步中' : '立即同步' }}</el-button>
-          <el-button size="small" link @click="preview(row)">预演</el-button>
-          <el-button size="small" link @click="openEdit(row)">编辑</el-button>
-          <el-switch :model-value="row.enabled" inline-prompt active-text="启用" inactive-text="停用" style="margin:0 6px" @change="toggle(row)" />
-          <el-button size="small" link type="danger" @click="remove(row)">删除</el-button>
+          <div class="ops">
+            <el-button size="small" link type="primary" :disabled="!row.enabled || isRunning(row.id)" @click="runNow(row as Source)">{{ isRunning(row.id) ? '同步中' : '立即同步' }}</el-button>
+            <el-button size="small" link @click="preview(row)">同步列表</el-button>
+            <el-dropdown trigger="click" @command="(cmd: string) => onMore(cmd, row as Source)">
+              <el-button size="small" link>更多<el-icon style="margin-left:2px"><ArrowDown /></el-icon></el-button>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item command="toggle">{{ row.enabled ? '停用' : '启用' }}</el-dropdown-item>
+                  <el-dropdown-item command="edit">编辑</el-dropdown-item>
+                  <el-dropdown-item command="delete" divided style="color:var(--el-color-danger)">删除</el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
+          </div>
         </template>
       </el-table-column>
       <template #empty><div style="padding:24px;color:var(--el-text-color-secondary)">暂无同步源，点击右上角新增</div></template>
     </el-table>
 
     <SourceFormDialog v-model:visible="formVisible" :source="editingSource" @saved="onSaved" />
-    <PreviewDialog v-model:visible="previewVisible" :source-id="previewSourceObj?.id || 0" :name="previewSourceObj?.name || ''" :items="previewItems" @done="onPreviewDone" />
+    <PreviewDialog v-model:visible="previewVisible" :source-id="previewSourceObj?.id || 0" :name="previewSourceObj?.name || ''" :items="previewItems" :loading="previewLoading" @refresh="refreshPreview" @done="onPreviewDone" />
   </div>
 </template>
+
+<style scoped>
+/* 标题行：与「文档同步」卡片头部一致的单行布局 */
+.sec-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.sec-title {
+  font-size: 14px;
+}
+.sec-hint {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+/* 操作列：flex 布局 + 统一间距，保证各行动作水平对齐 */
+.ops {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.ops .el-button + .el-button {
+  margin-left: 0; /* 覆盖 Element Plus 相邻按钮默认 12px margin，统一用 gap 控制 */
+}
+</style>

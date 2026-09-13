@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { reactive, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { useUserStore } from '@/stores/user'
 import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
 import { User, Lock, Reading } from '@element-plus/icons-vue'
 
 const router = useRouter()
+const route = useRoute()
 const userStore = useUserStore()
 
 const formRef = ref<FormInstance>()
@@ -28,7 +29,10 @@ async function handleLogin() {
     try {
       await userStore.login(form)
       ElMessage.success('登录成功')
-      router.push('/chat')
+      const redirect = typeof route.query.redirect === 'string' && route.query.redirect.startsWith('/')
+        ? route.query.redirect
+        : '/chat'
+      router.push(redirect)
     } catch (e) {
       // 登录接口 401 由 request.ts 放行至此；展示后端 detail 或默认提示
       const err = e as { response?: { data?: { detail?: string } } }

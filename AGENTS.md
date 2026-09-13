@@ -79,7 +79,7 @@ Docker infrastructure (dev-services compose, external dev-network):
 
 | Process | Port | Stack | Responsibilities |
 |---------|------|-------|-----------------|
-| **kb-api** | 8000 | FastAPI + Celery app | Auth (JWT + API Key), user CRUD, document KB CRUD, directory tree, document upload, search (hybrid kNN+BM25+RRF+rerank), RAG chat, settings, MinerU orchestration |
+| **kb-api** | 8000 | FastAPI + Celery app | Auth (JWT + API Key), user CRUD, document KB CRUD, directory tree, document upload, search (hybrid kNN+BM25+RRF+rerank), enterprise QA via DeerFlow sidecar (search routes → deerflow_runner → services/deerflow qa_server; sidecar tools call back agent_internal), settings, MinerU orchestration |
 | **faq-service** | 8004 | FastAPI | FAQ KB CRUD, FAQ directory tree, Q&A pair CRUD, CSV/Excel batch import, FAQ search (exact + semantic fusion) |
 | **kb-worker** | — | Celery (kb-api package) | Async ingestion pipeline: PENDING → PARSING (MinerU) → INDEXING (chunk+embed+ES) → COMPLETED |
 
@@ -179,6 +179,7 @@ API modules in `web/src/api/`:
 
 ### Key Implementation Rules
 
+- 所有数据库 schema 变更必须走 alembic 迁移：新增/修改 `kb_common/models.py` 字段时同步在 `alembic/versions/` 补迁移（先 `alembic heads` 确认无并行冲突），禁止依赖本地 create_all 或手工改表；部署时执行 `alembic upgrade head` 并验证受影响接口
 - All components use Composition API with `<script setup lang="ts">`
 - Pinia stores: `user.ts` (auth state), `app.ts` (sidebar collapse), `tabs.ts` (tab management)
 - Chinese language interface throughout

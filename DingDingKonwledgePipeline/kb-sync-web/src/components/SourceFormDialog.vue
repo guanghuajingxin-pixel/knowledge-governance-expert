@@ -229,14 +229,14 @@ async function save() {
   try {
     if (props.source) await updateSource(props.source.id, { ...form })
     else await createSource({ ...form })
-    ElMessage.success(props.source ? '同步源已更新' : '同步源已创建')
+    ElMessage.success(props.source ? '同步任务已更新' : '同步任务已创建')
     emit('saved')
     close()
   } catch (e) { ElMessage.error(errMsg(e)) } finally { saving.value = false }
 }
 
 async function test() {
-  if (!props.source) { ElMessage.warning('请先保存同步源后再测试连接'); return }
+  if (!props.source) { ElMessage.warning('请先保存同步任务后再测试连接'); return }
   testing.value = true
   try {
     const r: any = await testSource(props.source.id)
@@ -247,10 +247,10 @@ async function test() {
 </script>
 
 <template>
-  <el-dialog :model-value="visible" width="720px" :title="source ? '编辑同步源' : '新增同步源'" @close="close">
+  <el-dialog :model-value="visible" width="720px" :title="source ? '编辑同步任务' : '新增同步任务'" @close="close">
     <el-form label-position="top">
       <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px">
-        <el-form-item label="同步源名称" required>
+        <el-form-item label="同步任务名称" required>
           <el-input v-model="form.name" placeholder="如：产品手册" />
         </el-form-item>
         <el-form-item label="钉钉知识库" required>
@@ -291,7 +291,7 @@ async function test() {
         <el-form-item label="删除策略">
           <el-select v-model="form.delete_policy" style="width: 100%">
             <el-option label="同步删除（源删除则删 Dify 文档）" value="sync" />
-            <el-option label="保留（仅清理状态）" value="keep" />
+            <el-option label="保留（仅清理本地缓存状态）" value="keep" />
           </el-select>
         </el-form-item>
       </div>

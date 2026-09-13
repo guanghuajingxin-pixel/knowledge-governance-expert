@@ -37,9 +37,9 @@ async function toggle(s: Source) {
 }
 async function remove(s: Source) {
   try {
-    await ElMessageBox.confirm(`确定删除同步源「${s.name}」吗？其 Dify 知识库与已同步文档不会被删除，仅移除该同步配置。`, '删除同步源', { confirmButtonText: '确认删除', cancelButtonText: '取消', type: 'warning' })
+    await ElMessageBox.confirm(`确定删除同步任务「${s.name}」吗？其 Dify 知识库与已同步文档不会被删除，仅移除该同步配置。`, '删除同步任务', { confirmButtonText: '确认删除', cancelButtonText: '取消', type: 'warning' })
     await deleteSource(s.id)
-    ElMessage.success(`已删除同步源「${s.name}」（仅移除配置，Dify 文档保留）`)
+    ElMessage.success(`已删除同步任务「${s.name}」（仅移除配置，Dify 文档保留）`)
     await app.refreshAll()
   } catch (e) { if (e !== 'cancel') ElMessage.error(errMsg(e)) }
 }
@@ -57,8 +57,8 @@ onMounted(() => { app.refreshSources(); app.refreshRuns(); app.refreshFailures()
 <template>
   <div>
     <div class="page-head">
-      <div><h2>同步源管理</h2><div class="desc">配置钉钉知识库目录与目标 Dify 知识库的映射关系</div></div>
-      <el-button type="primary" @click="openAdd">+ 新增同步源</el-button>
+      <div><h2>同步任务管理</h2><div class="desc">配置钉钉知识库目录与目标 Dify 知识库的映射关系</div></div>
+      <el-button type="primary" @click="openAdd">+ 新增同步任务</el-button>
     </div>
     <div class="card">
       <table class="table">

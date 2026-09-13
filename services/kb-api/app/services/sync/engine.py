@@ -14,17 +14,20 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
+from kb_common.clients import minio_client
+from kb_common.clients.dify_document import dataset_runtime
 from kb_common.config import get_settings
 from kb_common.models import (
     SyncDocumentMapping, SyncFailure, SyncLog, SyncRun, SyncSource,
 )
 
-from .dingtalk_sync_client import DingTalkError
-from .dify_sync_client import DifyError
-from .export_service import (ExportError, ONLINE_TYPES, export_online_doc,
-                             safe_name)
+from .dingtalk_sync_client import DingTalkClient, DingTalkError
+from .dify_sync_client import DifyClient, DifyError
+from .dify_pipeline_vars import resolve_pipeline_inputs
+from .export_service import ExportError, safe_name
+from .source_files import fetch_source_file, source_file_name, skip_reason
 from .sync_database import SyncSessionLocal
-from .sync_settings import make_dify_client, make_dingtalk_client
+from .sync_settings import make_backend, make_dify_client, make_dingtalk_client
 
 logger = logging.getLogger(__name__)
 
@@ -94,39 +97,46 @@ class SyncEngine:
 
             s = get_settings()
             dt = make_dingtalk_client(db)
-            dify = make_dify_client(db)
+            backend = make_backend(source, db)
+            is_dify = (source.backend_type or "dify") == "dify"
             try:
                 self._progress(db, run, "开始遍历钉钉知识库目录树")
+                # 真实同步不用缓存：必须看到钉钉侧最新增删，缓存仅供预演快速回显
                 nodes = dt.walk_tree(source.root_node_id, s.sync_max_depth,
-                                     s.sync_max_results_per_page)
+                                     s.sync_max_results_per_page, use_cache=False)
                 run.total = len(nodes)
                 db.commit()
 
-                self._progress(db, run, f"发现 {len(nodes)} 个文档节点，准备 Dify 数据集")
-                dataset_name = (source.dify_dataset_name or "").strip()
-                if not dataset_name:
-                    raise RuntimeError("同步源未选择 Dify 知识库")
-                dataset = None
-                try:
-                    dataset = dify.find_dataset_by_name(dataset_name)
-                except DifyError:
-                    dataset = None
-                if dataset is None and source.dify_dataset_id:
-                    # 数据集在 Dify 侧改名后名称无法命中；回退使用已缓存的 dataset_id。
-                    self._log(db, run.id, "WARNING",
-                              f"按名称未找到 Dify 知识库 “{dataset_name}”，回退缓存 dataset_id: {source.dify_dataset_id}")
+                self._progress(db, run, f"发现 {len(nodes)} 个文档节点，准备目标数据集")
+                dataset = backend.resolve_dataset(source.dify_dataset_id, source.dify_dataset_name)
+                dataset_id = dataset["id"]
+                dataset_name = dataset.get("name") or source.dify_dataset_name
+                # 知识流水线（rag_pipeline）是 Dify 专属；RAGFlow 一律按普通库处理
+                runtime_mode = dataset_runtime(dataset) if is_dify else "general"
+                if runtime_mode == "rag_pipeline":
+                    self._log(db, run.id, "INFO",
+                              f"目标为知识流水线数据集 “{dataset_name}”，走 pipeline/run 同步通道")
+                # 流水线 input form 变量值（分段参数）：sync_sources.pipeline_inputs 存 JSON 字符串。
+                # 不同流水线变量不同（max_chunk_length / parent_mode / child_length 等），
+                # 缺失必填变量 Dify 会报 500 "xxx is required in input form"。
+                pipeline_inputs: dict = {}
+                raw_inputs = (getattr(source, "pipeline_inputs", "") or "").strip()
+                if raw_inputs:
                     try:
-                        dataset = dify.get_dataset(source.dify_dataset_id) or None
-                    except DifyError:
-                        dataset = None
-                if not dataset:
-                    raise RuntimeError(f"Dify 知识库不存在: {dataset_name}")
-                dataset_id = dataset.get("id")
-                if not dataset_id:
-                    raise RuntimeError(f"Dify 数据集未返回 id: {dataset}")
-                if source.dify_dataset_id != dataset_id:
-                    source.dify_dataset_id = dataset_id
-                    db.commit()
+                        parsed = json.loads(raw_inputs)
+                        if not isinstance(parsed, dict):
+                            raise ValueError("expected JSON object")
+                        pipeline_inputs = parsed
+                    except (ValueError, TypeError) as exc:
+                        raise DifyError("同步源流水线参数不是合法 JSON 对象，请编辑任务修正") from exc
+                if runtime_mode == "rag_pipeline":
+                    pipeline_inputs = resolve_pipeline_inputs(
+                        dataset_id, backend.local_file_node_id(dataset_id), pipeline_inputs)
+                    self._log(db, run.id, "INFO",
+                              f"流水线分段参数：{json.dumps(pipeline_inputs, ensure_ascii=False)}")
+                source.dify_dataset_id = dataset_id
+                source.dify_dataset_name = dataset_name
+                db.commit()
 
                 remote = {n["nodeId"]: n for n in nodes if n.get("nodeId")}
                 mappings = {m.node_id: m for m in
@@ -139,7 +149,7 @@ class SyncEngine:
                     if source.delete_policy == "sync":
                         try:
                             if mapping.dify_document_id:
-                                self._delete_dify_doc(dify, dataset_id, mapping)
+                                self._delete_dify_doc(backend, dataset_id, mapping)
                             db.delete(mapping)
                             stats["deleted"] += 1
                             self._log(db, run.id, "INFO", f"删除已同步文档: {mapping.name}")
@@ -154,14 +164,13 @@ class SyncEngine:
 
                 # ② 新增/更新
                 base_dir = _local_storage_dir() / str(source.id)
-                skip_exts = s.sync_skip_ext_list
                 for node in nodes:
                     node_id = node["nodeId"]
                     name = node.get("name", node_id)
-                    ext = Path(name).suffix.lower()
-                    if ext in skip_exts:
+                    reason = skip_reason(node, s, runtime_mode)
+                    if reason:
                         stats["skipped"] += 1
-                        self._log(db, run.id, "INFO", f"跳过（扩展名过滤）: {name}")
+                        self._log(db, run.id, "INFO", f"跳过: {name} · {reason}")
                         continue
 
                     mapping = mappings.get(node_id)
@@ -170,61 +179,64 @@ class SyncEngine:
                         self._log(db, run.id, "INFO", f"跳过（预演中已关闭）: {name}")
                         continue
                     meta_hash = _meta_hash(node)
-                    if (mapping and mapping.status == "synced"
-                            and mapping.dify_document_id
-                            and mapping.meta_hash and mapping.meta_hash == meta_hash):
-                        stats["skipped"] += 1
-                        continue
 
                     rel_dir = Path(node.get("relative_dir", "").strip("/"))
                     try:
                         self._progress(db, run, f"下载/导出文档: {name}")
                         local_file, content_hash = self._fetch(dt, node, name, base_dir, rel_dir)
-                        changed = (mapping is None or mapping.status != "synced" or mapping.content_hash != content_hash
-                                   or not mapping.dify_document_id)
-                        # 导出文件名已带目标扩展名（xxx.docx/xxx.xlsx/xxx.pdf），
-                        # 普通文件保持原名；Dify 靠扩展名识别格式
+                        # 用户口径：预演开关打开的文档一律老实同步，不做内容 hash 跳过；
+                        # 已同步过的走更新，未同步过的新建。
+                        # 源文档直传：下载文件保留源扩展名（缺失时按 OSS 文件名/节点 extension 补齐），
+                        # 在线文档带导出目标扩展名（xxx.docx/xxx.xlsx/xxx.pdf）；
+                        # 上传名恒为本地源文件名，不做任何格式转换，引擎靠扩展名识别格式
                         upload_name = local_file.name
-                        if changed:
-                            self._progress(db, run, f"上传至 Dify: {name}")
+                        self._progress(db, run, f"上传至目标知识库: {name}")
+                        if runtime_mode == "rag_pipeline":
+                            # Dify 流水线数据集：pipeline/run 阻塞执行，完成即返回；
+                            # 更新场景先索引新文档，成功后才替换旧文档。
+                            pipeline_timeout = float(s.sync_indexing_timeout_seconds)
                             if mapping and mapping.dify_document_id:
-                                result = dify.update_file(dataset_id, mapping.dify_document_id,
-                                                          local_file, file_name=upload_name)
-                                self._log(db, run.id, "INFO", f"更新 Dify 文档: {name}")
+                                result = backend.update_file_via_pipeline(
+                                    dataset_id, mapping.dify_document_id, local_file,
+                                    file_name=upload_name, timeout=pipeline_timeout,
+                                    inputs=pipeline_inputs)
+                                self._log(db, run.id, "INFO", f"更新文档（知识流水线）: {name}")
                             else:
-                                result = dify.upload_file(dataset_id, local_file, file_name=upload_name)
-                                self._log(db, run.id, "INFO", f"新建 Dify 文档: {name}")
-                            doc_id = (result.get("document") or {}).get("id")
-                            batch = result.get("batch", "")
-                            if not doc_id:
-                                raise DifyError("Dify 上传未返回文档 ID")
-                            was_update = bool(mapping and mapping.dify_document_id)
-                            if mapping is None:
-                                mapping = SyncDocumentMapping(source_id=source.id, node_id=node_id,
-                                                              name=name, category=node.get("category", ""))
-                                db.add(mapping)
-                            # 上传成功即保存远端 ID；索引失败重试时更新同一文档，避免重复创建。
-                            mapping.dify_document_id = doc_id
-                            mapping.dify_batch = batch
-                            mapping.content_hash = content_hash
-                            mapping.status = "indexing"
-                            db.commit()
-                            if s.sync_dify_wait_indexing:
-                                if not batch:
-                                    raise DifyError("Dify 上传未返回索引批次")
-                                self._progress(db, run, f"等待 Dify 索引: {name}")
-                                status = dify.wait_indexing(
-                                    dataset_id, batch, s.sync_indexing_timeout_seconds,
-                                    on_progress=lambda progress: self._progress(db, run, f"Dify 索引: {name} · {progress}"),
-                                )
-                                self._log(db, run.id, "INFO", f"索引状态: {name} -> {status}")
-                            stats["updated" if was_update else "created"] += 1
+                                result = backend.upload_file_via_pipeline(
+                                    dataset_id, local_file, file_name=upload_name,
+                                    timeout=pipeline_timeout, inputs=pipeline_inputs)
+                                self._log(db, run.id, "INFO", f"新建文档（知识流水线）: {name}")
+                        elif mapping and mapping.dify_document_id:
+                            result = backend.update_file(dataset_id, mapping.dify_document_id,
+                                                         local_file, file_name=upload_name)
+                            self._log(db, run.id, "INFO", f"更新文档: {name}")
                         else:
-                            self._log(db, run.id, "INFO", f"内容未变化，跳过上传: {name}")
-
+                            result = backend.upload_file(dataset_id, local_file, file_name=upload_name)
+                            self._log(db, run.id, "INFO", f"新建文档: {name}")
+                        doc_id = (result.get("document") or {}).get("id")
+                        batch = result.get("batch", "")
+                        if not doc_id:
+                            raise DifyError("目标知识库上传未返回文档 ID")
+                        was_update = bool(mapping and mapping.dify_document_id)
                         if mapping is None:
-                            mapping = SyncDocumentMapping(source_id=source.id, node_id=node_id)
+                            mapping = SyncDocumentMapping(source_id=source.id, node_id=node_id,
+                                                          name=name, category=node.get("category", ""))
                             db.add(mapping)
+                        # 上传成功即保存远端 ID；索引失败重试时更新同一文档，避免重复创建。
+                        mapping.dify_document_id = doc_id
+                        mapping.dify_batch = batch
+                        mapping.content_hash = content_hash
+                        mapping.status = "indexing"
+                        db.commit()
+                        if s.sync_dify_wait_indexing and batch and result["document"].get("indexing_status") != "completed":
+                            self._progress(db, run, f"等待索引: {name}")
+                            status = backend.wait_indexing(
+                                dataset_id, batch, s.sync_indexing_timeout_seconds,
+                                on_progress=lambda progress: self._progress(db, run, f"索引: {name} · {progress}"),
+                            )
+                            self._log(db, run.id, "INFO", f"索引状态: {name} -> {status}")
+                        stats["updated" if was_update else "created"] += 1
+
                         mapping.parent_node_id = self._parent_of(node, source.root_node_id)
                         mapping.name = name
                         mapping.relative_path = str(rel_dir / safe_name(name))
@@ -232,9 +244,8 @@ class SyncEngine:
                         mapping.meta_hash = meta_hash
                         mapping.content_hash = content_hash
                         mapping.local_path = str(local_file)
-                        if changed:
-                            mapping.dify_document_id = doc_id
-                            mapping.dify_batch = batch
+                        mapping.dify_document_id = doc_id
+                        mapping.dify_batch = batch
                         mapping.status = "synced"
                         mapping.error = ""
                         mapping.last_synced_at = datetime.utcnow()
@@ -271,14 +282,14 @@ class SyncEngine:
                     run.status = "failed"
                 else:
                     run.status = "partial"
-                run.message = (f"total={run.total} created={stats['created']} "
+                run.message = (f"total={run.total} skipped={stats['skipped']} created={stats['created']} "
                                f"updated={stats['updated']} deleted={stats['deleted']} "
                                f"failed={stats['failed']}")
                 db.commit()
                 return self._summary(run)
             finally:
                 dt.close()
-                dify.close()
+                backend.close()
         except Exception as exc:  # noqa: BLE001
             logger.exception("同步失败")
             db.rollback()
@@ -299,29 +310,37 @@ class SyncEngine:
         return node.get("parent_node_id", root_node_id)
 
     @staticmethod
-    def _delete_dify_doc(dify: DifyClient, dataset_id: str, mapping: SyncDocumentMapping) -> None:
+    def _delete_dify_doc(backend, dataset_id: str, mapping: SyncDocumentMapping) -> None:
         try:
-            dify.delete_document(dataset_id, mapping.dify_document_id)
+            backend.delete_document(dataset_id, mapping.dify_document_id)
         except DifyError as exc:
             if exc.status not in (404,):
                 raise
 
     def _fetch(self, dt: DingTalkClient, node: dict, name: str,
                base_dir: Path, rel_dir: Path) -> tuple[Path, str]:
-        out_dir = base_dir / rel_dir
-        out_dir.mkdir(parents=True, exist_ok=True)
-        # 按类型分流：在线文档（adoc/axls/able/mind 等）按类型导出 Office/PDF；
-        # 上传的普通文件（docx/xlsx/pdf/...）按原类型 OSS 原样下载。
-        ext = (node.get("extension") or Path(name).suffix.lstrip(".")).lower()
-        if ext in ONLINE_TYPES or node.get("category") == "ALIDOC":
-            local_file = export_online_doc(node["nodeId"], name, out_dir,
-                                           get_settings().sync_export_timeout_seconds)
-            return local_file, _sha256(local_file.read_bytes())
+        out_dir = base_dir / safe_name(node["nodeId"]) / Path(*(safe_name(part) for part in rel_dir.parts))
+        local_file = fetch_source_file(dt, {**node, "name": name}, out_dir)
+        self._store_source_object(node["nodeId"], local_file)
+        return local_file, _sha256(local_file.read_bytes())
 
-        content, _filename = dt.download_document(node["nodeId"])
-        local_file = out_dir / safe_name(name)
-        local_file.write_bytes(content)
-        return local_file, _sha256(content)
+    _source_file_name = staticmethod(source_file_name)
+
+    def _store_source_object(self, node_id: str, local_file: Path) -> None:
+        """源文档备份到对象存储（raw-docs/dingtalk-sync/{node_id}/{filename}）。
+
+        需求口径：源文档下载到对象存储后，再以源文档上传 Dify（不经过转换引擎）。
+        备份失败仅 WARNING，不阻断同步主流程。
+        """
+        import mimetypes
+
+        key = f"dingtalk-sync/{node_id}/{local_file.name}"
+        try:
+            minio_client.upload_bytes(
+                minio_client.RAW, key, local_file.read_bytes(),
+                mimetypes.guess_type(local_file.name)[0] or "application/octet-stream")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("源文档存对象存储失败 %s: %s", key, exc)
 
     def _record_failure(self, db, run: SyncRun, source_id: int, node_id: str | None,
                         name: str, error: str) -> None:

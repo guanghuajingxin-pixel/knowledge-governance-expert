@@ -3,15 +3,17 @@ import asyncio
 import json
 import logging
 import os
-import time
 import uuid as _uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select, func, case, and_
+from sqlalchemy import select, func, case, and_, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from kb_common.database import get_session
-from kb_common.models import KnowledgeBase, Directory, Document, User, KnowledgeSource
+from kb_common.models import (
+    KnowledgeBase, Directory, Document, User, KnowledgeSource, DingtalkFileSnapshot,
+    DingtalkFolderStat,
+)
 from kb_common.clients import es_client
 from app.schemas import (
     DirOut, KcDocumentOut, TrashItemOut, TaskStatsOut,
@@ -26,80 +28,130 @@ router = APIRouter(prefix="/api/v1/knowledge-center", tags=["knowledge-center"])
 # 回收站自动清理天数
 TRASH_RETENTION_DAYS = 20
 
-# 钉钉知识库文件列表内存缓存（全量遍历数千节点耗时较长，后台异步刷新）
-# loading=True 表示后台遍历进行中；files 已有时为旧数据（stale-while-revalidate）
-_dingtalk_cache: dict = {"files": None, "expire_at": 0.0, "loading": False, "error": None}
-_DINGTALK_TTL = 3600  # 1 小时；「手动刷新」强制重新拉取
+# ===== 钉钉知识库文件列表快照 =====
+# 全量遍历操作人可见的全部团队知识库约需 25–30 分钟、约 4,500 次节点请求，
+# 因此**只在用户手动点「刷新」时**执行（_trigger_dingtalk_refresh 仅由
+# refresh=true 触发）。列表接口只读快照，不调用钉钉：
+#   - 持久层：dingtalk_file_snapshots 表（进程重启 / 容器重建后列表仍在，只留最新一份）
+#   - 内存层：首次请求从库载入，避免每次请求都解析数 MB JSON；刷新成功后同步更新
+_dingtalk_cache: dict = {"files": None, "loading": False, "error": None, "cached_at": None}
+_snapshot_loaded = False  # 进程内是否已从数据库载入快照
 
-# 钉钉全量遍历结果磁盘快照：进程重启/uvicorn --reload 后用快照快速预热，
-# 避免每次冷启动都等待数十分钟的全量遍历（可用 KGE_DINGTALK_SNAPSHOT 覆盖路径）。
-_SNAPSHOT_PATH = Path(os.getenv("KGE_DINGTALK_SNAPSHOT", "/tmp/kge_dingtalk_files.json"))
-_snapshot_loaded = False
+# 历史遗留的磁盘快照（0023 之前落盘于 /tmp）：仅用于一次性导入数据库，避免升级后列表为空
+_LEGACY_SNAPSHOT_PATH = Path(os.getenv("KGE_DINGTALK_SNAPSHOT", "/tmp/kge_dingtalk_files.json"))
 
 
-def _load_dingtalk_snapshot() -> None:
-    """进程冷启动后用磁盘快照预热内存缓存。
+def _to_utc_iso(dt: datetime | None) -> str | None:
+    """本地时间 → UTC ISO（带时区），供前端按浏览器时区展示。"""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.astimezone()  # 库内为服务器本地时间
+    return dt.astimezone(timezone.utc).isoformat(timespec="seconds")
 
-    快照文件尚不存在时（首次遍历未落盘）保持未加载状态，后续请求继续尝试，
-    使晚于进程启动落盘的快照也能被发现。
+
+async def _import_legacy_snapshot(s: AsyncSession) -> bool:
+    """一次性把历史 /tmp JSON 快照导入数据库（导入成功后不再使用该文件）。"""
+    try:
+        if not _LEGACY_SNAPSHOT_PATH.exists():
+            return False
+        data = json.loads(_LEGACY_SNAPSHOT_PATH.read_text(encoding="utf-8"))
+        files = data.get("files") or []
+        if not files:
+            return False
+        fetched_at = datetime.fromtimestamp(float(data.get("fetched_at") or 0))
+        s.add(DingtalkFileSnapshot(fetched_at=fetched_at, file_count=len(files),
+                                   payload=json.dumps(files, ensure_ascii=False)))
+        await s.commit()
+        logger.info("历史钉钉文件快照已导入数据库：%d 个文件（%s）", len(files), fetched_at)
+        return True
+    except Exception as e:
+        await s.rollback()
+        logger.warning("历史钉钉文件快照导入失败：%s", e)
+        return False
+
+
+async def ensure_dingtalk_files_loaded(s: AsyncSession) -> None:
+    """确保进程内已载入持久化快照（首次请求时读库，不触发钉钉遍历）。
+
+    尚无快照时保持未加载状态，后续请求继续尝试，使其他进程/刷新任务写入的快照能被发现。
     """
     global _snapshot_loaded
     if _snapshot_loaded:
         return
-    try:
-        if not _SNAPSHOT_PATH.exists():
+    row = (await s.execute(
+        select(DingtalkFileSnapshot).order_by(DingtalkFileSnapshot.id.desc()).limit(1)
+    )).scalar_one_or_none()
+    if row is None:
+        if await _import_legacy_snapshot(s):
+            row = (await s.execute(
+                select(DingtalkFileSnapshot).order_by(DingtalkFileSnapshot.id.desc()).limit(1)
+            )).scalar_one_or_none()
+        if row is None:
             return
-        _snapshot_loaded = True
-        data = json.loads(_SNAPSHOT_PATH.read_text(encoding="utf-8"))
-        fetched_at = float(data.get("fetched_at") or 0)
-        files = data.get("files")
-        if files:
-            # 即使快照已过期也加载（有数据总比空等好），同时置 expire_at=now 触发后台刷新
-            _dingtalk_cache["files"] = files
-            _dingtalk_cache["expire_at"] = fetched_at + _DINGTALK_TTL
-            logger.info("钉钉文件快照预热完成：%d 个文件", len(files))
-    except Exception as e:
-        logger.warning("钉钉文件快照加载失败：%s", e)
-
-
-def _save_dingtalk_snapshot(files: list) -> None:
-    """全量遍历成功后落盘快照（原子替换），供下次进程启动预热。"""
     try:
-        tmp_path = _SNAPSHOT_PATH.with_name(_SNAPSHOT_PATH.name + ".tmp")
-        tmp_path.write_text(
-            json.dumps({"fetched_at": time.time(), "files": files}, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        tmp_path.replace(_SNAPSHOT_PATH)
+        files = json.loads(row.payload or "[]")
     except Exception as e:
-        logger.warning("钉钉文件快照写入失败：%s", e)
+        logger.warning("钉钉文件快照解析失败：%s", e)
+        return
+    _dingtalk_cache["files"] = files
+    _dingtalk_cache["cached_at"] = row.fetched_at
+    _snapshot_loaded = True
+    logger.info("钉钉文件快照载入完成：%d 个文件（同步于 %s）", len(files), row.fetched_at)
+
+
+async def _write_dingtalk_snapshot(files: list, fetched_at: datetime) -> None:
+    """覆盖写入持久化快照（表内只保留最新一份）。"""
+    from kb_common.database import SessionLocal
+
+    payload = json.dumps(files, ensure_ascii=False)
+    async with SessionLocal() as s:
+        await s.execute(delete(DingtalkFileSnapshot))
+        s.add(DingtalkFileSnapshot(fetched_at=fetched_at, file_count=len(files), payload=payload))
+        await s.commit()
 
 
 async def _refresh_dingtalk_files() -> None:
-    """后台任务：遍历全部钉钉知识库并写缓存 + 落盘快照。"""
+    """手动刷新触发的后台任务：全量遍历钉钉 → 解析创建人姓名 → 持久化快照 + 更新内存缓存。
+
+    创建人姓名在遍历结束时一次性解析并写入快照，列表接口因此无需再调用钉钉通讯录接口
+    （钉钉配置异常时也能展示已持久化的列表）。
+    """
     from kb_common.clients import dingtalk_client
+    global _snapshot_loaded
     try:
         await dingtalk_client.sync_runtime_config()
         files = await dingtalk_client.get_all_knowledge_files()
+        creator_ids = list({f.get("creator_id") for f in files if f.get("creator_id")})
+        if creator_ids:
+            name_map = await dingtalk_client.get_user_name_map(creator_ids)
+            for f in files:
+                f["creator_name"] = name_map.get(f.get("creator_id") or "", "") or None
+        fetched_at = datetime.now()
+        await _write_dingtalk_snapshot(files, fetched_at)
         _dingtalk_cache["files"] = files
-        _dingtalk_cache["expire_at"] = time.time() + _DINGTALK_TTL
+        _dingtalk_cache["cached_at"] = fetched_at
         _dingtalk_cache["error"] = None
-        _save_dingtalk_snapshot(files)
+        _snapshot_loaded = True
+        logger.info("钉钉知识库文件快照刷新完成：%d 个文件", len(files))
     except Exception as e:
         _dingtalk_cache["error"] = f"钉钉数据拉取失败：{e}"
+        logger.warning("钉钉知识库文件快照刷新失败：%s", e)
     finally:
         _dingtalk_cache["loading"] = False
 
 
-def _trigger_dingtalk_refresh(force: bool = False) -> None:
-    """缓存缺失/过期时启动后台遍历（单飞：正在遍历则跳过）。"""
-    _load_dingtalk_snapshot()
-    now = time.time()
-    fresh = (not force) and _dingtalk_cache["files"] and _dingtalk_cache["expire_at"] > now
-    if fresh or _dingtalk_cache["loading"]:
+def _trigger_dingtalk_refresh() -> None:
+    """启动后台全量遍历（单飞：正在遍历则跳过）。仅由「刷新」按钮调用。"""
+    if _dingtalk_cache["loading"]:
         return
     _dingtalk_cache["loading"] = True
     asyncio.create_task(_refresh_dingtalk_files())
+
+
+def _dingtalk_cache_meta() -> dict:
+    """快照元信息：最近一次成功同步时间（UTC ISO），供前端展示数据新鲜度。"""
+    return {"cached_at": _to_utc_iso(_dingtalk_cache.get("cached_at"))}
 
 
 async def _doc_to_kc_dict(r, directory_name: str | None = None) -> dict:
@@ -121,38 +173,41 @@ async def get_unified_tree(
     if kb_type:
         kb_q = kb_q.where(KnowledgeBase.kb_type == kb_type)
     kbs = (await s.execute(kb_q)).scalars().all()
+    if not kbs:
+        return []
+
+    # 固定 4 条查询取回全部数据（原来是 1 + 每个知识库 3 条的 N+1 模式：
+    # 逐库查文档总数、目录列表、各目录文档数，库一多就把连接占住不放）
+    kb_ids = [kb.id for kb in kbs]
+    dirs = (await s.execute(
+        select(Directory).where(Directory.kb_id.in_(kb_ids)).order_by(Directory.sort_order)
+    )).scalars().all()
+    kb_doc_counts = dict((await s.execute(
+        select(Document.kb_id, func.count(Document.id))
+        .where(Document.kb_id.in_(kb_ids), Document.is_deleted == False)  # noqa: E712
+        .group_by(Document.kb_id)
+    )).all())
+    dir_doc_counts: dict[str, int] = {}
+    if dirs:
+        rows = (await s.execute(
+            select(Document.directory_id, func.count(Document.id))
+            .where(Document.directory_id.in_([d.id for d in dirs]),
+                   Document.is_deleted == False)  # noqa: E712
+            .group_by(Document.directory_id)
+        )).all()
+        dir_doc_counts = {str(dir_id): cnt for dir_id, cnt in rows}
+
+    dirs_by_kb: dict[str, list] = {}
+    for d in dirs:
+        dirs_by_kb.setdefault(str(d.kb_id), []).append(d)
 
     result = []
     for kb in kbs:
-        # 文档总数（不含已删除）
-        doc_count_q = select(func.count(Document.id)).where(
-            Document.kb_id == kb.id,
-            Document.is_deleted == False,
-        )
-        total_docs = (await s.execute(doc_count_q)).scalar() or 0
-
-        # 获取该 KB 的所有目录
-        dirs_q = select(Directory).where(Directory.kb_id == kb.id).order_by(Directory.sort_order)
-        dirs = (await s.execute(dirs_q)).scalars().all()
-
-        # 统计每个目录的文档数
-        dir_doc_counts = {}
-        if dirs:
-            dir_ids = [d.id for d in dirs]
-            count_q = (
-                select(Document.directory_id, func.count(Document.id))
-                .where(
-                    Document.directory_id.in_(dir_ids),
-                    Document.is_deleted == False,
-                )
-                .group_by(Document.directory_id)
-            )
-            for dir_id, cnt in (await s.execute(count_q)).all():
-                dir_doc_counts[str(dir_id)] = cnt
+        kb_dirs = dirs_by_kb.get(str(kb.id), [])
 
         # 构建目录树
         nodes = {}
-        for d in dirs:
+        for d in kb_dirs:
             nodes[str(d.id)] = {
                 "id": str(d.id),
                 "kb_id": str(d.kb_id),
@@ -164,7 +219,7 @@ async def get_unified_tree(
             }
 
         roots = []
-        for d in dirs:
+        for d in kb_dirs:
             node = nodes[str(d.id)]
             if d.parent_id and str(d.parent_id) in nodes:
                 nodes[str(d.parent_id)]["children"].append(node)
@@ -175,7 +230,7 @@ async def get_unified_tree(
             "kb_id": str(kb.id),
             "kb_name": kb.name,
             "kb_type": kb.kb_type,
-            "document_count": total_docs,
+            "document_count": kb_doc_counts.get(kb.id, 0),
             "children": roots,
         })
 
@@ -372,15 +427,17 @@ async def list_dingtalk_documents(
     directory: str | None = Query(None, description="按目录路径模糊匹配"),
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=200),
-    refresh: bool = Query(False, description="为 true 时绕过缓存重新拉取钉钉"),
+    refresh: bool = Query(False, description="为 true（仅「刷新」按钮）时后台重新遍历钉钉并更新快照"),
     u=Depends(get_current_user),
+    s: AsyncSession = Depends(get_session),
 ):
-    """钉钉知识库文件列表（实时拉取钉钉开放平台数据）。
+    """钉钉知识库文件列表（读取持久化快照）。
 
-    全量遍历操作人可见的团队知识库（耗时较长）改为后台任务执行，本接口立即返回：
-    首次/过期时返回 loading=true（前端轮询），缓存命中时直接返回数据；
-    「手动刷新」(refresh=true) 触发后台重新遍历，期间继续返回旧数据。
-    文件含多层目录路径（/ 分隔），创建人 userid 经钉钉通讯录接口解析为姓名。
+    全量遍历操作人可见的团队知识库约需 25–30 分钟（约 4,500 次节点请求），
+    因此**只有手动点「刷新」(refresh=true) 才触发**：接口立即返回并在后台遍历，
+    期间前端按 loading=true 轮询，列表继续显示当前快照。
+    其余请求（含翻页/筛选/进程重启后首次访问）只读持久化快照（dingtalk_file_snapshots），
+    不调用钉钉；创建人姓名在遍历时写入快照，接口不再调用钉钉通讯录。
     """
     from kb_common.clients import dingtalk_client
 
@@ -397,34 +454,57 @@ async def list_dingtalk_documents(
             "items": [], "total": 0, "page": page, "size": size,
             "workspaces": [], "creators": [],
             "loading": False, "error": config_error,
+            **_dingtalk_cache_meta(),
         }
 
-    _trigger_dingtalk_refresh(force=refresh)
-    loading = _dingtalk_cache["loading"] and not _dingtalk_cache["files"]
+    # 仅在手动刷新时启动后台全量遍历（单飞）；其余请求只读快照
+    if refresh:
+        _trigger_dingtalk_refresh()
+
+    await ensure_dingtalk_files_loaded(s)
     cached_files = _dingtalk_cache["files"]
 
-    # 首次同步尚未完成：不挂起请求，返回 loading 让前端轮询
+    # 尚无快照：首次同步未完成时返回 loading 让前端轮询，否则为空列表（提示点「刷新」）
     if not cached_files:
         return {
             "items": [], "total": 0, "page": page, "size": size,
             "workspaces": [], "creators": [],
-            "loading": True, "error": _dingtalk_cache["error"],
+            "loading": bool(_dingtalk_cache["loading"]),
+            "error": _dingtalk_cache["error"],
+            **_dingtalk_cache_meta(),
         }
 
     files = list(cached_files)
-    # 知识库 / 创建人过滤选项（从文件数据聚合，避免额外接口调用）
+    # 知识库 / 创建人过滤选项（从快照数据聚合，不额外调用钉钉）
     workspace_map: dict[str, str] = {}
-    creator_ids: set[str] = set()
+    creator_names: dict[str, str] = {}
     for f in files:
         if f.get("workspace_id") and f.get("workspace_name"):
             workspace_map[f["workspace_id"]] = f["workspace_name"]
-        if f.get("creator_id"):
-            creator_ids.add(f["creator_id"])
+        cid = f.get("creator_id")
+        if cid and cid not in creator_names:
+            creator_names[cid] = f.get("creator_name") or ""
 
-    name_map = await dingtalk_client.get_user_name_map(list(creator_ids))
+    # 兼容缺少创建人姓名的历史快照：仅在这种情况下才调用钉钉通讯录解析，
+    # 解析后回写快照，避免每次服务重启都重新解析（新快照在遍历时已固化姓名）
+    missing = [cid for cid, name in creator_names.items() if not name]
+    if missing:
+        name_map = await dingtalk_client.get_user_name_map(missing)
+        creator_names.update({cid: name_map.get(cid) or "" for cid in missing})
+        enriched = False
+        for f in files:
+            cid = f.get("creator_id")
+            if cid and not f.get("creator_name") and creator_names.get(cid):
+                f["creator_name"] = creator_names[cid]
+                enriched = True
+        if enriched:
+            await _write_dingtalk_snapshot(files, _dingtalk_cache.get("cached_at") or datetime.now())
+            _dingtalk_cache["files"] = files
+            logger.info("钉钉文件快照已补齐创建人姓名")
+
     creators = [
-        {"id": uid, "name": name_map.get(uid) or uid}
-        for uid in sorted(creator_ids, key=lambda x: name_map.get(x, ""))
+        {"id": cid, "name": creator_names.get(cid) or cid}
+        for cid in sorted(creator_names, key=lambda x: creator_names.get(x) or x)
     ]
     workspaces = [{"id": wid, "name": name} for wid, name in workspace_map.items()]
 
@@ -461,7 +541,7 @@ async def list_dingtalk_documents(
             "size": f.get("size") or 0,
             "url": f.get("url"),
             "creator_id": f.get("creator_id") or "",
-            "creator_name": name_map.get(f.get("creator_id") or "", "") or None,
+            "creator_name": f.get("creator_name") or creator_names.get(f.get("creator_id") or "") or None,
             "created_at": f.get("created_at"),
             "modified_at": f.get("modified_at"),
         })
@@ -475,6 +555,7 @@ async def list_dingtalk_documents(
         "creators": creators,
         "loading": _dingtalk_cache["loading"],
         "error": _dingtalk_cache["error"],
+        **_dingtalk_cache_meta(),
     }
 
 
@@ -788,5 +869,66 @@ async def get_knowledge_source_directories(
         # Dify 数据集本身就是一层文档集合，无多级目录
         return {"source_type": source.source_type, "root_node_id": source.external_id, "items": []}
 
+    if source.source_type == "ragflow_dataset":
+        # RAGFlow 数据集：实时列出库内文档（含解析状态），比 Dify 分支更有用
+        from kb_common.clients import ragflow_client
+        from kb_common.config import get_settings as _gs
+        from kb_common.models import Setting as _Setting
+        # 应用运行时连接配置（settings 表优先）
+        for _k in ("ragflow_base_url", "ragflow_api_key"):
+            _row = (await s.execute(select(_Setting).where(_Setting.key == _k))).scalar_one_or_none()
+            setattr(_gs(), _k, (_row.value if _row else None) or getattr(_gs(), _k, "") or "")
+        try:
+            docs = await ragflow_client.list_documents(source.external_id)
+        except ragflow_client.RagflowNotConfigured as e:
+            raise HTTPException(400, str(e))
+        except ragflow_client.RagflowError as e:
+            raise HTTPException(502, f"获取 RAGFlow 文档失败：{e}")
+        return {
+            "source_type": source.source_type,
+            "root_node_id": source.external_id,
+            "items": [
+                {
+                    "node_id": d.get("id"),
+                    "name": d.get("name") or "",
+                    "is_folder": False,
+                    "has_children": False,
+                    "extension": (d.get("name") or "").rsplit(".", 1)[-1].lower() if "." in (d.get("name") or "") else "",
+                    "run_status": d.get("run"),
+                    "chunk_count": d.get("chunk_count") or 0,
+                }
+                for d in docs
+            ],
+        }
+
     # business_system：暂未实现，返回空
     return {"source_type": source.source_type, "root_node_id": source.external_id, "items": []}
+
+
+@router.get("/knowledge-sources/{source_id}/dingtalk-folder-snapshot")
+async def get_dingtalk_folder_snapshot(
+    source_id: int,
+    u=Depends(get_current_user),
+    s: AsyncSession = Depends(get_session),
+):
+    """读取钉钉知识库的文件夹快照（dingtalk_folder_stats 表），供目录选择等场景秒开。
+
+    只读持久化快照，不实时调用钉钉；快照由知识源登记/知识缺口页「刷新」后台遍历写入。
+    """
+    source = await s.get(KnowledgeSource, source_id)
+    if source is None:
+        raise HTTPException(404, "知识库不存在")
+    if source.source_type != "dingtalk_workspace":
+        raise HTTPException(400, "仅钉钉知识库提供目录快照")
+    rows = (await s.execute(
+        select(DingtalkFolderStat)
+        .where(DingtalkFolderStat.external_id == source.external_id)
+        .order_by(DingtalkFolderStat.path, DingtalkFolderStat.node_id)
+    )).scalars().all()
+    return {
+        "external_id": source.external_id,
+        "fetched_at": _to_utc_iso(max((r.fetched_at for r in rows), default=None)),
+        # folders：文件夹清单（path 不带前导斜杠，根为空串）；count=0 表示尚无快照，调用方可回退实时接口
+        "count": len(rows),
+        "folders": [{"node_id": r.node_id, "path": r.path} for r in rows],
+    }

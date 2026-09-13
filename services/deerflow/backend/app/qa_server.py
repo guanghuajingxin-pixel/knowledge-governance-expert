@@ -47,6 +47,8 @@ CONFIG_PATH = Path(os.getenv("DEER_FLOW_CONFIG_PATH", str(BACKEND_DIR / "config.
 # - *.custom.md：用户在前端保存的自定义内容，重启/重载不丢失；删除即恢复默认
 SOUL_PATH = DATA_DIR / "SOUL.md"
 PERSONA_CUSTOM_PATH = DATA_DIR / "persona.custom.md"
+_DEFAULT_AGENT_NAME = "杰克百晓生"
+_BOOT_AGENT_NAME = ""   # 引导/热更新时从 kb-api 配置读取的智能体名
 SKILLS_DIR = BACKEND_DIR.parent / "skills"
 SKILL_FILE = SKILLS_DIR / "custom" / "enterprise-kb-qa" / "SKILL.md"
 SKILL_CUSTOM_PATH = DATA_DIR / "skill.custom.md"
@@ -66,7 +68,7 @@ SOUL_MD = """你是「杰克百晓生」，知识治理平台内置的企业知�
 你的职责：从企业知识库中全面、系统地检索信息，并把检索到的知识整合、提炼成
 **直接、明确、简洁**的答案。你有四个检索工具：
 
-- knowledge_search：检索 Dify 知识库（语义+全文检索，返回文档正文片段，是答案内容的主要来源）
+- knowledge_search：检索企业知识库（语义+全文检索，返回文档正文片段，是答案内容的主要来源）
 - dingtalk_browse：浏览钉钉知识库目录地图（action="map"）与某目录下文档列表（action="list"，在线文档优先）
 - dingtalk_search：按文件名/目录路径关键词检索钉钉文档（返回名称、链接、node_id）
 - dingtalk_read_doc：读取钉钉文档的**正文内容**（Markdown），在线文档秒读，办公文档下载解析
@@ -75,8 +77,10 @@ SOUL_MD = """你是「杰克百晓生」，知识治理平台内置的企业知�
 
 ### 第一步：预判目录，定位文档（先看地图，再进目录）
 凡涉及公司内部信息的问题，按以下顺序系统检索，不要盲目顺序读取：
-1. 先调用 knowledge_search 检索 Dify 知识库，同时调用
-   `dingtalk_browse(action="map")` 查看知识库与目录结构；
+1. 先仅调用 knowledge_search 检索企业知识库。证据充分则直接作答。
+   证据不足时，调用 ask_clarification（approach_choice），填写 evidence_summary、confidence、confidence_reason，
+   先给出原文内容总结、缺口与置信度（证据支持程度，非准确率），提供“继续从钉钉知识库探索”和“基于知识库内容回答”。
+   未获用户明确选择前禁止钉钉调用。用户同意后才调用 `dingtalk_browse(action="map")`；
 2. 根据问题主题（差旅/安全/研发/品质…）**预判最可能的知识库和目录**；
 3. 用 `dingtalk_browse(action="list", directory="目录关键词")` 列出该目录文档，
    结果中**在线文档（online=true，adoc/md/txt）排最前，优先精读在线文档**
@@ -115,7 +119,7 @@ SOUL_MD = """你是「杰克百晓生」，知识治理平台内置的企业知�
 
 ### 第四步：检索时限与用户确认（系统自动管控，无需你计时）
 检索时长由系统自动管控，你没有墙钟概念，也不要自己判断"是否该停下来问用户"：
-- 检索满 1 分钟、以及用户选择继续后再满 5 分钟时，**系统会自动**向用户弹出
+- 用户同意钉钉探索后满 1 分钟、以及用户选择继续后再满 5 分钟时，**系统会自动**向用户弹出
   "继续探索 / 先基于已检索内容回答"选择按钮——你无需、也不要为此主动调用
   ask_clarification，照常继续检索即可；
 - 用户选择"继续探索"后，你会收到选项文字的用户消息——照常按第一、二步继续检索；
@@ -131,8 +135,8 @@ SOUL_MD = """你是「杰克百晓生」，知识治理平台内置的企业知�
   才使用 ask_clarification；能合理推断的直接检索，不要轻易要求澄清。
 
 ## 交互风格
-- 中文作答；回答末尾可用一句话提示可继续追问。
-- 检索中发现用户可能关心的关联信息，可在答案最后简要补充一句。
+- 中文作答；仅回答本轮问题，必要的依据紧随结论。
+- 未被询问的关联信息不附加到答案；不使用泛泛追问结尾。
 """
 
 # 默认问答技能（enterprise-kb-qa/SKILL.md 的内置模板）。
@@ -153,12 +157,12 @@ version: 1.0.0
 
 1. **判断意图**
    - 问候、身份询问、闲聊 → 直接友好回应，不调用工具。
-   - 企业内部信息问题 → 必须先检索再回答，且 Dify 与钉钉两个来源都要检索。
+   - 企业内部信息问题 → 必须先检索再回答，先仅检索企业知识库；证据不足时总结内容、给出置信度，并询问用户是否继续钉钉探索。
    - 与企业知识完全无关且超出职责范围 → 礼貌说明你只负责企业知识问答。
 
 2. **先预判目录，再进目录（不要盲目顺序读取）**
-   - 先调用 `knowledge_search` 检索 Dify，同时调用
-     `dingtalk_browse(action="map")` 查看知识库与目录结构；
+   - 先调用 `knowledge_search`。不足时用 ask_clarification（approach_choice）填写 evidence_summary、confidence、confidence_reason；
+     只有用户点击“继续从钉钉知识库探索”后才调用 `dingtalk_browse(action="map")`；
    - 根据问题主题（差旅/安全/研发/品质…）预判最可能的知识库和目录，
      用 `dingtalk_browse(action="list", directory="目录关键词")` 列出该目录文档；
    - list 结果中**在线文档（online=true）排在最前，优先精读在线文档**（秒读正文），
@@ -174,7 +178,7 @@ version: 1.0.0
    - 禁止仅根据文件名猜测内容或只给文档链接而不读正文。
 
 4. **检索时限与用户确认（系统自动管控）**
-   - 你没有墙钟概念，也不要自己判断超时：检索满 1 分钟、继续后再满 5 分钟时，
+   - 你没有墙钟概念，也不要自己判断超时：用户同意钉钉探索后满 1 分钟、继续后再满 5 分钟时，
      系统会自动向用户弹出"继续探索 / 先基于已检索内容回答"选择按钮，
      你无需、也不要为此主动调用 `ask_clarification`，照常检索即可；
    - 用户点"继续探索"会以选项文字作为新消息到来，按第一、二步继续检索；
@@ -248,6 +252,7 @@ def write_config(boot: dict[str, Any]) -> None:
                 "base_url": boot.get("base_url") or "https://api.deepseek.com/v1",
                 "max_tokens": int(boot.get("max_tokens") or 4096),
                 "temperature": float(boot.get("temperature") or 0.7),
+                **({"top_p": float(boot["top_p"])} if boot.get("top_p") else {}),
                 "supports_thinking": False,
                 "supports_vision": False,
             }
@@ -309,10 +314,29 @@ def write_config(boot: dict[str, Any]) -> None:
 
 
 def _effective_persona() -> str:
-    """当前生效的人格内容：优先自定义，否则默认模板。"""
+    """当前生效的人格内容：优先自定义，否则默认模板；并按配置页 agent_name 替换自称。"""
     if PERSONA_CUSTOM_PATH.exists():
-        return PERSONA_CUSTOM_PATH.read_text(encoding="utf-8")
-    return SOUL_MD
+        text = PERSONA_CUSTOM_PATH.read_text(encoding="utf-8")
+    else:
+        text = SOUL_MD
+    name = (_BOOT_AGENT_NAME or "").strip()
+    if name and name != _DEFAULT_AGENT_NAME:
+        text = text.replace(_DEFAULT_AGENT_NAME, name)
+    from app.qa_events import ANSWER_SCOPE
+    return text + "\n\n" + ANSWER_SCOPE
+
+
+_FORCE_RETRIEVAL_PREFIX = (
+    "【平台约束·强制检索模式】无论问题类型（含问候/闲聊），本轮必须先调用 knowledge_search "
+    "获取企业知识后再作答；钉钉探索必须先获用户选择；检索无结果时明确说明未检索到相关内容，不得跳过检索。\n\n"
+)
+
+
+def _apply_retrieval_mode(message: str, mode: str) -> str:
+    """retrieval_mode=force 时注入平台约束前缀；smart 原样返回。"""
+    if (mode or "").strip().lower() == "force":
+        return _FORCE_RETRIEVAL_PREFIX + message
+    return message
 
 
 def _effective_skill() -> str:
@@ -331,10 +355,12 @@ def write_persona_and_skill() -> None:
 
 def ensure_bootstrapped() -> bool:
     """启动引导：拉取配置 → 写 config.yaml + SOUL.md + SKILL.md。成功返回 True。"""
+    global _BOOT_AGENT_NAME
     boot = _bootstrap_from_kbapi() or _bootstrap_from_env()
     if not boot or not boot.get("api_key"):
         logger.error("no LLM bootstrap config available (kb-api unreachable and DF_LLM_API_KEY not set)")
         return False
+    _BOOT_AGENT_NAME = str(boot.get("agent_name") or "").strip()
     write_config(boot)
     write_persona_and_skill()
     logger.info(
@@ -405,8 +431,12 @@ class ChatStreamIn(BaseModel):
     subagent_enabled: bool = False
     recursion_limit: int = 80
     dataset_ids: list[str] | None = None
+    ragflow_dataset_ids: list[str] | None = None  # RAGFlow 数据集（与 Dify 并列的第二检索引擎）
+    kb_ids: list[str] | None = None    # 平台本地知识库（ES hybrid）ID 列表
     top_k: int = 8
     disabled_tools: list[str] = []   # 停用的工具名（来自智能体配置 tools_enabled）
+    retrieval_mode: str = "smart"    # smart=智能调用；force=每问必检索（平台约束前缀注入）
+    max_retrieval_rounds: int = 2    # 单轮 knowledge_search 调用上限=轮数×3（kb_tools 硬限）
     # 限时探索续跑动作：""=新问题（重置计时）；"continue"=用户选择继续探索（进入下一计时阶段）；
     # "stop"=用户选择先基于已检索内容回答（立即停止检索）
     action: str = ""
@@ -498,6 +528,26 @@ def update_skill(body: SkillIn):
     reset_client()
     logger.info("skill updated (custom=%s)", SKILL_CUSTOM_PATH.exists())
     return {"ok": True, "custom": SKILL_CUSTOM_PATH.exists()}
+
+
+@app.post("/v1/reconfig")
+def reconfig():
+    """热更新引导配置：kb-api 智能体配置保存后调用。
+
+    重新拉取 bootstrap（模型/超参/agent_name）→ 重写 config.yaml 与 SOUL/SKILL →
+    重置 Agent 单例，新对话即时生效；拉取失败时保持现配置不变。
+    """
+    global _BOOT_AGENT_NAME
+    boot = _bootstrap_from_kbapi()
+    if not boot or not boot.get("api_key"):
+        return {"ok": False, "error": "bootstrap config unavailable"}
+    _BOOT_AGENT_NAME = str(boot.get("agent_name") or "").strip()
+    write_config(boot)
+    write_persona_and_skill()
+    reset_client()
+    logger.info("reconfig applied: model=%s agent_name=%s",
+                boot.get("model"), _BOOT_AGENT_NAME or "(default)")
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------
@@ -679,26 +729,6 @@ def _sse(obj: dict[str, Any]) -> str:
     return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n"
 
 
-#: 跨轮消息去重：stream_mode="values" 每次都会重放 checkpointer 中的全量历史，
-#: 这里按 thread 记录已下发过的消息 ID，保证只有本轮新消息被转发。
-SEEN_MESSAGE_IDS: dict[str, set[str]] = {}
-_SEEN_MAX_THREADS = 512
-
-
-def _is_seen(thread_id: str, msg_id: str | None) -> bool:
-    if not msg_id:
-        return False  # 无 ID 的消息不去重（避免漏发）
-    seen = SEEN_MESSAGE_IDS.setdefault(thread_id, set())
-    if msg_id in seen:
-        return True
-    seen.add(msg_id)
-    # 简单兜底：线程数过多时清理最旧的一半
-    if len(SEEN_MESSAGE_IDS) > _SEEN_MAX_THREADS:
-        for k in list(SEEN_MESSAGE_IDS.keys())[: _SEEN_MAX_THREADS // 2]:
-            SEEN_MESSAGE_IDS.pop(k, None)
-    return False
-
-
 def _serialize_checkpointer(agent) -> None:
     """给共享 checkpointer 的方法加互斥锁（幂等，agent 重建后需再次调用）。
 
@@ -730,33 +760,36 @@ def _serialize_checkpointer(agent) -> None:
 
 
 def _event_stream(body: ChatStreamIn):
-    """同步生成器：直接调用 LangGraph agent.stream 双模式，转译为 SSE。
+    """按根图节点来源转译过程；图结束后只发送本轮主模型的权威答案。
 
-    使用 stream_mode=["values", "messages"] 双模式：
-    - values 模式：完整状态快照（工具调用、工具结果、历史基线去重）
-    - messages 模式：token 级流式（AIMessageChunk.content = 逐 token 文本增量）
-
-    中断语义：循环体对每个图事件检查用户取消标志（/v1/chat/cancel），命中即
-    break 退出 for —— for 退出会 close agent.stream 迭代器（GeneratorExit），
-    中断进行中的模型流式调用（停止 token 消耗）；本生成器由端点的专属 worker
-    线程驱动并在该线程内 close，保证确定性收尾与 _stream_lock 释放。
+    messages 仅用于来源确认后的阶段提示，绝不转发其 token 内容。
+    values 用于历史隔离及最终状态，updates 用于主模型来源和工具调用。
     """
     from extensions.kb_tools import RUNTIME_CTX  # noqa: PLC0415
-    from langchain_core.messages import AIMessageChunk, ToolMessage
     from deerflow.agents.middlewares.exploration_timeout_middleware import (
         ExplorationTimeoutMiddleware,
     )
     from deerflow.client import DeerFlowClient  # noqa: PLC0415
 
+    if body.action and not ExplorationTimeoutMiddleware.can_resume(body.thread_id):
+        yield _sse({"type": "error", "message": "本次选择已过期或服务已重启，请重新提交原问题。"})
+        return
+
     RUNTIME_CTX[body.thread_id] = {
         "dataset_ids": body.dataset_ids or [],
+        "ragflow_dataset_ids": body.ragflow_dataset_ids or [],
+        "kb_ids": body.kb_ids or [],
         "top_k": body.top_k,
+        "retrieval_mode": (body.retrieval_mode or "smart").strip().lower(),
+        "max_retrieval_rounds": max(1, int(body.max_retrieval_rounds or 2)),
+        "search_calls": 0,
     }
     # 限时探索：新问题重置计时；continue/stop 为用户在澄清按钮上的选择，驱动阶段流转
-    ExplorationTimeoutMiddleware.begin(body.thread_id, (body.action or "").strip().lower())
+    ExplorationTimeoutMiddleware.begin(body.thread_id, (body.action or "").strip().lower(), question=body.message)
+    if "knowledge_search" in (body.disabled_tools or []):
+        ExplorationTimeoutMiddleware.record_evidence(body.thread_id, [])
     try:
         client = get_client()
-        yield _sse({"type": "ready"})
 
         # 准备 agent 与 config（复用 client 内部逻辑）
         config = client._get_runnable_config(
@@ -765,7 +798,8 @@ def _event_stream(body: ChatStreamIn):
             plan_mode=body.plan_mode,
             subagent_enabled=body.subagent_enabled,
             recursion_limit=body.recursion_limit,
-            disabled_tools=body.disabled_tools or [],
+            # Source selection is mandatory even when optional ambiguity questions are disabled.
+            disabled_tools=[t for t in (body.disabled_tools or []) if t != "ask_clarification"],
         )
         # agent 为单例：构建互斥 + 即刻捕获引用；并给共享 checkpointer 上方法级锁（支撑多会话并发）
         with _ensure_lock:
@@ -773,296 +807,33 @@ def _event_stream(body: ChatStreamIn):
             agent = client._agent
         _serialize_checkpointer(agent)
 
-        state = {"messages": [{"role": "user", "content": body.message}]}
+        from app.qa_events import AnswerProjection, current_question
+        projection = AnswerProjection(body.thread_id)
+        state = {"messages": [{"role": "user", "content": _apply_retrieval_mode(
+            current_question(body.message, body.action), body.retrieval_mode)}]}
         context = {"thread_id": body.thread_id}
-
-        def _emit_message(d: dict[str, Any]):
-            """转译单条缓冲消息（生成器辅助）。"""
-            if d.get("type") == "ai":
-                if _is_seen(body.thread_id, d.get("id")):
-                    return
-                text = d.get("content") or ""
-                if text.strip():
-                    yield _sse({"type": "ai_text", "content": text})
-            elif d.get("type") == "tool":
-                if _is_seen(body.thread_id, d.get("id")):
-                    return
-                yield _sse({
-                    "type": "tool_end",
-                    "call_id": d.get("tool_call_id"),
-                    "name": d.get("name"),
-                    "content": d.get("content") or "",
-                })
-
-        def _extract_text(content) -> str:
-            return DeerFlowClient._extract_text(content)
-
+        yield _sse(projection.event("ready"))
         with _stream_lock:
-            primed = False
-            pending: list[dict[str, Any]] = []
-            cumulative_usage: dict[str, int] = {
-                "input_tokens": 0,
-                "output_tokens": 0,
-                "total_tokens": 0,
-            }
-
-            # --- 过渡独白过滤 ---
-            # 工具调用前的 AI 文本是"思考过程"（如"我先检索…"），不应作为答案。
-            # 按消息 id 缓冲文本：检测到 tool_call 的消息丢弃缓冲；
-            # 缓冲超过 1.2s 仍无 tool_call，视为最终答案开始实时推送。
-            import re as _re
-            import time as _time
-
-            text_buf: dict[str, str] = {}      # mid -> 已缓冲未下发的文本
-            discard_ids: set[str] = set()     # 已确认带工具调用的过渡消息
-            final_ids: set[str] = set()       # values 快照确认无 tool_calls 的最终消息
-            last_values: dict | None = None   # 最后一次 values 快照（收尾兜底用）
-
-            _NARR_EN = _re.compile(
-                r"\b(i|i'll|i've|i will|i'm|let me|let's|i need to|i have|i now|now i|"
-                r"i'm going to|first i|then i|i can|i should)\b", _re.IGNORECASE)
-            _NARR_EN_VERB = _re.compile(
-                r"\b(search|retrieve|check|compile|answer|find|gather|analyze|result|"
-                r"information|source|knowledge base|both|compile|put together|summarize)\b",
-                _re.IGNORECASE)
-            _NARR_ZH = _re.compile(r"(让我|我来|我先|我已|我已经|我再|我们|现在我|接下来我|我先查|我对检索|我将|下面我)")
-            _NARR_ZH_VERB = _re.compile(
-                r"(检索|搜索|查找|查询|整理|整合|回答|总结|归纳|搜一下|看一下|知识库|结果|资料|内容|为您)")
-
-            # 规划/分析过程关键词：这些段落是智能体内部思考，必须从答案中剥离
-            _PLAN_PARAS = _re.compile(
-                r"用户询问|用户问题|已执行搜索|已检索|任务背景|当前状态|下一步建议|"
-                r"已定位文档清单|检索词|召回|未命中|node_id|工作空间|链接：https?://alidocs|"
-                r"路径：|已读取|读取失败|下一步应|可作为回答依据|避免重复",
-                _re.IGNORECASE)
-
-            def _strip_narration(text: str) -> str:
-                """剥离最终答案中的过程性独白与规划段落，返回首个实质内容起的文本。"""
-                s = text.lstrip()
-                # 先按段落拆分，丢弃纯规划段落（含规划关键词的整段）
-                paragraphs = _re.split(r"\n\s*\n", s)
-                kept_paras: list[str] = []
-                started = False
-                for para in paragraphs:
-                    stripped = para.strip()
-                    if not stripped:
-                        if started:
-                            kept_paras.append(para)
-                        continue
-                    if _PLAN_PARAS.search(stripped):
-                        # 规划段落：若尚未开始输出实质内容则跳过；
-                        # 若已开始，仍跳过（答案中不应混入规划）
-                        continue
-                    # 段落级通过后，再按句剥离开头的过程性独白
-                    cleaned = _strip_leading_narration(para)
-                    if cleaned.strip():
-                        started = True
-                        kept_paras.append(cleaned)
-                result = "\n\n".join(kept_paras).lstrip()
-                # 若整段全被剥离（极端情况），退化为句级剥离兜底
-                if not result.strip():
-                    return _strip_leading_narration(s)
-                return result
-
-            def _strip_leading_narration(text: str) -> str:
-                """按句剥离开头的过程性独白（中英文），首个实质内容句起保留。"""
-                s = text.lstrip()
-                parts = _re.split(r"(?<=[。！？.!?\n])", s)
-                idx = 0
-                for p in parts:
-                    if not p.strip():
-                        idx += 1
-                        continue
-                    narr = False
-                    if _NARR_EN.search(p) and _NARR_EN_VERB.search(p):
-                        narr = True
-                    elif _NARR_ZH.search(p) and _NARR_ZH_VERB.search(p):
-                        narr = True
-                    if not narr:
-                        break
-                    idx += 1
-                return "".join(parts[idx:]).lstrip()
-
-            def _buf_text(mid: str | None, delta: str):
-                """缓冲 AI 文本 chunk（直到 values 快照确认该消息为最终答案后才下发）。"""
-                frames: list[str] = []
-                if not delta:
-                    return frames
-                if not mid or not primed:
-                    pending.append({"type": "ai", "content": delta, "id": mid})
-                    return frames
-                if mid in discard_ids:
-                    return frames
-                text_buf[mid] = text_buf.get(mid, "") + delta
-                return frames
-
-            def _discard_mid(mid: str | None):
-                """确认某条 AI 消息带工具调用，丢弃其缓冲文本。"""
-                if not mid:
-                    return
-                discard_ids.add(mid)
-                text_buf.pop(mid, None)
-
-            cancelled = False
             for mode, chunk in agent.stream(
-                state,
-                config=config,
-                context=context,
-                stream_mode=["values", "messages"],
+                state, config=config, context=context, stream_mode=["values", "updates", "messages"],
             ):
-                # 用户手动中断（/v1/chat/cancel）：每个图事件都检查取消标志，
-                # 命中即 break —— 退出 for 会 close agent.stream（GeneratorExit），
-                # 在驱动线程内中断进行中的模型流式调用（停止 token 消耗）。
-                # 中间件 wrap_model_call 对未开始的模型调用做短路，双保险。
                 if ExplorationTimeoutMiddleware.is_cancelled(body.thread_id):
-                    cancelled = True
-                    logger.info("[qa] thread=%s cancelled by user, stopping stream",
-                                body.thread_id)
-                    break
-                if mode == "values":
-                    messages = chunk.get("messages", [])
-                    last_values = chunk
-                    if not primed:
-                        primed = True
-                        # 历史基线：首个快照里的 AI/Tool 消息标记为已见
-                        for m in messages:
-                            mid = getattr(m, "id", None)
-                            if mid and getattr(m, "type", None) in ("ai", "tool"):
-                                _is_seen(body.thread_id, mid)
-                        for d in pending:
-                            for frame in _emit_message(d):
-                                yield frame
-                        pending = []
-                        continue
-
-                    # 后续 values 快照：权威确认消息类型（工具调用/最终答案）
-                    for m in messages:
-                        mid = getattr(m, "id", None)
-                        mtype = getattr(m, "type", None)
-
-                        if mtype == "ai" and mid:
-                            _seen = SEEN_MESSAGE_IDS.setdefault(body.thread_id, set())
-                            was_seen = mid in _seen
-                            _seen.add(mid)
-                            tcs = getattr(m, "tool_calls", None) or []
-                            usage = getattr(m, "usage_metadata", None)
-                            if usage and not was_seen:
-                                cumulative_usage["input_tokens"] += usage.get("input_tokens", 0) or 0
-                                cumulative_usage["output_tokens"] += usage.get("output_tokens", 0) or 0
-                                cumulative_usage["total_tokens"] += usage.get("total_tokens", 0) or 0
-                            if tcs:
-                                # 过渡消息：丢弃缓冲文本，下发工具调用
-                                if not was_seen:
-                                    _discard_mid(mid)
-                                    for tc in tcs:
-                                        yield _sse({
-                                            "type": "tool_start",
-                                            "call_id": tc.get("id"),
-                                            "name": tc.get("name"),
-                                            "args": tc.get("args") or {},
-                                        })
-                            elif was_seen and mid not in discard_ids:
-                                # 已下发过的正常最终消息
-                                continue
-                            else:
-                                # 最终答案消息，或被中间件剥除 tool_calls 后的收尾消息
-                                # （同一消息 id：先以工具调用出现被丢弃，剥除后以无工具调用重现）
-                                discard_ids.discard(mid)
-                                final_ids.add(mid)
-                                txt = text_buf.pop(mid, None)
-                                if txt is None:
-                                    txt = _extract_text(getattr(m, "content", ""))
-                                txt = _strip_narration(txt)
-                                if txt.strip():
-                                    # 分块下发，保留流式上屏体验
-                                    chunk_size = 120
-                                    for i in range(0, len(txt), chunk_size):
-                                        yield _sse({"type": "ai_text", "content": txt[i:i + chunk_size]})
-
-                        elif mtype == "tool" and mid and not _is_seen(body.thread_id, mid):
-                            yield _sse({
-                                "type": "tool_end",
-                                "call_id": getattr(m, "tool_call_id", None),
-                                "name": getattr(m, "name", None),
-                                "content": _extract_text(getattr(m, "content", "")),
-                            })
-
-                elif mode == "messages":
-                    # messages 模式产出 (message_chunk, metadata) 元组
-                    if isinstance(chunk, tuple):
-                        msg_chunk, _meta = chunk
-                    else:
-                        msg_chunk = chunk
-
-                    if isinstance(msg_chunk, AIMessageChunk):
-                        mid = getattr(msg_chunk, "id", None)
-
-                        # tool_calls chunk（工具调用决策）→ 该消息是过渡消息，丢弃文本
-                        tcs = getattr(msg_chunk, "tool_call_chunks", None) or []
-                        if tcs:
-                            _discard_mid(mid)
-                            continue
-
-                        # token 级文本增量
-                        delta = _extract_text(msg_chunk.content)
-                        for frame in _buf_text(mid, delta):
-                            yield frame
-
-                    elif isinstance(msg_chunk, ToolMessage):
-                        mid = getattr(msg_chunk, "id", None)
-                        if not primed:
-                            pending.append({
-                                "type": "tool",
-                                "content": _extract_text(getattr(msg_chunk, "content", "")),
-                                "name": getattr(msg_chunk, "name", None),
-                                "tool_call_id": getattr(msg_chunk, "tool_call_id", None),
-                                "id": mid,
-                            })
-                            continue
-                        if not _is_seen(body.thread_id, mid):
-                            yield _sse({
-                                "type": "tool_end",
-                                "call_id": getattr(msg_chunk, "tool_call_id", None),
-                                "name": getattr(msg_chunk, "name", None),
-                                "content": _extract_text(getattr(msg_chunk, "content", "")),
-                            })
-
-            if cancelled:
-                # 用户中断：不再下发任何答案/end 帧（调用方已断开），
-                # 直接返回；finally 清理 RUNTIME_CTX，中间件状态由 after_agent 收尾。
-                logger.info("[qa] thread=%s stream stopped by user cancel", body.thread_id)
+                    yield _sse(projection.event("cancelled"))
+                    return
+                for event in projection.feed(mode, chunk):
+                    if event["type"] == "tool_start" and event.get("name", "").startswith("dingtalk_"):
+                        if ExplorationTimeoutMiddleware.dingtalk_budget(body.thread_id) <= 0:
+                            continue  # Proposed by an old prompt, blocked before execution.
+                    if event["type"] == "tool_end":
+                        event["content"] = DeerFlowClient._extract_text(event["content"])
+                    yield _sse(event)
+            if ExplorationTimeoutMiddleware.is_cancelled(body.thread_id):
+                yield _sse(projection.event("cancelled"))
                 return
-
-            # flush 任何剩余缓冲：仅下发 values 快照确认过的最终答案消息
-            # （未确认的 mid 是过渡消息，其 tool_call 信号可能缺失，绝不能作为答案流出）
-            for d in pending:
-                for frame in _emit_message(d):
-                    yield frame
-            for mid, txt in text_buf.items():
-                if mid in final_ids and txt.strip():
-                    yield _sse({"type": "ai_text", "content": _strip_narration(txt)})
-
-            # 收尾兜底：限时中间件在模型轮次内剥除 tool_calls 强制收尾时，
-            # 被剥除的最终消息可能不再触发 values 快照；若整条流未下发过答案，
-            # 从最终状态取最后一条无工具调用的 AI 消息作为答复下发。
-            if not final_ids and last_values:
-                for m in reversed(last_values.get("messages", [])):
-                    if getattr(m, "type", None) != "ai":
-                        continue
-                    if getattr(m, "tool_calls", None):
-                        break  # 最后一条 AI 仍是工具调用（如澄清暂停），不兜底
-                    mid = getattr(m, "id", None)
-                    if mid in discard_ids or (mid and mid not in SEEN_MESSAGE_IDS.get(body.thread_id, set())):
-                        txt = _strip_narration(_extract_text(getattr(m, "content", "")))
-                        if txt.strip():
-                            if mid:
-                                final_ids.add(mid)
-                            chunk_size = 120
-                            for i in range(0, len(txt), chunk_size):
-                                yield _sse({"type": "ai_text", "content": txt[i:i + chunk_size]})
-                    break
-
-            yield _sse({"type": "end", "usage": cumulative_usage})
+            final = projection.finish(DeerFlowClient._extract_text)
+            if final is not None:
+                yield _sse(final)
+            yield _sse(projection.event("end", usage=projection.usage))
     except Exception as e:  # noqa: BLE001
         logger.exception("agent stream failed")
         yield _sse({"type": "error", "message": f"{e.__class__.__name__}: {e}"})
@@ -1084,6 +855,11 @@ async def chat_stream(request: Request, body: ChatStreamIn):
     from deerflow.agents.middlewares.exploration_timeout_middleware import (
         ExplorationTimeoutMiddleware,
     )
+
+    if body.action and not ExplorationTimeoutMiddleware.can_resume(tid):
+        async def _expired_choice():
+            yield _sse({"type": "error", "message": "本次选择已过期或服务已重启，请重新提交原问题。"})
+        return StreamingResponse(_expired_choice(), media_type="text/event-stream")
 
     async def _pump():
         """用一个专属 worker 线程驱动同步生成器，经 asyncio.Queue 转发为 SSE。
@@ -1141,6 +917,7 @@ async def chat_stream(request: Request, body: ChatStreamIn):
         worker.start()
 
         sending = True
+        terminal_sent = False
 
         def _begin_stop() -> bool:
             """标记取消并通知 worker 停止；仅首次（仍在发送时）返回 True 由调用方下发 cancelled 帧。"""
@@ -1196,11 +973,17 @@ async def chat_stream(request: Request, body: ChatStreamIn):
                             except Exception:  # noqa: BLE001
                                 pass
                         continue  # 继续抽空队列直到 done_sentinel，不再下发
+                    try:
+                        if json.loads(item.removeprefix("data: ").strip()).get("type") == "end":
+                            terminal_sent = True
+                    except (ValueError, AttributeError):
+                        pass
                     yield item
                 # sending=False 时继续消费队列直到 done_sentinel
         finally:
             stop_flag.set()
-            ExplorationTimeoutMiddleware.request_cancel(tid)
+            if not terminal_sent:
+                ExplorationTimeoutMiddleware.request_cancel(tid)
             # shield：即使本协程因断连被取消，也要等 worker 把 gen close 干净
             # （释放 _stream_lock），避免后续请求卡锁。
             with anyio.CancelScope(shield=True):

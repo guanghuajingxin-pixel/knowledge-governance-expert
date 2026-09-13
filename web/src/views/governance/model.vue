@@ -6,24 +6,31 @@ import {
   getSettings, setSetting, testLLM, listLlmModels, testDify, testMineru, testDingtalk,
   type SettingsResponse, type SettingItem,
   type TestLLMResult, type TestDifyResult, type TestMinerUResult, type TestDingtalkResult,
+  getDingtalkBotStatus, type DingtalkBotStatus,
 } from '@/api/settings'
 import { listDifyProfiles, createDifyProfile, updateDifyProfile, deleteDifyProfile, enableDifyProfile, type DifyProfile } from '@/api/settings'
 import {
   listLlmProfiles, createLlmProfile, updateLlmProfile, deleteLlmProfile, refreshLlmProfileModels,
   type LlmProfile, type LlmModelEntry,
 } from '@/api/settings'
-import { listDifyDatasets, type DifyDataset } from '@/api/dify'
+import { testRagflow, type TestRagflowResult } from '@/api/ragflow'
+import { getMenuVisibility, setMenuVisibility } from '@/api/settings'
+import { useRouter } from 'vue-router'
 
 // ============ 接入配置（功能性） ============
 const EMPTY: SettingItem = { label: '', value: '', is_set: false, is_secret: false }
 const form = ref<SettingsResponse>({
+  site_name: { ...EMPTY },
+  site_logo: { ...EMPTY },
   llm_base_url: { ...EMPTY },
   llm_api_key: { ...EMPTY, is_secret: true },
   llm_model: { ...EMPTY },
   mineru_api_key: { ...EMPTY, is_secret: true },
   dify_base_url: { ...EMPTY },
   dify_api_key: { ...EMPTY, is_secret: true },
-  dify_dataset_ids: { ...EMPTY },
+  dify_upload_max_mb: { ...EMPTY, value: '15' },
+  ragflow_base_url: { ...EMPTY },
+  ragflow_api_key: { ...EMPTY, is_secret: true },
   dingtalk_app_key: { ...EMPTY },
   dingtalk_app_secret: { ...EMPTY, is_secret: true },
   dingtalk_operator_union_id: { ...EMPTY },
@@ -182,19 +189,34 @@ async function removeLlmProfile(p: LlmProfile) {
   await loadLlmProfiles()
 }
 
-// Dify 数据集
-const datasets = ref<DifyDataset[]>([])
-const loadingDatasets = ref(false)
-const datasetsError = ref('')
+// RAGFlow 连通性测试（编辑未保存时可用当前表单值测试；留空则后端回退已保存值）
+const ragflowTest = ref({ testing: false, result: null as TestRagflowResult | null })
+
+async function runRagflowTest() {
+  ragflowTest.value.result = null
+  ragflowTest.value.testing = true
+  try {
+    ragflowTest.value.result = await testRagflow({
+      base_url: form.value.ragflow_base_url?.value || '',
+      api_key: form.value.ragflow_api_key?.value || '',
+    })
+  } catch (e: any) {
+    ragflowTest.value.result = { ok: false, message: e?.message || '请求失败' }
+  } finally {
+    ragflowTest.value.testing = false
+  }
+}
 
 onMounted(async () => {
-  form.value = await getSettings()
-  await loadProfiles()
-  await loadLlmProfiles()
-  const active = profiles.value.find((p) => p.enabled)
-  if (active) {
-    await loadDatasets()
-  }
+  // 5 个互不依赖的请求并发拉取：原来逐个 await，首屏耗时等于 5 次往返相加
+  const [settings] = await Promise.all([
+    getSettings(),
+    loadProfiles(),
+    loadLlmProfiles(),
+    loadMenuConfig(),
+    loadBotSection(),
+  ])
+  form.value = settings
 })
 
 async function save(k: string) {
@@ -208,31 +230,55 @@ async function save(k: string) {
   try {
     await setSetting({ key: k, value: item.value })
     form.value = await getSettings()
+    if (k === 'site_name' || k === 'site_logo') window.dispatchEvent(new CustomEvent('site-branding-changed'))
     ElMessage.success('已保存')
   } finally {
     saving.value = null
   }
 }
 
-async function loadDatasets() {
-  loadingDatasets.value = true
-  datasetsError.value = ''
-  try {
-    const res = await listDifyDatasets()
-    datasets.value = res.items || []
-    if (res.error) datasetsError.value = res.error
-  } catch (e: any) {
-    datasetsError.value = e?.message || '加载失败'
-    datasets.value = []
-  } finally {
-    loadingDatasets.value = false
+// ============ 站点图标：本地上传 → canvas 裁剪压缩为 128×128 data URL ============
+const siteLogoInput = ref<HTMLInputElement | null>(null)
+
+function onSiteLogoFile(e: Event) {
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+  if (!file.type.startsWith('image/')) {
+    ElMessage.warning('请选择图片文件（PNG / JPG / WebP 等）')
+    return
   }
+  if (file.size > 8 * 1024 * 1024) {
+    ElMessage.warning('图片过大（超过 8MB），请更换较小的图片')
+    return
+  }
+  const reader = new FileReader()
+  reader.onload = () => {
+    const img = new Image()
+    img.onload = () => {
+      const size = Math.min(img.width, img.height)
+      const canvas = document.createElement('canvas')
+      canvas.width = 128
+      canvas.height = 128
+      const ctx = canvas.getContext('2d')
+      if (!ctx) {
+        ElMessage.error('图片处理失败')
+        return
+      }
+      ctx.drawImage(img, (img.width - size) / 2, (img.height - size) / 2, size, size, 0, 0, 128, 128)
+      form.value.site_logo.value = canvas.toDataURL('image/png')
+      ElMessage.success('图标已生成，点击「保存图标」生效')
+    }
+    img.onerror = () => ElMessage.error('图片读取失败')
+    img.src = String(reader.result)
+  }
+  reader.onerror = () => ElMessage.error('图片读取失败')
+  reader.readAsDataURL(file)
 }
 
-function pickDatasetIds() {
-  const ids = datasets.value.map((d) => d.id).join(',')
-  if (editingProfile.value) editingProfile.value.dataset_ids = ids
-  ElMessage.success(`已填入 ${datasets.value.length} 个数据集 ID`)
+function clearSiteLogo() {
+  form.value.site_logo.value = ''
 }
 
 // ============ Dify 多配置（多条只能生效一条） ============
@@ -320,7 +366,6 @@ async function enableProfile(id: string) {
   await enableDifyProfile(id)
   ElMessage.success('已切换生效配置')
   await loadProfiles()
-  await loadDatasets()
 }
 
 // ============ 钉钉配置（弹窗配置 + 连通性测试） ============
@@ -383,6 +428,42 @@ async function saveDingtalkModal() {
   }
 }
 
+// ============ 钉钉机器人 & H5 免登（corpId / 开关 / 白名单 / 运行状态） ============
+const botForm = ref({ corp_id: '', enabled: false, allow_users: '' })
+const botStatus = ref<DingtalkBotStatus | null>(null)
+const qaPublicUrl = `${window.location.origin}/qa`
+
+async function loadBotSection() {
+  botForm.value = {
+    corp_id: form.value.dingtalk_corp_id?.value || '',
+    enabled: (form.value.dingtalk_bot_enabled?.value || '').trim().toLowerCase() === 'true',
+    allow_users: form.value.dingtalk_bot_allow_users?.value || '',
+  }
+  try {
+    botStatus.value = await getDingtalkBotStatus()
+  } catch {
+    botStatus.value = null
+  }
+}
+
+async function saveBotSection() {
+  await setSetting({ key: 'dingtalk_corp_id', value: botForm.value.corp_id.trim() })
+  await setSetting({ key: 'dingtalk_bot_enabled', value: botForm.value.enabled ? 'true' : 'false' })
+  await setSetting({ key: 'dingtalk_bot_allow_users', value: botForm.value.allow_users.trim() })
+  form.value = await getSettings()
+  ElMessage.success('已保存，机器人按开关与凭证热启停')
+  await loadBotSection()
+}
+
+async function copyQaUrl() {
+  try {
+    await navigator.clipboard.writeText(qaPublicUrl)
+    ElMessage.success('独立问答地址已复制')
+  } catch {
+    ElMessage.error('复制失败，请手动复制：' + qaPublicUrl)
+  }
+}
+
 const mineruTest = ref({ testing: false, result: null as TestMinerUResult | null })
 
 async function runMineruTest() {
@@ -397,37 +478,73 @@ async function runMineruTest() {
   }
 }
 
-// ============ 节点 → 模型绑定（原型展示） ============
-const bindings = [
-  { node: '智能问答（首页）', model: '千问-Max', temp: '0.3', structured: false, promptKey: '' },
-  { node: '上传前命名校验', model: 'DeepSeek-V3', temp: '0', structured: true, promptKey: 'p1' },
-  { node: '元数据推荐/打标', model: 'GLM-4', temp: '0', structured: true, promptKey: 'p2' },
-  { node: '摘要/图注生成', model: '千问-Max', temp: '0.2', structured: false, promptKey: 'p3' },
-  { node: '工单智能分诊', model: '千问-Max', temp: '0', structured: true, promptKey: 'p4' },
-  { node: '巡检归档建议', model: 'DeepSeek-V3', temp: '0', structured: true, promptKey: 'p5' },
-]
+// ============ 菜单配置（侧边栏功能区菜单显隐） ============
+const router = useRouter()
 
-const prompts: Record<string, { title: string; sub: string; body: string }> = {
-  p1: { title: '上传前命名校验 · 提示词全文', sub: '绑定模型：DeepSeek-V3 · temperature=0 · 结构化输出开启', body: '你是企业知识库的文档命名校验器。根据命名规范判断文件名是否合规，并给出改名建议。\n\n【命名规范】\n<机型|产品线>_<文档类型>_<主题>_<版本号>.<扩展名>\n示例：JK-8669D_检验规程_金加工过程_V3.docx\n\n【输入】\n文件名：{filename}\n文档前 500 字摘要：{doc_summary}\n\n【任务】\n1. 判断文件名是否符合规范\n2. 不合规时给出建议文件名\n3. 输出判断依据\n\n【输出 JSON】\n{ "compliant": true/false, "suggested_name": "", "machine_model_detected": "", "reason": "", "confidence": 0~1 }' },
-  p2: { title: '元数据推荐与打标 · 提示词全文', sub: '绑定模型：GLM-4 · temperature=0 · 结构化输出开启', body: '你是知识库元数据标注助手。为文档推荐元数据与标签，供人工确认。\n\n【标签词表】\n机型：{机型词表}；流程域：{流程域词表}；知识类型：制度/规程/手册/FAQ/案例/标准；密级：公开/内部/秘密\n\n【规则】\n1. 只能从系统标签词表中选择标签\n2. 含商务条款/价格→内部及以上；含技术参数→至少内部\n3. 自定义标签须标注 suggested_custom=true\n\n【输出 JSON】\n{ "classification": {...}, "system_tags": [...], "custom_tags": [...], "confidence": 0~1 }' },
-  p3: { title: '摘要与图注生成 · 提示词全文', sub: '绑定模型：千问-Max · temperature=0.2', body: '你是知识加工流水线的增强节点，负责：\n\n【任务A：文档/章节摘要】\n为文档生成 ≤100 字文档级摘要；为每个一级章节生成 ≤50 字章节级摘要。\n\n【任务B：图片描述】\n输入：图片 + 所在章节上下文。\n输出 ≤60 字描述：图的内容、量程/参数、在工序中的作用。\n\n【输出 JSON】\n{ "doc_summary": "", "section_summaries": [...], "image_captions": [...] }' },
-  p4: { title: '工单智能分诊 · 提示词全文', sub: '绑定模型：千问-Max · temperature=0 · 置信度<0.7 转人工', body: '你是知识治理平台的反馈工单分诊助手。根据用户反馈判定根因并给出处置建议。\n\n【根因枚举】\nknowledge_gap=知识缺口 | version_conflict=版本冲突 | bad_chunking=分段劣化 | no_permission=权限 | model_error=模型错误 | content_error=源文档错误\n\n【处置枚举】\nsolicit=发起征集 | reprocess=回流重加工 | fix_doc=修正源文档 | answer_correction=答案纠偏\n\n【输出 JSON】\n{ "root_cause": "", "severity": "high|medium|low", "action": "", "suggested_owner_role": "", "evidence": "", "confidence": 0~1 }\n\n【约束】confidence < 0.7 时输出 root_cause="uncertain"' },
-  p5: { title: '巡检归档建议 · 提示词全文', sub: '绑定模型：DeepSeek-V3 · temperature=0', body: '你是知识生命周期巡检助手。对"90天零引用"文档逐一给出处置建议。\n\n【判断规则】\n1. 制度/标准类：建议复审（不归档）\n2. 活动记录/草稿类：建议归档\n3. 同目录新版本存在：建议归档并声明被取代\n4. 无法判断时输出 review\n\n【输出 JSON】\n{ "docs": [{"doc_id":"","advice":"archive|keep|review","reason":""}] }' },
+interface MenuConfigItem {
+  path: string
+  title: string
+  visible: boolean
 }
+
+// 功能区全部菜单（与路由 meta 保持一致；隐藏菜单显示为子级缩进）
+const menuConfigItems = ref<MenuConfigItem[]>([])
+const menuLoading = ref(false)
+const menuSaving = ref(false)
+
+async function loadMenuConfig() {
+  menuLoading.value = true
+  try {
+    const res = await getMenuVisibility()
+    const hidden = res.hidden || []
+    // 取路由中全部功能区菜单（含二级子菜单），生成配置列表
+    const items = router
+      .getRoutes()
+      .filter((r) => r.meta?.title && !r.meta?.hidden && r.name && r.meta?.group === 'feature')
+      .map((r) => ({
+        path: r.path,
+        title: r.meta!.title as string,
+        visible: !hidden.includes(r.path),
+      }))
+    // 保持路由定义顺序
+    const orderedPaths = ['/chat', '/hiagent', '/collection', '/knowledge-sources', '/collection/dingtalk', '/collection/upload', '/process', '/apply', '/operate', '/govern']
+    items.sort((a, b) => {
+      const ia = orderedPaths.indexOf(a.path)
+      const ib = orderedPaths.indexOf(b.path)
+      return (ia === -1 ? 999 : ia) - (ib === -1 ? 999 : ib)
+    })
+    menuConfigItems.value = items
+  } catch (e: any) {
+    ElMessage.error(e?.message || '菜单配置加载失败')
+    menuConfigItems.value = []
+  } finally {
+    menuLoading.value = false
+  }
+}
+
+// 开关切换：立即保存（整体覆盖式更新）
+async function onMenuToggle(item: MenuConfigItem) {
+  const hidden = menuConfigItems.value.filter((x) => !x.visible).map((x) => x.path)
+  menuSaving.value = true
+  try {
+    await setMenuVisibility({ hidden })
+    ElMessage.success(`「${item.title}」已${item.visible ? '显示' : '隐藏'}，刷新页面后侧边栏生效`)
+  } catch (e: any) {
+    // 保存失败时回滚开关状态
+    item.visible = !item.visible
+    ElMessage.error(e?.message || '保存失败')
+  } finally {
+    menuSaving.value = false
+  }
+}
+
+const visibleMenuCount = computed(() => menuConfigItems.value.filter((x) => x.visible).length)
 
 const usage = [
   { model: '千问-Max', calls: '4.2 万次', purpose: '问答 · 摘要 · 分诊', trend: '+12%（随问答量增长）', type: 'up' },
   { model: 'GLM-4（网关）', calls: '1.8 万次', purpose: '打标 · 元数据', trend: '0（自部署）', type: '' },
   { model: 'DeepSeek-V3', calls: '0.9 万次', purpose: '命名校验 · 巡检建议', trend: '稳定', type: '' },
 ]
-
-const promptVisible = ref(false)
-const currentPrompt = ref<{ title: string; sub: string; body: string } | null>(null)
-
-function openPrompt(key: string) {
-  currentPrompt.value = prompts[key]
-  promptVisible.value = true
-}
 </script>
 
 <template>
@@ -438,6 +555,30 @@ function openPrompt(key: string) {
       <!-- ============ 接入配置（真实表单） ============ -->
       <el-tab-pane label="接入配置" name="access">
         <el-form label-width="140px">
+          <el-divider content-position="left">站点外观</el-divider>
+          <input ref="siteLogoInput" type="file" accept="image/*" style="display: none" @change="onSiteLogoFile" />
+          <el-form-item label="站点名称">
+            <div class="field-row">
+              <el-input v-model="form.site_name.value" placeholder="默认：知识治理专家" maxlength="30" style="max-width: 280px" />
+              <el-button type="primary" :loading="saving === 'site_name'" @click="save('site_name')">保存</el-button>
+            </div>
+            <div class="field-hint">显示在侧边栏 Logo 与浏览器标题；留空恢复默认。</div>
+          </el-form-item>
+          <el-form-item label="站点图标">
+            <div class="site-logo-row">
+              <div class="site-logo-preview">
+                <img v-if="form.site_logo.value" :src="form.site_logo.value" alt="站点图标预览" />
+                <el-icon v-else :size="22" color="#fff"><i class="el-icon-stamp" /></el-icon>
+              </div>
+              <div class="site-logo-actions">
+                <el-button size="small" @click="siteLogoInput?.click()">上传图片</el-button>
+                <el-button v-if="form.site_logo.value" size="small" text type="danger" @click="clearSiteLogo">恢复默认图标</el-button>
+                <el-button size="small" type="primary" :loading="saving === 'site_logo'" @click="save('site_logo')">保存图标</el-button>
+                <div class="field-hint">侧边栏 Logo 图标；自动裁剪压缩为 128×128，留空使用默认印章图标。</div>
+              </div>
+            </div>
+          </el-form-item>
+
           <el-divider content-position="left">LLM 大模型</el-divider>
           <el-form-item label="模型管理">
             <div class="profile-box">
@@ -489,12 +630,20 @@ function openPrompt(key: string) {
           </el-form-item>
 
           <el-divider content-position="left">Dify 知识库（智能问答 Agent）</el-divider>
+          <el-form-item label="文件上传上限">
+            <div>
+              <div style="display:flex;align-items:center;gap:10px">
+                <el-input v-model="form.dify_upload_max_mb.value" type="number" min="1" max="1024" aria-label="Dify 单文件上传上限 MB" style="width:140px" />
+                <span>MB</span>
+                <el-button type="primary" :loading="saving === 'dify_upload_max_mb'" @click="save('dify_upload_max_mb')">保存</el-button>
+              </div>
+              <div class="field-hint">与 Dify 的 UPLOAD_FILE_SIZE_LIMIT 和网关限制保持一致；此处不会修改 Dify 服务配置。超限文件直接提示，不转为纯文本。</div>
+            </div>
+          </el-form-item>
           <el-form-item label="配置列表">
             <div class="profile-box">
               <div class="profile-toolbar">
                 <el-button size="small" type="primary" @click="openProfileDialog()">+ 新增配置</el-button>
-                <el-button size="small" :loading="loadingDatasets" @click="loadDatasets">🔄 拉取数据集列表</el-button>
-                <span v-if="datasetsError" class="err">{{ datasetsError }}</span>
               </div>
               <el-table v-if="profiles.length" :data="profiles" size="small" style="margin-top: 8px">
                 <el-table-column label="生效" width="70">
@@ -503,14 +652,13 @@ function openPrompt(key: string) {
                   </template>
                 </el-table-column>
                 <el-table-column prop="name" label="名称" min-width="120" />
-                <el-table-column prop="base_url" label="服务地址" min-width="160" />
+                <el-table-column prop="base_url" label="服务地址" min-width="200" />
                 <el-table-column label="API Key" min-width="140">
                   <template #default="{ row }">
                     <span v-if="row.api_key" class="mono">{{ row.api_key }}</span>
                     <span v-else class="muted">未设置</span>
                   </template>
                 </el-table-column>
-                <el-table-column prop="dataset_ids" label="数据集 ID" min-width="160" />
                 <el-table-column label="操作" width="120">
                   <template #default="{ row }">
                     <el-button size="small" link type="primary" @click="openProfileDialog(row)">编辑</el-button>
@@ -519,23 +667,39 @@ function openPrompt(key: string) {
                 </el-table-column>
               </el-table>
               <div v-else class="empty">尚无配置，请点击「新增配置」添加 Dify 实例。</div>
-              <div class="field-hint" style="margin-top: 6px">启用某条配置后，该配置的服务地址、API Key、数据集 ID 会同步为系统生效值。只能生效一条。</div>
-
-              <!-- 数据集列表（启用配置的） -->
-              <template v-if="datasets.length">
-                <div class="ds-section-title">数据集列表（当前生效配置）</div>
-                <el-table :data="datasets" size="small" style="margin-top: 4px">
-                  <el-table-column prop="name" label="名称" min-width="160" />
-                  <el-table-column prop="document_count" label="文档数" width="90" />
-                  <el-table-column prop="word_count" label="字数" width="120" />
-                  <el-table-column prop="id" label="ID" min-width="200">
-                    <template #default="{ row }"><span class="mono">{{ row.id }}</span></template>
-                  </el-table-column>
-                </el-table>
-                <el-button size="small" type="primary" plain style="margin-top: 6px" @click="pickDatasetIds">填入全部 ID 到编辑框</el-button>
-              </template>
+              <div class="field-hint" style="margin-top: 6px">此处只维护 Dify「连接」（服务地址 + API Key）；启用某条即同步为系统生效连接，只能生效一条。具体检索/同步哪些知识库，请到「知识源管理」登记后按需选择。</div>
             </div>
           </el-form-item>
+
+          <el-divider content-position="left">RAGFlow 知识库（第二个检索引擎）</el-divider>
+          <el-form-item label="服务地址">
+            <div class="field-row">
+              <el-input v-model="form.ragflow_base_url.value" placeholder="如 http://127.0.0.1:9380/api/v1（需含 /api/v1）" />
+              <el-button type="primary" :loading="saving === 'ragflow_base_url'" @click="save('ragflow_base_url')">保存</el-button>
+            </div>
+            <div class="field-hint">RAGFlow HTTP API 端点，需含端口与 /api/v1 后缀。</div>
+          </el-form-item>
+          <el-form-item label="API Key">
+            <div class="field-row">
+              <el-input v-model="form.ragflow_api_key.value" show-password placeholder="未设置" />
+              <el-button type="primary" :loading="saving === 'ragflow_api_key'" @click="save('ragflow_api_key')">保存</el-button>
+            </div>
+            <div class="field-row" style="margin-top: 8px">
+              <el-button :loading="ragflowTest.testing" @click="runRagflowTest">测试连通性</el-button>
+            </div>
+            <el-alert
+              v-if="ragflowTest.result?.ok"
+              type="success" :closable="false" show-icon style="margin-top: 8px"
+              :title="ragflowTest.result.message || '连接成功'"
+            />
+            <el-alert
+              v-else-if="ragflowTest.result && !ragflowTest.result.ok"
+              type="error" :closable="false" show-icon style="margin-top: 8px"
+              :title="ragflowTest.result.message || '连接失败'"
+            />
+            <div class="field-hint">RAGFlow 与 Dify 并列作为外部知识库引擎；此处只配「连接」，具体哪些库可用请到「知识源管理」以 RAGFlow 类型登记（登记时动态拉取库列表选择）。</div>
+          </el-form-item>
+
 
           <el-divider content-position="left">文档解析</el-divider>
           <el-form-item label="MinerU API Key">
@@ -594,37 +758,86 @@ function openPrompt(key: string) {
             </div>
           </el-form-item>
 
-          <el-alert type="info" :closable="false" title="向量模型 BGE-M3 与重排模型 BGE-reranker 本地部署，无需配置。" style="margin-top: 12px;" />
+          <el-divider content-position="left">钉钉机器人 & H5 免登</el-divider>
+          <el-form-item label="机器人问答与独立页接入">
+            <div class="dt-result" :class="{ ok: !!botStatus?.connected }">
+              <div class="dt-row">
+                <span class="dt-label">corpId</span>
+                <el-input v-model="botForm.corp_id" size="small" style="width: 260px"
+                          placeholder="企业 corpId（H5 免登必填）" />
+              </div>
+              <div class="dt-row">
+                <span class="dt-label">机器人开关</span>
+                <el-switch v-model="botForm.enabled" active-text="开启" inactive-text="关闭" />
+              </div>
+              <div class="dt-row">
+                <span class="dt-label">白名单</span>
+                <el-input v-model="botForm.allow_users" size="small" style="width: 260px"
+                          placeholder="userid 逗号分隔，空=全员可用" />
+              </div>
+              <div class="dt-row">
+                <span class="dt-label">运行状态</span>
+                <el-tag :type="botStatus?.connected ? 'success' : botStatus?.enabled ? 'warning' : 'info'"
+                        size="small" effect="light">
+                  {{ botStatus?.connected ? '已连接' : botStatus?.enabled ? '启用中·连接建立中' : '未启用' }}
+                </el-tag>
+                <span v-if="botStatus?.started_at" class="mono">启动于 {{ botStatus.started_at }}</span>
+                <el-button link type="primary" size="small" @click="loadBotSection">刷新</el-button>
+              </div>
+              <div v-if="botStatus?.last_error" class="dt-row">
+                <span class="field-hint">{{ botStatus.last_error }}</span>
+              </div>
+              <div class="dt-row">
+                <span class="dt-label">H5 地址</span>
+                <span class="mono">{{ qaPublicUrl }}</span>
+                <el-button link type="primary" size="small" @click="copyQaUrl">复制</el-button>
+              </div>
+              <div class="dt-row dt-foot">
+                <span class="field-hint">机器人走 Stream 长连接（内网无需公网入口）；将 H5 地址配置为钉钉微应用首页即可免登访问独立问答页。</span>
+                <el-button type="primary" size="small" @click="saveBotSection">保存</el-button>
+              </div>
+            </div>
+          </el-form-item>
         </el-form>
       </el-tab-pane>
-
-      <!-- ============ 节点 → 模型绑定（原型展示） ============ -->
-      <el-tab-pane label="节点 → 模型绑定" name="binding">
+      <!-- ============ 菜单配置（侧边栏功能区菜单显隐） ============ -->
+      <el-tab-pane label="菜单配置" name="menu">
         <el-card shadow="never">
           <template #header>
             <div class="card-header">
-              <span>节点 → 模型绑定 <el-tag size="small" type="primary">判定类 temperature=0</el-tag></span>
+              <span>功能区菜单显示配置 <el-tag size="small" type="primary">显示 {{ visibleMenuCount }}/{{ menuConfigItems.length }}</el-tag></span>
+              <el-button size="small" :loading="menuLoading" @click="loadMenuConfig">🔄 刷新</el-button>
             </div>
           </template>
-          <el-table :data="bindings" style="width: 100%">
-            <el-table-column prop="node" label="链路节点" min-width="150" />
-            <el-table-column prop="model" label="绑定模型" width="110" />
-            <el-table-column prop="temp" label="temp" width="60">
-              <template #default="{ row }"><span class="mono">{{ row.temp }}</span></template>
+          <el-table :data="menuConfigItems" v-loading="menuLoading" style="width: 100%">
+            <el-table-column prop="title" label="菜单项" min-width="160" />
+            <el-table-column prop="path" label="路径" min-width="160">
+              <template #default="{ row }"><span class="mono">{{ row.path }}</span></template>
             </el-table-column>
-            <el-table-column label="结构化输出" width="100">
+            <el-table-column label="显示 / 隐藏" width="120">
               <template #default="{ row }">
-                <el-tag v-if="row.structured" type="success" size="small">开</el-tag>
-                <span v-else class="muted">—</span>
+                <el-switch
+                  v-model="row.visible"
+                  :loading="menuSaving"
+                  :disabled="row.path === '/chat'"
+                  inline-prompt
+                  active-text="显示"
+                  inactive-text="隐藏"
+                  @change="onMenuToggle(row as MenuConfigItem)"
+                />
               </template>
             </el-table-column>
-            <el-table-column label="提示词" width="80">
+            <el-table-column label="状态" width="90">
               <template #default="{ row }">
-                <el-button v-if="row.promptKey" size="small" link type="primary" @click="openPrompt(row.promptKey)">查看</el-button>
-                <span v-else class="muted">—</span>
+                <el-tag v-if="row.path === '/chat'" size="small" type="info">固定</el-tag>
+                <el-tag v-else-if="row.visible" size="small" type="success">显示</el-tag>
+                <el-tag v-else size="small" type="danger">隐藏</el-tag>
               </template>
             </el-table-column>
           </el-table>
+          <div class="field-hint" style="margin-top: 8px">
+            关闭开关后，对应菜单将从侧边栏「功能区」隐藏（页面路由仍可访问）；「智能问答」为默认首页，固定显示。配置保存后刷新页面生效。
+          </div>
         </el-card>
       </el-tab-pane>
 
@@ -650,16 +863,6 @@ function openPrompt(key: string) {
         </el-card>
       </el-tab-pane>
     </el-tabs>
-
-    <!-- 提示词弹窗 -->
-    <el-dialog v-model="promptVisible" :title="currentPrompt?.title" width="720px">
-      <div class="sub">{{ currentPrompt?.sub }}</div>
-      <pre class="promptbox">{{ currentPrompt?.body }}</pre>
-      <template #footer>
-        <el-button @click="promptVisible = false">关闭</el-button>
-        <el-button type="primary" @click="ElMessage.success('提示词已保存（原型演示）'); promptVisible = false">保存</el-button>
-      </template>
-    </el-dialog>
 
     <!-- LLM 模型配置弹窗：供应商 → Key → 拉取模型 → 复选框勾选生效/默认 -->
     <el-dialog v-model="llmDlg.visible" :title="llmDlg.editingId ? '编辑模型配置' : '新增模型配置'" width="640px" destroy-on-close>
@@ -732,10 +935,6 @@ function openPrompt(key: string) {
         <el-form-item label="API Key">
           <el-input v-model="editingProfile.api_key" show-password :placeholder="editingProfile.id ? '••••••••' : 'Dataset API Key，如 dataset-R6qPqf7CfPC0Dbn6uT3LxIKw'" />
         </el-form-item>
-        <el-form-item label="数据集 ID">
-          <el-input v-model="editingProfile.dataset_ids" placeholder="数据集 ID，逗号分隔" />
-          <div class="field-hint">可先启用此配置后在上方「拉取数据集列表」并「填入全部 ID」</div>
-        </el-form-item>
         <el-alert
           v-if="profileTest.result?.ok"
           type="success"
@@ -806,6 +1005,15 @@ function openPrompt(key: string) {
 .field-row { display: flex; gap: 8px; width: 100%; }
 .field-row .el-input { flex: 1; }
 .field-hint { font-size: 12px; color: #909399; margin-top: 4px; }
+/* 站点图标配置 */
+.site-logo-row { display: flex; align-items: center; gap: 20px; }
+.site-logo-preview {
+  width: 48px; height: 48px; border-radius: 8px; flex-shrink: 0;
+  display: grid; place-items: center; overflow: hidden;
+  background: linear-gradient(135deg, #2b6bff, #6d28d9);
+}
+.site-logo-preview img { width: 100%; height: 100%; object-fit: cover; }
+.site-logo-actions { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
 .dataset-box { width: 100%; }
 .dlg-actions { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
 .model-pick-list { width: 100%; border: 1px solid #e4e7ed; border-radius: 8px; padding: 6px 12px; max-height: 240px; overflow-y: auto; }
@@ -829,6 +1037,4 @@ function openPrompt(key: string) {
 .small.up { color: #16a34a; }
 .muted { color: #9ca3af; font-size: 12px; }
 .mono { font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: #334155; }
-.sub { color: #6b7280; font-size: 12.5px; margin-bottom: 12px; }
-.promptbox { background: #0f172a; color: #dbeafe; border-radius: 10px; padding: 14px 16px; font-family: ui-monospace, Menlo, monospace; font-size: 12px; line-height: 1.8; white-space: pre-wrap; max-height: 340px; overflow-y: auto; margin: 0; }
 </style>

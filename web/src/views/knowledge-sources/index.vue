@@ -7,7 +7,7 @@
  */
 import { ref, onMounted, reactive, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, Refresh, Edit, Delete, Connection } from '@element-plus/icons-vue'
+import { Plus, Refresh, Edit, Delete } from '@element-plus/icons-vue'
 import {
   listKnowledgeSources,
   createKnowledgeSource,
@@ -15,6 +15,8 @@ import {
   deleteKnowledgeSource,
   fetchDingTalkWorkspaces,
 } from '@/api/knowledge-center'
+import { listDifyDatasets } from '@/api/dify'
+import { listRagflowDatasets } from '@/api/ragflow'
 import { getDingtalkRefreshStatus } from '@/api/governance'
 import type { KnowledgeSource, KnowledgeSourcePayload, DingTalkWorkspace } from '@/types/knowledge-center'
 
@@ -22,6 +24,7 @@ import type { KnowledgeSource, KnowledgeSourcePayload, DingTalkWorkspace } from 
 const SOURCE_TYPE_OPTIONS: Array<{ value: KnowledgeSource['source_type']; label: string }> = [
   { value: 'dingtalk_workspace', label: '钉钉知识库' },
   { value: 'dify_dataset', label: 'Dify 知识库' },
+  { value: 'ragflow_dataset', label: 'RAGFlow 知识库' },
   { value: 'business_system', label: '业务系统' },
 ]
 
@@ -33,6 +36,7 @@ function getTypeTagType(type: string): 'primary' | 'success' | 'warning' | 'info
   const map: Record<string, 'primary' | 'success' | 'warning' | 'info' | 'danger'> = {
     dingtalk_workspace: 'primary',
     dify_dataset: 'success',
+    ragflow_dataset: 'danger',
     business_system: 'warning',
   }
   return map[type] || 'info'
@@ -72,7 +76,13 @@ async function openWorkspacePicker() {
   dingtalkWorkspaces.value = []
   wsLoading.value = true
   try {
-    const res = await fetchDingTalkWorkspaces()
+    const [res, registered] = await Promise.all([
+      fetchDingTalkWorkspaces(),
+      listKnowledgeSources({ source_type: 'dingtalk_workspace' }).catch(
+        () => [] as KnowledgeSource[],
+      ),
+    ])
+    registeredIds.value = new Set(registered.map((s) => s.external_id))
     if (res.error) {
       wsError.value = res.error
       return
@@ -91,7 +101,15 @@ const filteredWorkspaces = computed(() => {
   return dingtalkWorkspaces.value.filter((w) => w.name.toLowerCase().includes(kw))
 })
 
+// 已登记的钉钉知识库 ID（避免重复添加；打开弹窗时拉全量，不受页面类型筛选影响）
+const registeredIds = ref<Set<string>>(new Set())
+
+function isRegistered(ws: DingTalkWorkspace): boolean {
+  return registeredIds.value.has(ws.id)
+}
+
 function pickWorkspace(ws: DingTalkWorkspace) {
+  if (isRegistered(ws)) return
   form.name = ws.name
   form.external_id = ws.id
   form.config = { root_node_id: ws.root_node_id }
@@ -100,6 +118,73 @@ function pickWorkspace(ws: DingTalkWorkspace) {
 }
 
 const isDingtalk = computed(() => form.source_type === 'dingtalk_workspace')
+const isDify = computed(() => form.source_type === 'dify_dataset')
+const isRagflow = computed(() => form.source_type === 'ragflow_dataset')
+// Dify / RAGFlow 都是「外部检索引擎」，登记时从引擎实时拉库列表选择
+const isEngine = computed(() => isDify.value || isRagflow.value)
+const engineLabel = computed(() => (isRagflow.value ? 'RAGFlow' : 'Dify'))
+
+// ===== 引擎知识库选择弹窗（Dify / RAGFlow 复用）=====
+interface EngineItem { id: string; name: string; meta: string; extra: Record<string, any> }
+const engDialogVisible = ref(false)
+const engLoading = ref(false)
+const engError = ref('')
+const engKeyword = ref('')
+const engItems = ref<EngineItem[]>([])
+const engRegisteredIds = ref<Set<string>>(new Set())
+
+const filteredEngItems = computed(() => {
+  const kw = engKeyword.value.trim().toLowerCase()
+  if (!kw) return engItems.value
+  return engItems.value.filter((i) => i.name.toLowerCase().includes(kw) || i.id.toLowerCase().includes(kw))
+})
+
+function isEngRegistered(item: EngineItem): boolean {
+  return engRegisteredIds.value.has(item.id)
+}
+
+async function openEnginePicker() {
+  engDialogVisible.value = true
+  engKeyword.value = ''
+  engError.value = ''
+  engItems.value = []
+  engLoading.value = true
+  try {
+    // 已登记的同类型库（置灰避免重复纳编）
+    const registered = await listKnowledgeSources({ source_type: form.source_type }).catch(() => [] as KnowledgeSource[])
+    engRegisteredIds.value = new Set(registered.map((r) => r.external_id))
+    if (isRagflow.value) {
+      const res = await listRagflowDatasets()
+      if (res.error) { engError.value = res.error; return }
+      engItems.value = (res.items || []).map((d) => ({
+        id: d.id, name: d.name,
+        meta: `文档 ${d.document_count ?? 0} · 分块 ${d.chunk_count ?? 0}`,
+        extra: { chunk_method: d.chunk_method, embedding_model_name: d.embedding_model_name, document_count: d.document_count, chunk_count: d.chunk_count },
+      }))
+    } else {
+      const res = await listDifyDatasets()
+      if (res.error) { engError.value = res.error; return }
+      engItems.value = (res.items || []).map((d: any) => ({
+        id: d.id, name: d.name,
+        meta: `文档 ${d.document_count ?? 0}`,
+        extra: { document_count: d.document_count, word_count: d.word_count },
+      }))
+    }
+  } catch (e: any) {
+    engError.value = e?.message || `获取 ${engineLabel.value} 知识库失败`
+  } finally {
+    engLoading.value = false
+  }
+}
+
+function pickEngineItem(item: EngineItem) {
+  if (isEngRegistered(item)) return
+  form.name = item.name
+  form.external_id = item.id
+  form.config = { ...item.extra }
+  engDialogVisible.value = false
+  ElMessage.success(`已选择「${item.name}」`)
+}
 
 async function loadSources() {
   loading.value = true
@@ -223,6 +308,7 @@ const stats = computed(() => ({
   total: sources.value.length,
   dingtalk: sources.value.filter((s) => s.source_type === 'dingtalk_workspace').length,
   dify: sources.value.filter((s) => s.source_type === 'dify_dataset').length,
+  ragflow: sources.value.filter((s) => s.source_type === 'ragflow_dataset').length,
   business: sources.value.filter((s) => s.source_type === 'business_system').length,
   enabled: sources.value.filter((s) => s.enabled).length,
 }))
@@ -234,22 +320,7 @@ onMounted(() => {
 
 <template>
   <div class="ks-page">
-    <!-- 顶部栏 -->
-    <div class="ks-header">
-      <div class="ks-header-left">
-        <h2 class="ks-title">
-          <el-icon :size="20"><Connection /></el-icon>
-          知识源管理
-        </h2>
-        <span class="ks-subtitle">企业知识库注册表：统一登记钉钉知识库、Dify 知识库、业务系统等。所有知识库选择均从此处取数。</span>
-      </div>
-      <div class="ks-header-right">
-        <el-button :icon="Refresh" :loading="loading" @click="loadSources">刷新</el-button>
-        <el-button type="primary" :icon="Plus" @click="openAddDialog">新增知识库</el-button>
-      </div>
-    </div>
-
-    <!-- 统计卡片 -->
+    <!-- 统计卡片（页面最上方） -->
     <div class="ks-stats">
       <div class="stat-card">
         <div class="stat-value">{{ stats.total }}</div>
@@ -262,6 +333,10 @@ onMounted(() => {
       <div class="stat-card">
         <div class="stat-value stat-dify">{{ stats.dify }}</div>
         <div class="stat-label">Dify 数据集</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value stat-ragflow">{{ stats.ragflow }}</div>
+        <div class="stat-label">RAGFlow 知识库</div>
       </div>
       <div class="stat-card">
         <div class="stat-value stat-business">{{ stats.business }}</div>
@@ -283,9 +358,13 @@ onMounted(() => {
             {{ opt.label }}
           </el-radio-button>
         </el-radio-group>
+        <div class="filter-actions">
+          <el-button :icon="Refresh" :loading="loading" @click="loadSources">刷新</el-button>
+          <el-button type="primary" :icon="Plus" @click="openAddDialog">新增知识库</el-button>
+        </div>
       </div>
 
-      <el-table :data="sources" v-loading="loading" stripe style="width: 100%" empty-text="暂无知识库登记，点击右上角新增">
+      <el-table :data="sources" v-loading="loading" stripe style="width: 100%" empty-text="暂无知识库登记，点击「新增知识库」新增">
         <el-table-column prop="name" label="知识库名称" min-width="180">
           <template #default="{ row }">
             <div class="source-name">
@@ -358,11 +437,12 @@ onMounted(() => {
         </el-form-item>
         <el-form-item label="知识库 ID" required>
           <div style="display: flex; gap: 8px; width: 100%">
-            <el-input v-model="form.external_id" placeholder="钉钉 workspace_id / Dify dataset_id / 业务系统标识" style="flex: 1" />
+            <el-input v-model="form.external_id" placeholder="钉钉 workspace_id / Dify dataset_id / RAGFlow dataset_id / 业务系统标识" style="flex: 1" />
             <el-button v-if="isDingtalk" @click="openWorkspacePicker">从钉钉选择</el-button>
+            <el-button v-else-if="isEngine" @click="openEnginePicker">从 {{ engineLabel }} 选择</el-button>
           </div>
           <div class="form-hint">
-            外部系统中的知识库唯一标识。钉钉知识库建议点击「从钉钉选择」自动填入，避免重名混淆。
+            外部系统中的知识库唯一标识。建议点击「从{{ isDingtalk ? '钉钉' : engineLabel }}选择」实时拉取并自动填入，避免手填错 ID 或重名混淆。
           </div>
         </el-form-item>
         <el-form-item label="描述">
@@ -398,9 +478,13 @@ onMounted(() => {
             v-for="ws in filteredWorkspaces"
             :key="ws.id"
             class="ws-item"
+            :class="{ 'ws-item-disabled': isRegistered(ws) }"
             @click="pickWorkspace(ws)"
           >
-            <div class="ws-name">{{ ws.name }}</div>
+            <div class="ws-name">
+              {{ ws.name }}
+              <el-tag v-if="isRegistered(ws)" size="small" type="info" effect="light" class="ws-reg-tag">已登记</el-tag>
+            </div>
             <div class="ws-id">{{ ws.id }}</div>
           </div>
         </div>
@@ -409,50 +493,51 @@ onMounted(() => {
         <el-button @click="wsDialogVisible = false">取消</el-button>
       </template>
     </el-dialog>
+
+    <!-- 引擎知识库选择弹窗（Dify / RAGFlow 复用） -->
+    <el-dialog v-model="engDialogVisible" :title="`从 ${engineLabel} 选择知识库`" width="560px" :close-on-click-modal="false">
+      <el-input
+        v-model="engKeyword"
+        clearable
+        placeholder="按名称或 ID 搜索知识库"
+        style="margin-bottom: 12px"
+      />
+      <div v-loading="engLoading" style="max-height: 400px; overflow: auto; border: 1px solid var(--el-border-color); border-radius: 6px">
+        <div v-if="engError" style="padding: 16px; color: var(--el-color-danger); font-size: 13px">{{ engError }}</div>
+        <div v-else-if="filteredEngItems.length === 0" style="padding: 24px; text-align: center; color: var(--el-text-color-secondary)">
+          {{ engLoading ? '加载中…' : '暂无匹配的知识库' }}
+        </div>
+        <div v-else>
+          <div
+            v-for="item in filteredEngItems"
+            :key="item.id"
+            class="ws-item"
+            :class="{ 'ws-item-disabled': isEngRegistered(item) }"
+            @click="pickEngineItem(item)"
+          >
+            <div class="ws-name">
+              {{ item.name }}
+              <el-tag v-if="isEngRegistered(item)" size="small" type="info" effect="light" class="ws-reg-tag">已登记</el-tag>
+              <span class="ws-meta">{{ item.meta }}</span>
+            </div>
+            <div class="ws-id">{{ item.id }}</div>
+          </div>
+        </div>
+      </div>
+      <template #footer>
+        <el-button @click="engDialogVisible = false">取消</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <style scoped>
 .ks-page {
   height: 100%;
+  min-height: 0;
   display: flex;
   flex-direction: column;
-  padding: 20px;
-  background: #fafbfc;
-}
-
-.ks-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  margin-bottom: 16px;
-  flex-shrink: 0;
-}
-
-.ks-header-left {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.ks-title {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 20px;
-  font-weight: 600;
-  color: #1a1a2e;
-  margin: 0;
-}
-
-.ks-subtitle {
-  font-size: 13px;
-  color: #888;
-}
-
-.ks-header-right {
-  display: flex;
-  gap: 8px;
+  padding: 16px 20px 20px;
 }
 
 /* 统计卡片 */
@@ -479,6 +564,7 @@ onMounted(() => {
 
 .stat-dingtalk { color: #2b6bff; }
 .stat-dify { color: #67c23a; }
+.stat-ragflow { color: #f56c6c; }
 .stat-business { color: #e6a23c; }
 .stat-enabled { color: #2b6bff; }
 
@@ -508,6 +594,17 @@ onMounted(() => {
 .filter-label {
   font-size: 13px;
   color: #666;
+}
+
+/* 刷新/新增按钮与筛选同行，靠右 */
+.filter-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 8px;
+}
+
+.filter-actions .el-button + .el-button {
+  margin-left: 0;
 }
 
 .source-name {
@@ -573,6 +670,26 @@ onMounted(() => {
   border-bottom: none;
 }
 
+/* 已登记的知识库置灰不可选 */
+.ws-item-disabled {
+  cursor: not-allowed;
+  background: #fafafa;
+}
+
+.ws-item-disabled:hover {
+  background: #fafafa;
+}
+
+.ws-item-disabled .ws-name,
+.ws-item-disabled .ws-id {
+  color: var(--el-text-color-placeholder);
+}
+
+.ws-reg-tag {
+  margin-left: 6px;
+  flex-shrink: 0;
+}
+
 .ws-name {
   font-size: 14px;
   font-weight: 500;
@@ -584,5 +701,12 @@ onMounted(() => {
   color: var(--el-text-color-secondary);
   font-family: 'Menlo', 'Consolas', monospace;
   margin-top: 2px;
+}
+
+.ws-meta {
+  margin-left: 8px;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--el-text-color-secondary);
 }
 </style>

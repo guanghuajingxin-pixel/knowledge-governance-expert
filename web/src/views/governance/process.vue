@@ -1,24 +1,57 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+/**
+ * 知识加工
+ * 页签：钉钉知识 / 本地上传知识（原「知识中心」页迁入）+ 加工总览 / 知识图谱 / 标签库 / 加工说明
+ * 默认落地「钉钉知识」页签
+ */
+import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { listDifyDatasets, type DifyDataset } from '@/api/dify'
 import {
-  listProcessedDocuments,
-  enhanceDocument,
-  enhanceAllDocuments,
-  buildRelations,
-  getDocumentRelations,
   getKnowledgeGraph,
   getProcessStats,
   listKnowledgeTags,
-  type ProcessedDocumentItem,
-  type KnowledgeRelationItem,
   type KnowledgeGraph,
   type KnowledgeTag,
   type ProcessStats,
 } from '@/api/process'
+import { fetchTaskStats } from '@/api/knowledge-center'
+import type { TaskQueueStats } from '@/types/knowledge-center'
+import DingTalkKnowledgeTab from '@/views/knowledge-center/components/DingTalkKnowledgeTab.vue'
+import KnowledgeManageTab from '@/views/knowledge-center/components/KnowledgeManageTab.vue'
+import RecycleBinDialog from '@/views/knowledge-center/components/RecycleBinDialog.vue'
+import KnowledgeDetailDialog from '@/views/knowledge-center/components/KnowledgeDetailDialog.vue'
 
-const activeTab = ref('workbench')
+// 默认页签：钉钉知识
+const activeTab = ref('dingtalk')
+
+// ============================================================
+// 钉钉知识 / 本地上传知识（知识列表，原「知识中心」页）
+// ============================================================
+// 任务队列（仅本地上传文档有处理状态）
+const taskStats = ref<TaskQueueStats>({ total: 0, executing: 0, completed: 0, failed: 0 })
+
+// 弹窗（本地上传知识）
+const recycleVisible = ref(false)
+const detailVisible = ref(false)
+const detailDocId = ref<string>('')
+
+async function loadTaskStats() {
+  try {
+    taskStats.value = await fetchTaskStats('DOCUMENT')
+  } catch {
+    // silently fail
+  }
+}
+
+function handleRecycleOpen() {
+  recycleVisible.value = true
+}
+
+function handleDetailOpen(docId: string) {
+  detailDocId.value = docId
+  detailVisible.value = true
+}
 
 // ============================================================
 // 加工总览 KPI
@@ -32,9 +65,11 @@ const kpis = computed(() => [
   { label: '加工完成率', value: stats.value.total_documents ? `${Math.round((stats.value.completed / stats.value.total_documents) * 100)}%` : '0%', desc: '已完成 / 已加工文档', type: stats.value.completed > 0 ? 'up' : '' },
 ])
 
+const statsLoaded = ref(false)
 async function loadStats() {
   try {
     stats.value = await getProcessStats()
+    statsLoaded.value = true
   } catch { /* ignore */ }
 }
 
@@ -46,134 +81,6 @@ const pipeline = [
   { step: '4 · 关系构建', executor: 'LLM', executorType: 'primary', action: '文档间引用/相似/因果等语义关系', signal: '知识图谱可视化' },
   { step: '5 · 上下文工程', executor: '智能问答', executorType: 'success', action: '摘要+关系扩展检索上下文', signal: '提升回答深度' },
 ]
-
-// 加工引擎策略路由
-const routes = [
-  { type: '制度流程类', engine: 'Dify', engineType: 'success', chunk: '层级摘要（HiQA）', index: '章节摘要向量 + 全文', tool: '摘要 AI', status: '启用', statusType: 'success' },
-  { type: '产品手册类', engine: 'Dify', engineType: 'success', chunk: '父子分段 + 图片描述', index: '小/大 chunk 多索引', tool: 'OCR · 图注 AI', status: '启用', statusType: 'success' },
-  { type: 'FAQ/参数类', engine: 'Dify', engineType: 'success', chunk: 'FAQ 问答对抽取', index: '结构化倒排 + 向量', tool: 'FAQ 抽取 AI', status: '启用', statusType: 'success' },
-  { type: '视频类', engine: 'Dify', engineType: 'success', chunk: 'ASR 转写后按语义分段', index: '向量', tool: 'ASR(ffmpeg)', status: '2 转写失败', statusType: 'warning' },
-]
-
-// 工具注册表
-const tools = [
-  { name: 'Dify 知识库', type: '加工引擎', bearer: 'Dify 平台', purpose: '分段/索引/检索策略', url: 'http://10.10.166.81/', status: '在线', statusType: 'success' },
-  { name: '知识同步后台', type: '搬运', bearer: '自研（已上线）', purpose: '钉钉→Dify 增量同步', url: 'https://6da29zbc.qwenwork.host/', status: '在线', statusType: 'success' },
-  { name: 'minerU 解析', type: '解析', bearer: '自部署服务', purpose: 'PDF/图文版面解析', url: 'http://10.10.169.30:8010/', status: '在线', statusType: 'success' },
-  { name: 'LLM 加工服务', type: 'AI 增强', bearer: '系统配置 LLM', purpose: '打标/摘要/关系构建', url: '系统配置', status: '在线', statusType: 'success' },
-  { name: 'Rerank 服务', type: '检索', bearer: 'Dify 内置', purpose: '语义重排', url: '随 Dify 配置', status: '在线', statusType: 'success' },
-]
-
-function openTool(url: string) {
-  if (url.startsWith('http')) window.open(url, '_blank')
-  else ElMessage.info('按配置 URL 跳转（原型演示）')
-}
-
-// ============================================================
-// 知识加工工作台
-// ============================================================
-const datasets = ref<DifyDataset[]>([])
-const datasetsLoading = ref(false)
-const targetDatasetId = ref('')
-
-const docList = ref<ProcessedDocumentItem[]>([])
-const docListLoading = ref(false)
-const enhancingIds = ref<Set<string>>(new Set())
-const enhancingAll = ref(false)
-const buildingRelations = ref(false)
-
-const detailDoc = ref<ProcessedDocumentItem | null>(null)
-const detailRelations = ref<KnowledgeRelationItem[]>([])
-const detailDialogVisible = ref(false)
-
-async function loadDatasets() {
-  datasetsLoading.value = true
-  try {
-    const res = await listDifyDatasets()
-    datasets.value = res.items || []
-    if (!targetDatasetId.value && datasets.value.length) targetDatasetId.value = datasets.value[0].id
-  } catch (e: any) {
-    ElMessage.error(e?.response?.data?.detail || '加载 Dify 知识库失败')
-  } finally { datasetsLoading.value = false }
-}
-
-async function loadDocuments() {
-  if (!targetDatasetId.value) return
-  docListLoading.value = true
-  try {
-    const res = await listProcessedDocuments(targetDatasetId.value)
-    docList.value = res.items || []
-  } catch (e: any) {
-    ElMessage.error(e?.response?.data?.detail || '加载文档列表失败')
-  } finally { docListLoading.value = false }
-}
-
-function statusTag(s: string) {
-  switch (s) {
-    case 'completed': return { type: 'success', text: '已加工' }
-    case 'processing': return { type: 'warning', text: '加工中' }
-    case 'failed': return { type: 'danger', text: '失败' }
-    default: return { type: 'info', text: '待加工' }
-  }
-}
-
-async function doEnhance(doc: ProcessedDocumentItem) {
-  if (!targetDatasetId.value) return
-  enhancingIds.value.add(doc.document_id)
-  try {
-    const res = await enhanceDocument(targetDatasetId.value, doc.document_id)
-    if (res.status === 'completed') {
-      ElMessage.success(`「${doc.name}」加工完成`)
-      await loadDocuments()
-      await loadStats()
-    } else {
-      ElMessage.error(`加工失败：${res}`)
-    }
-  } catch (e: any) {
-    ElMessage.error(e?.response?.data?.detail || '加工失败')
-  } finally {
-    enhancingIds.value.delete(doc.document_id)
-  }
-}
-
-async function doEnhanceAll() {
-  if (!targetDatasetId.value) return
-  enhancingAll.value = true
-  try {
-    const res = await enhanceAllDocuments(targetDatasetId.value)
-    ElMessage.success(`批量加工完成：成功 ${res.completed} / 失败 ${res.failed}`)
-    await loadDocuments()
-    await loadStats()
-  } catch (e: any) {
-    ElMessage.error(e?.response?.data?.detail || '批量加工失败')
-  } finally { enhancingAll.value = false }
-}
-
-async function doBuildRelations() {
-  if (!targetDatasetId.value) return
-  buildingRelations.value = true
-  try {
-    const res = await buildRelations(targetDatasetId.value)
-    if (res.status === 'skipped') {
-      ElMessage.warning(res.reason || '无法构建关系')
-    } else {
-      ElMessage.success(`知识关系构建完成：新增 ${res.created} 对关系`)
-      await loadStats()
-    }
-  } catch (e: any) {
-    ElMessage.error(e?.response?.data?.detail || '关系构建失败')
-  } finally { buildingRelations.value = false }
-}
-
-async function openDetail(doc: ProcessedDocumentItem) {
-  detailDoc.value = doc
-  detailDialogVisible.value = true
-  detailRelations.value = []
-  try {
-    const res = await getDocumentRelations(doc.document_id)
-    detailRelations.value = res.items || []
-  } catch { /* ignore */ }
-}
 
 // ============================================================
 // 知识图谱
@@ -235,23 +142,42 @@ async function loadTags() {
   } catch { /* ignore */ }
 }
 
+// 各页签数据「切到才拉」：知识加工页默认停在「钉钉知识」，
+// 加工总览 / 知识图谱 / 标签库的数据在挂载时并不用，
+// 原先无条件并发 3 个请求，白占后端连接也拖慢首屏。
+watch(activeTab, (v) => {
+  if (v === 'local') loadTaskStats()
+  else if (v === 'overview' && !statsLoaded.value) loadStats()
+  else if (v === 'graph' && !graphDatasets.value.length) loadGraphDatasets()
+  else if (v === 'tags' && !tags.value.length) loadTags()
+}, { immediate: true })
+
 onMounted(() => {
-  loadStats()
-  loadDatasets()
-  loadGraphDatasets()
-  loadTags()
+  setInterval(() => {
+    if (activeTab.value === 'local') loadTaskStats()
+  }, 30000)
 })
 </script>
 
 <template>
-  <div class="page">
-    <h2 class="pg-title">知识加工</h2>
-    <p class="pg-sub">
-      加工是应用的基础。本模块对已进入 Dify 知识库的文档进行 AI 打标与摘要生成，
-      并构建文档间的语义关系图谱，为智能问答提供更丰富的上下文工程能力。
-    </p>
+  <div class="kge-page">
 
     <el-tabs v-model="activeTab">
+      <!-- 钉钉知识：钉钉开放平台实时文件列表 -->
+      <el-tab-pane label="钉钉知识" name="dingtalk">
+        <DingTalkKnowledgeTab />
+      </el-tab-pane>
+
+      <!-- 本地上传知识：平台内上传的文档（lazy：内部组件挂载即发 3 个请求，首屏不需要） -->
+      <el-tab-pane label="本地上传知识" name="local" lazy>
+        <KnowledgeManageTab
+          scope-tab="DOCUMENT"
+          :stats="taskStats"
+          @recycle="handleRecycleOpen"
+          @detail="handleDetailOpen"
+        />
+      </el-tab-pane>
+
       <!-- 加工总览 -->
       <el-tab-pane label="加工总览" name="overview">
         <el-row :gutter="16" class="kpi-row">
@@ -280,97 +206,6 @@ onMounted(() => {
         </el-card>
       </el-tab-pane>
 
-      <!-- 知识加工工作台 -->
-      <el-tab-pane label="知识加工工作台" name="workbench">
-        <el-card shadow="never">
-          <div class="toolbar">
-            <div class="toolbar-left">
-              <span class="label">选择知识库：</span>
-              <el-select
-                v-model="targetDatasetId"
-                placeholder="请选择 Dify 知识库"
-                style="width: 320px"
-                :loading="datasetsLoading"
-                @change="loadDocuments"
-              >
-                <el-option
-                  v-for="d in datasets"
-                  :key="d.id"
-                  :label="`${d.name}（${d.document_count} 篇）`"
-                  :value="d.id"
-                />
-              </el-select>
-              <el-button type="primary" plain @click="loadDocuments" :loading="docListLoading">刷新</el-button>
-            </div>
-            <div class="toolbar-right">
-              <el-button type="primary" :loading="enhancingAll" :disabled="!targetDatasetId" @click="doEnhanceAll">
-                全部 AI 加工
-              </el-button>
-              <el-button type="success" :loading="buildingRelations" :disabled="!targetDatasetId" @click="doBuildRelations">
-                构建知识关系
-              </el-button>
-            </div>
-          </div>
-
-          <el-table
-            v-loading="docListLoading"
-            :data="docList"
-            style="width: 100%; margin-top: 16px"
-            empty-text="暂无文档或请先选择知识库"
-          >
-            <el-table-column prop="name" label="文档名称" min-width="240" show-overflow-tooltip>
-              <template #default="{ row }">
-                <span class="doc-name" @click="openDetail(row as ProcessedDocumentItem)">{{ row.name }}</span>
-              </template>
-            </el-table-column>
-            <el-table-column prop="doc_type" label="文档类型" width="120">
-              <template #default="{ row }">
-                <el-tag v-if="row.doc_type" size="small" type="info">{{ row.doc_type }}</el-tag>
-                <span v-else class="muted">—</span>
-              </template>
-            </el-table-column>
-            <el-table-column label="标签" min-width="200">
-              <template #default="{ row }">
-                <template v-if="row.tags && row.tags.length">
-                  <el-tag
-                    v-for="t in row.tags.slice(0, 4)"
-                    :key="t"
-                    size="small"
-                    style="margin: 2px"
-                  >{{ t }}</el-tag>
-                  <span v-if="row.tags.length > 4" class="muted">+{{ row.tags.length - 4 }}</span>
-                </template>
-                <span v-else class="muted">—</span>
-              </template>
-            </el-table-column>
-            <el-table-column prop="summary" label="摘要" min-width="280" show-overflow-tooltip>
-              <template #default="{ row }">
-                <span class="small">{{ row.summary || '—' }}</span>
-              </template>
-            </el-table-column>
-            <el-table-column label="加工状态" width="100">
-              <template #default="{ row }">
-                <el-tag :type="statusTag(row.process_status).type as any" size="small">
-                  {{ statusTag(row.process_status).text }}
-                </el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column label="操作" width="180" fixed="right">
-              <template #default="{ row }">
-                <el-button
-                  size="small"
-                  type="primary"
-                  link
-                  :loading="enhancingIds.has((row as ProcessedDocumentItem).document_id)"
-                  @click="doEnhance(row as ProcessedDocumentItem)"
-                >AI 加工</el-button>
-                <el-button size="small" link @click="openDetail(row as ProcessedDocumentItem)">详情</el-button>
-              </template>
-            </el-table-column>
-          </el-table>
-        </el-card>
-      </el-tab-pane>
-
       <!-- 知识图谱 -->
       <el-tab-pane label="知识图谱" name="graph">
         <el-card shadow="never">
@@ -390,7 +225,7 @@ onMounted(() => {
                   :value="d.id"
                 />
               </el-select>
-              <el-button type="primary" plain @click="loadGraph" :loading="graphLoading">刷新图谱</el-button>
+              <el-button type="primary" plain :loading="graphLoading" @click="loadGraph">刷新图谱</el-button>
             </div>
             <div class="toolbar-right">
               <span class="small muted">共 {{ graph.nodes.length }} 个节点 · {{ graph.edges.length }} 条关系</span>
@@ -430,7 +265,7 @@ onMounted(() => {
                 >{{ node.name.length > 16 ? node.name.slice(0, 16) + '…' : node.name }}</text>
               </g>
             </svg>
-            <el-empty v-else description="暂无图谱数据，请先在「知识加工工作台」中构建知识关系" />
+            <el-empty v-else description="暂无图谱数据，请先构建知识关系" />
           </div>
 
           <el-divider v-if="graph.edges.length" />
@@ -461,68 +296,6 @@ onMounted(() => {
             </el-tag>
           </div>
           <el-empty v-else description="暂无标签，请先对文档进行 AI 加工" />
-        </el-card>
-      </el-tab-pane>
-
-      <!-- 加工引擎配置 -->
-      <el-tab-pane label="加工引擎配置" name="engine">
-        <el-card shadow="never">
-          <template #header>
-            <div class="card-header">
-              <span>加工引擎策略路由 <el-tag size="small" type="primary">按知识类型自动路由，可维护</el-tag></span>
-              <el-button size="small" type="primary" @click="ElMessage.info('新增策略路由（原型演示）')">＋ 新增路由</el-button>
-            </div>
-          </template>
-          <el-table :data="routes" style="width: 100%">
-            <el-table-column prop="type" label="知识类型" width="130" />
-            <el-table-column label="加工引擎" width="110">
-              <template #default="{ row }"><el-tag :type="row.engineType as any">{{ row.engine }}</el-tag></template>
-            </el-table-column>
-            <el-table-column prop="chunk" label="分段策略" min-width="180">
-              <template #default="{ row }"><span class="small">{{ row.chunk }}</span></template>
-            </el-table-column>
-            <el-table-column prop="index" label="索引结构" min-width="180">
-              <template #default="{ row }"><span class="small">{{ row.index }}</span></template>
-            </el-table-column>
-            <el-table-column prop="tool" label="挂载工具" width="140" />
-            <el-table-column label="状态" width="110">
-              <template #default="{ row }"><el-tag :type="row.statusType as any">{{ row.status }}</el-tag></template>
-            </el-table-column>
-            <el-table-column label="操作" width="80">
-              <template #default="{ row }">
-                <el-button size="small" link type="primary" @click="ElMessage.info(`编辑「${row.type}」策略路由`)">编辑</el-button>
-              </template>
-            </el-table-column>
-          </el-table>
-          <div class="small" style="margin-top: 8px">策略约定源出钉钉文档《知识治理标准》，本页将标准实例化为引擎可执行的路由配置。</div>
-        </el-card>
-      </el-tab-pane>
-
-      <!-- 工具与跳转配置 -->
-      <el-tab-pane label="工具与跳转配置" name="tool">
-        <div class="hl green">🧰 <span>工具注册表：Dify、同步后台、解析/转写/LLM 加工等工具统一登记，每个工具维护「管理入口 URL」。</span></div>
-        <el-card shadow="never">
-          <el-table :data="tools" style="width: 100%">
-            <el-table-column prop="name" label="工具" width="140">
-              <template #default="{ row }"><b>{{ row.name }}</b></template>
-            </el-table-column>
-            <el-table-column prop="type" label="类型" width="100" />
-            <el-table-column prop="bearer" label="承载方" width="130" />
-            <el-table-column prop="purpose" label="用途" min-width="180">
-              <template #default="{ row }"><span class="small">{{ row.purpose }}</span></template>
-            </el-table-column>
-            <el-table-column prop="url" label="管理入口 URL" min-width="220">
-              <template #default="{ row }"><span class="mono">{{ row.url }}</span></template>
-            </el-table-column>
-            <el-table-column label="状态" width="100">
-              <template #default="{ row }"><el-tag :type="row.statusType as any">{{ row.status }}</el-tag></template>
-            </el-table-column>
-            <el-table-column label="操作" width="120">
-              <template #default="{ row }">
-                <el-button size="small" @click="openTool(row.url)">↗ 跳转</el-button>
-              </template>
-            </el-table-column>
-          </el-table>
         </el-card>
       </el-tab-pane>
 
@@ -563,9 +336,9 @@ onMounted(() => {
 
             <h3>📋 操作流程</h3>
             <ol class="steps">
-              <li><b>选择知识库</b>：在「知识加工工作台」选择一个 Dify 知识库，加载文档列表。</li>
-              <li><b>AI 加工</b>：点击「AI 加工」对单篇文档打标+摘要，或「全部 AI 加工」批量处理。</li>
-              <li><b>构建关系</b>：加工完成后点击「构建知识关系」，自动分析文档间语义关联。</li>
+              <li><b>文档入库</b>：文档经钉钉同步 / 手动上传进入 Dify 知识库（入库结果见「钉钉知识」「本地上传知识」页签）。</li>
+              <li><b>AI 加工</b>：对入库文档执行打标 + 摘要，识别文档类型，产出结构化知识。</li>
+              <li><b>构建关系</b>：加工完成后分析文档间引用、相似主题、因果等语义关联。</li>
               <li><b>查看图谱</b>：在「知识图谱」页签可视化文档关系网络。</li>
               <li><b>问答应用</b>：智能问答时自动调用加工结果扩展上下文。</li>
             </ol>
@@ -613,58 +386,16 @@ onMounted(() => {
       </el-tab-pane>
     </el-tabs>
 
-    <!-- 文档加工详情弹窗 -->
-    <el-dialog v-model="detailDialogVisible" :title="detailDoc?.name || '文档详情'" width="720px">
-      <div v-if="detailDoc" class="detail-content">
-        <div class="detail-row">
-          <span class="detail-label">文档类型：</span>
-          <el-tag v-if="detailDoc.doc_type" size="small">{{ detailDoc.doc_type }}</el-tag>
-          <span v-else class="muted">—</span>
-        </div>
-        <div class="detail-row">
-          <span class="detail-label">加工状态：</span>
-          <el-tag :type="statusTag(detailDoc.process_status).type as any" size="small">
-            {{ statusTag(detailDoc.process_status).text }}
-          </el-tag>
-        </div>
-        <div class="detail-row">
-          <span class="detail-label">标签：</span>
-          <el-tag v-for="t in detailDoc.tags" :key="t" size="small" style="margin: 2px">{{ t }}</el-tag>
-          <span v-if="!detailDoc.tags?.length" class="muted">—</span>
-        </div>
-        <div class="detail-block">
-          <div class="detail-label">摘要：</div>
-          <p class="small">{{ detailDoc.summary || '暂无摘要，请先执行 AI 加工' }}</p>
-        </div>
+    <!-- 回收站弹窗（本地文档） -->
+    <RecycleBinDialog v-model="recycleVisible" />
 
-        <el-divider />
-        <div class="detail-block">
-          <div class="detail-label">关联文档（{{ detailRelations.length }}）：</div>
-          <el-table v-if="detailRelations.length" :data="detailRelations" size="small" style="width: 100%">
-            <el-table-column prop="target_name" label="文档名称" min-width="160" show-overflow-tooltip />
-            <el-table-column prop="relation_type" label="关系类型" width="110">
-              <template #default="{ row }">
-                <el-tag :style="{ color: relationColor[row.relation_type] || '#909399', borderColor: relationColor[row.relation_type] || '#909399', background: (relationColor[row.relation_type] || '#909399') + '15' }" size="small">
-                  {{ row.relation_type }}
-                </el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column prop="weight" label="权重" width="80">
-              <template #default="{ row }">{{ row.weight?.toFixed(2) }}</template>
-            </el-table-column>
-            <el-table-column prop="description" label="关系描述" min-width="200" show-overflow-tooltip />
-          </el-table>
-          <el-empty v-else description="暂无关联文档，请先构建知识关系" :image-size="80" />
-        </div>
-      </div>
-    </el-dialog>
+    <!-- 知识详情弹窗（本地文档） -->
+    <KnowledgeDetailDialog v-model="detailVisible" :doc-id="detailDocId" />
   </div>
 </template>
 
 <style scoped>
-.page { padding: 20px 24px 48px; max-width: 1320px; margin: 0 auto; }
-.pg-title { font-size: 19px; margin-bottom: 4px; }
-.pg-sub { color: #6b7280; font-size: 13px; margin-bottom: 16px; line-height: 1.8; }
+.pg-title { font-size: 19px; margin-bottom: 12px; }
 .kpi-row { margin-bottom: 16px; }
 .kpi { background: #fff; border: 1px solid #e5e8ee; border-radius: 12px; padding: 14px 16px; box-shadow: 0 1px 3px rgba(16,24,40,.06); }
 .kpi .l { font-size: 12px; color: #6b7280; margin-bottom: 6px; }
@@ -673,17 +404,11 @@ onMounted(() => {
 .kpi .d.up { color: #16a34a; }
 .small { font-size: 12.5px; color: #475569; line-height: 1.8; }
 .muted { color: #909399; }
-.mono { font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: #334155; }
-.card-header { display: flex; align-items: center; justify-content: space-between; }
-.hl { border-radius: 8px; padding: 10px 14px; font-size: 12.5px; margin-bottom: 14px; display: flex; gap: 8px; line-height: 1.7; }
-.hl.green { background: #f0fdf4; border: 1px solid #bbf7d0; color: #065f46; }
 
 .toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 .toolbar-left { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .toolbar-right { display: flex; align-items: center; gap: 8px; }
 .label { font-size: 13px; color: #606266; white-space: nowrap; }
-.doc-name { color: #409EFF; cursor: pointer; }
-.doc-name:hover { text-decoration: underline; }
 
 /* 知识图谱 */
 .graph-container { display: flex; justify-content: center; background: #fafafa; border-radius: 8px; padding: 12px; min-height: 400px; }
@@ -709,9 +434,4 @@ onMounted(() => {
 .data-table th, .data-table td { border: 1px solid #e5e8ee; padding: 8px 12px; text-align: left; }
 .data-table th { background: #f5f7fa; font-weight: 600; }
 .data-table code { background: #f0f0f0; padding: 2px 6px; border-radius: 3px; font-size: 12px; }
-
-/* 详情弹窗 */
-.detail-row { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
-.detail-block { margin-bottom: 16px; }
-.detail-label { font-weight: 600; color: #303133; font-size: 13px; margin-bottom: 4px; display: block; }
 </style>

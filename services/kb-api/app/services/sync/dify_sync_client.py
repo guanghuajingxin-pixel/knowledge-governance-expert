@@ -13,8 +13,8 @@ from typing import Any, Callable
 
 import httpx
 
-from kb_common.config import get_settings
 from kb_common.clients.document_upload import prepare_document
+from kb_common.clients.dify_document import file_payload, pipeline_payload, pipeline_result
 
 
 class DifyError(Exception):
@@ -25,7 +25,7 @@ class DifyError(Exception):
 
 
 class DifyClient:
-    def __init__(self, base_url: str, dataset_api_key: str, timeout: float = 60.0):
+    def __init__(self, base_url: str, dataset_api_key: str, timeout: float = 600.0):
         self.base_url = base_url.rstrip("/")
         self._headers = {"Authorization": f"Bearer {dataset_api_key}"}
         self._client = httpx.Client(timeout=timeout)
@@ -88,38 +88,47 @@ class DifyClient:
 
     def find_dataset_by_name(self, name: str) -> dict | None:
         """查找 Dify 中已有的数据集；同步源不会隐式创建数据集。"""
-        for page in range(1, 6):
+        matches = []
+        page = 1
+        while True:
             data = self.list_datasets(page=page, limit=50, keyword=name)
             items = data.get("data", [])
             for item in items:
                 if item.get("name") == name:
-                    return item
+                    matches.append(item)
             if not data.get("has_more", False):
                 break
-        return None
+            page += 1
+        if len(matches) > 1:
+            raise DifyError("存在同名 Dify 知识库，请编辑同步任务并按 ID 重新选择目标库")
+        return matches[0] if matches else None
+
+    def resolve_dataset(self, dataset_id: str | None, name: str = "") -> dict:
+        """ID 是同步目标的身份；仅兼容尚未保存 ID 的旧任务按名称解析。"""
+        if not dataset_id:
+            match = self.find_dataset_by_name(name.strip())
+            if not match:
+                raise DifyError(f"Dify 知识库不存在: {name}")
+            dataset_id = match.get("id")
+        if not dataset_id:
+            raise DifyError("Dify 未返回知识库 ID")
+        dataset = self.get_dataset(dataset_id)
+        if dataset.get("id") != dataset_id:
+            raise DifyError("Dify 知识库详情返回的 ID 与目标不一致")
+        return dataset
 
     # ---------- 文档 ----------
     def _file_payload(self, dataset_id: str, doc_language: str) -> dict:
-        dataset = self.get_dataset(dataset_id)
-        payload = {
-            "indexing_technique": dataset.get("indexing_technique") or "high_quality",
-            "doc_form": dataset.get("doc_form") or dataset.get("chunk_structure") or "text_model",
-            "doc_language": doc_language,
-        }
-        # 已有知识库复用其分段规则，尤其不能将父子分段覆盖为普通自动分段。
-        if not dataset.get("document_count") and payload["doc_form"] == "text_model":
-            payload["process_rule"] = {"mode": "automatic"}
-        return payload
+        return file_payload(self.get_dataset(dataset_id), doc_language)
 
     def upload_file(self, dataset_id: str, file_path: Path, file_name: str | None = None,
                     doc_language: str = "Chinese") -> dict:
         name = file_name or file_path.name
-        mime, _ = mimetypes.guess_type(str(file_path))
         payload = self._file_payload(dataset_id, doc_language)
         with file_path.open("rb") as fh:
             content = fh.read()
         try:
-            name, content = prepare_document(name, content, max_source_bytes=100 * 1024 * 1024)
+            name, content = prepare_document(name, content)
         except ValueError as exc:
             raise DifyError(str(exc)) from exc
         mime, _ = mimetypes.guess_type(name)
@@ -134,12 +143,11 @@ class DifyClient:
     def update_file(self, dataset_id: str, document_id: str, file_path: Path,
                     file_name: str | None = None, doc_language: str = "Chinese") -> dict:
         name = file_name or file_path.name
-        mime, _ = mimetypes.guess_type(str(file_path))
         payload = self._file_payload(dataset_id, doc_language)
         with file_path.open("rb") as fh:
             content = fh.read()
         try:
-            name, content = prepare_document(name, content, max_source_bytes=100 * 1024 * 1024)
+            name, content = prepare_document(name, content)
         except ValueError as exc:
             raise DifyError(str(exc)) from exc
         mime, _ = mimetypes.guess_type(name)
@@ -149,15 +157,142 @@ class DifyClient:
             files={"file": (name, content, mime or "application/octet-stream")},
             data={"data": json.dumps(payload, ensure_ascii=False)},
         )
-        return self._parse(resp, "update file")
+        try:
+            return self._parse(resp, "update file")
+        except DifyError as exc:
+            if exc.status == 404:
+                return self.upload_file(dataset_id, file_path, file_name, doc_language)
+            if "Document is not available" not in str(exc):
+                raise
+            document = self._get(f"/datasets/{dataset_id}/documents/{document_id}")
+            if document.get("indexing_status") not in ("error", "completed", "paused", "stopped"):
+                raise DifyError("旧文档仍在索引，请等待处理完成后重试") from exc
+            return self._replace_document(
+                dataset_id, document_id,
+                lambda: self.upload_file(dataset_id, file_path, file_name, doc_language),
+            )
 
     def delete_document(self, dataset_id: str, document_id: str) -> dict:
         return self._delete(f"/datasets/{dataset_id}/documents/{document_id}")
 
-    def document_count(self, dataset_id: str) -> int:
-        """返回 Dify 数据集实际文档总数，而不是本地同步映射数。"""
-        data = self._get(f"/datasets/{dataset_id}/documents", params={"page": 1, "limit": 1})
-        return int(data.get("total", len(data.get("data", []))))
+    # ---------- 知识流水线（runtime_mode=rag_pipeline 的数据集） ----------
+    def list_datasource_nodes(self, dataset_id: str) -> list[dict]:
+        """列出已发布流水线的数据源节点（用于定位 local_file 起始节点）。"""
+        data = self._get(f"/datasets/{dataset_id}/pipeline/datasource-plugins",
+                         params={"is_published": "true"})
+        return data if isinstance(data, list) else (data.get("data") or [])
+
+    def local_file_node_id(self, dataset_id: str) -> str:
+        """取第一个本地文件类型数据源节点的 node_id；找不到说明流水线不支持文件同步。"""
+        for node in self.list_datasource_nodes(dataset_id):
+            if node.get("datasource_type") == "local_file" and node.get("node_id"):
+                return str(node["node_id"])
+        raise DifyError("知识流水线未配置本地文件数据源节点，无法通过 API 同步文档", code="no_local_file_node")
+
+    def upload_pipeline_file(self, file_path: Path, file_name: str | None = None) -> dict:
+        """上传文件到流水线文件暂存区，返回 {id, name, ...}。"""
+        name = file_name or file_path.name
+        with file_path.open("rb") as fh:
+            content = fh.read()
+        try:
+            name, content = prepare_document(name, content)
+        except ValueError as exc:
+            raise DifyError(str(exc)) from exc
+        mime, _ = mimetypes.guess_type(name)
+        resp = self._client.post(
+            f"{self.base_url}/datasets/pipeline/file-upload",
+            headers=self._headers,
+            files={"file": (name, content, mime or "application/octet-stream")},
+        )
+        return self._parse(resp, "upload pipeline file")
+
+    def run_pipeline(self, dataset_id: str, start_node_id: str, reference: str,
+                     name: str, timeout: float = 600.0,
+                     inputs: dict | None = None) -> dict:
+        """以阻塞模式运行知识流水线处理单个文件。
+
+        create-by-file 接口对 rag_pipeline 数据集只会派发普通索引任务，
+        导致「No subchunk segmentation found in rules」或控制台预览报
+        PublishedWorkflowRunPayload 校验错误；流水线数据集必须走本接口。
+
+        ⚠️ inputs 必须携带流水线定义的必填变量（如 max_chunk_length / parent_mode /
+        child_length），缺失会报 500 "xxx is required in input form"。不同流水线的
+        变量完全不同，值由调用方从同步源配置（pipeline_inputs）传入；
+        未传时使用已发布流水线自己的默认值。
+
+        真实响应结构（Dify 1.16.1 实测）：{batch, dataset, documents: [{id, name, ...}]}。
+        """
+        payload = pipeline_payload(start_node_id, reference, name, inputs)
+        resp = self._client.post(f"{self.base_url}/datasets/{dataset_id}/pipeline/run",
+                                 json=payload, headers=self._headers, timeout=timeout)
+        return self._parse(resp, "run pipeline")
+
+    def upload_file_via_pipeline(self, dataset_id: str, file_path: Path,
+                                 file_name: str | None = None,
+                                 timeout: float = 600.0,
+                                 inputs: dict | None = None) -> dict:
+        """流水线数据集新增文档：上传文件 → 运行流水线 → 解析响应取 document_id/batch。
+
+        ⚠️ 真实响应结构（2026-09-11 本地 Dify 1.16.1 实测）与官方文档/源码不一致：
+        实际返回 `{batch, dataset, documents: [{id, name, indexing_status, ...}]}` 顶层结构，
+        而不是 WorkflowAppBlockingResponse 的 `{task_id, workflow_run_id, data: {outputs}}`。
+        本实现按真实响应解析，同时保留 data.outputs 兜底路径以兼容未来版本。
+
+        返回结构与 create-by-file 对齐：{"document": {"id", "name", "indexing_status"},
+        "batch": ...}，batch 供引擎复用 wait_indexing 轮询索引进度。
+        """
+        name = file_name or file_path.name
+        node_id = self.local_file_node_id(dataset_id)
+        uploaded = self.upload_pipeline_file(file_path, file_name=name)
+        reference = uploaded.get("id")
+        if not reference:
+            raise DifyError("流水线文件上传未返回文件 ID")
+        result = self.run_pipeline(dataset_id, node_id, str(reference), name,
+                                   timeout=timeout, inputs=inputs)
+
+        try:
+            return pipeline_result(result, name)
+        except ValueError as exc:
+            raise DifyError(str(exc)) from exc
+
+    def update_file_via_pipeline(self, dataset_id: str, document_id: str, file_path: Path,
+                                 file_name: str | None = None,
+                                 timeout: float = 600.0,
+                                 inputs: dict | None = None) -> dict:
+        """流水线不支持原位更新；新文档索引成功后才删除旧文档。"""
+        return self._replace_document(
+            dataset_id, document_id,
+            lambda: self.upload_file_via_pipeline(dataset_id, file_path, file_name,
+                                                  timeout=timeout, inputs=inputs),
+            timeout=timeout,
+        )
+
+    def _replace_document(self, dataset_id: str, document_id: str,
+                          upload: Callable[[], dict], timeout: float = 600) -> dict:
+        result = upload()
+        new_id = (result.get("document") or {}).get("id")
+        if not new_id or new_id == document_id:
+            raise DifyError("替换文档未返回新的文档 ID")
+        try:
+            if result.get("batch"):
+                self.wait_indexing(dataset_id, result["batch"], timeout=timeout)
+            elif result["document"].get("indexing_status") != "completed":
+                raise DifyError("替换文档未返回索引批次，无法确认成功，保留旧文档")
+            try:
+                self.delete_document(dataset_id, document_id)
+            except DifyError as exc:
+                if exc.status != 404:
+                    raise
+        except Exception:
+            # 已知新 ID 的失败尝试回滚；原映射及旧文档仍可用于重试。
+            try:
+                self.delete_document(dataset_id, new_id)
+            except Exception:
+                import logging
+                logging.getLogger(__name__).exception("清理失败替换文档 %s 失败", new_id)
+            raise
+        result["document"]["indexing_status"] = "completed"
+        return result
 
     def indexing_status(self, dataset_id: str, batch: str, timeout: float = 60) -> dict:
         response = self._client.get(
@@ -192,9 +327,3 @@ class DifyClient:
                 previous = progress
             time.sleep(max(0, min(3, timeout - (time.monotonic() - start))))
         raise DifyError(f"等待 Dify 索引超时（{timeout} 秒）")
-
-
-def build_client_from_settings() -> DifyClient:
-    """从平台配置构造一个 Dify 客户端。"""
-    s = get_settings()
-    return DifyClient(s.dify_base_url, s.dify_api_key)

@@ -5,6 +5,11 @@ import { useUserStore } from '@/stores/user'
 export interface ChatRequest {
   query: string
   kb_ids?: string[]
+  /** 首选：知识库（检索抽象层）ID，后端按 platform 解析为 dify/ragflow 两组 dataset */
+  library_ids?: number[] | null
+  /** 兼容旧字段：知识源注册表 ID（推送路径登记） */
+  knowledge_source_ids?: number[] | null
+  /** 兼容旧字段：直接指定 Dify 数据集 ID */
   dify_dataset_ids?: string[] | null
   top_k?: number
   last_query?: string
@@ -14,7 +19,6 @@ export interface ChatRequest {
   model?: string
   /** 模型所属供应商配置 ID（多供应商模型管理） */
   llm_profile_id?: string
-  deep_think?: boolean
   /** 会话 ID：映射 DeerFlow thread（重新对话时刷新） */
   session_id?: string
   /** 限时探索续跑动作：''=新问题；'continue'=继续探索；'stop'=先基于已检索内容回答 */
@@ -50,7 +54,9 @@ export interface ChatResponse {
 
 /** Agent 流式事件 */
 export interface StreamEvent {
-  type: 'step' | 'final' | 'config_error' | 'answer_delta' | 'choice' | 'choice_pause'
+  type: 'step' | 'final' | 'config_error' | 'answer_delta' | 'choice' | 'choice_pause' | 'citations'
+  step_id?: string
+  status?: 'running' | 'completed' | 'failed' | 'cancelled' | 'paused'
   node?: string
   title?: string
   detail?: string
@@ -58,11 +64,18 @@ export interface StreamEvent {
   result?: ChatResponse
   code?: string
   message?: string
-  /** answer_delta 事件的回答文本增量 */
+  /** answer_delta 事件的回答文本增量；reset=true 时清空已累积文本（工具过渡轮回滚） */
   delta?: string
+  reset?: boolean
+  /** citations 事件：检索命中实时汇总的引用来源（流式填充引用面板） */
+  citations?: SearchResult[]
   /** choice / choice_pause 事件：限时探索确认问题与选项按钮 */
   question?: string
   options?: string[]
+  choice_kind?: string
+  evidence_summary?: string
+  confidence?: number
+  confidence_reason?: string
   /** choice_pause / final 事件：本轮 token 消耗 */
   usage?: TokenUsage
 }
@@ -87,13 +100,15 @@ export function streamChat(
   data: ChatRequest,
   handlers: {
     onStep?: (e: StreamEvent) => void
-    onDelta?: (delta: string) => void
+    onDelta?: (delta: string, reset?: boolean) => void
+    /** 引用来源实时汇总（检索命中即下发，流式填充引用面板） */
+    onCitations?: (citations: SearchResult[]) => void
     onFinal?: (r: ChatResponse) => void
     onError?: (code: string, message: string) => void
     /** 限时探索确认：智能体请求用户选择是否继续（按钮可先渲染） */
     onChoice?: (question: string, options: string[]) => void
     /** 确认暂停落定：流结束，等待用户点选，附带本轮 token 消耗 */
-    onChoicePause?: (question: string, options: string[], usage?: TokenUsage) => void
+    onChoicePause?: (question: string, options: string[], usage?: TokenUsage, assessment?: StreamEvent) => void
     /** 流收尾兜底：连接中断/异常结束且未收到任何终止事件（final/choice_pause/config_error） */
     onClosed?: () => void
   },
@@ -136,14 +151,15 @@ export function streamChat(
           try {
               const evt: StreamEvent = JSON.parse(line)
               if (evt.type === 'step') handlers.onStep?.(evt)
-              else if (evt.type === 'answer_delta') handlers.onDelta?.(evt.delta || '')
+              else if (evt.type === 'answer_delta') handlers.onDelta?.(evt.delta || '', evt.reset)
+              else if (evt.type === 'citations') handlers.onCitations?.(evt.citations || [])
               else if (evt.type === 'final') {
                 sawTerminal = true
                 handlers.onFinal?.(evt.result as ChatResponse)
               } else if (evt.type === 'choice') handlers.onChoice?.(evt.question || '', evt.options || [])
               else if (evt.type === 'choice_pause') {
                 sawTerminal = true
-                handlers.onChoicePause?.(evt.question || '', evt.options || [], evt.usage)
+                handlers.onChoicePause?.(evt.question || '', evt.options || [], evt.usage, evt)
               } else if (evt.type === 'config_error') {
                 sawTerminal = true
                 handlers.onError?.(evt.code || 'unknown', evt.message || '')

@@ -1,6 +1,7 @@
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 import uuid
 from datetime import datetime
+from typing import Any
 
 
 class KbIn(BaseModel):
@@ -91,9 +92,24 @@ class SegmentOut(BaseModel):
 
 
 # ===== 知识源登记（企业知识库注册表）=====
+# 可检索/可同步的外部知识库引擎类型 + 钉钉数据源 + 业务系统占位。
+VALID_SOURCE_TYPES = {
+    "dingtalk_workspace",  # 钉钉知识库（数据源）
+    "dify_dataset",        # Dify 知识库（检索/同步目标）
+    "ragflow_dataset",     # RAGFlow 知识库（检索/同步目标，与 Dify 并列）
+    "business_system",     # 业务系统（占位）
+}
+
+
+def _validate_source_type(v: str | None) -> str | None:
+    if v is not None and v not in VALID_SOURCE_TYPES:
+        raise ValueError(f"未知知识库类型: {v}（可选：{', '.join(sorted(VALID_SOURCE_TYPES))}）")
+    return v
+
+
 class KnowledgeSourceBase(BaseModel):
     name: str
-    source_type: str  # dingtalk_workspace | dify_dataset | business_system
+    source_type: str  # dingtalk_workspace | dify_dataset | ragflow_dataset | business_system
     external_id: str
     description: str = ""
     config: dict | None = None
@@ -101,7 +117,10 @@ class KnowledgeSourceBase(BaseModel):
 
 
 class KnowledgeSourceCreate(KnowledgeSourceBase):
-    pass
+    @field_validator("source_type")
+    @classmethod
+    def _check_type(cls, v: str) -> str:
+        return _validate_source_type(v) or v
 
 
 class KnowledgeSourceUpdate(BaseModel):
@@ -111,6 +130,11 @@ class KnowledgeSourceUpdate(BaseModel):
     description: str | None = None
     config: dict | None = None
     enabled: bool | None = None
+
+    @field_validator("source_type")
+    @classmethod
+    def _check_type(cls, v: str | None) -> str | None:
+        return _validate_source_type(v)
 
 
 class KnowledgeSourceOut(KnowledgeSourceBase):
@@ -129,10 +153,17 @@ class SyncSourceBase(BaseModel):
     workspace_id: str
     root_node_id: str
     start_dir: str = ""
+    # 目标引擎：dify | ragflow（默认 dify，历史行为不变）
+    backend_type: str = Field(default="dify", pattern="^(dify|ragflow)$")
+    # 目标知识库标识（对 dify 存 dataset_id/name，对 ragflow 存其 dataset_id/name）
     dify_dataset_name: str
+    dify_dataset_id: str | None = None
     delete_policy: str = Field(default="keep", pattern="^(keep|sync)$")
     cron: str = "0 2 * * *"
     enabled: bool = True
+    # 流水线数据集的 input form 变量值（分段参数），如 {"max_chunk_length": 1024}。
+    # 普通数据集忽略；流水线数据集缺失必填变量时 Dify 会报 500。RAGFlow 忽略此字段。
+    pipeline_inputs: dict[str, Any] = Field(default_factory=dict)
 
 
 class SyncSourceCreate(SyncSourceBase):
@@ -149,10 +180,13 @@ class SyncSourceUpdate(BaseModel):
     workspace_id: str | None = None
     root_node_id: str | None = None
     start_dir: str | None = None
+    backend_type: str | None = Field(default=None, pattern="^(dify|ragflow)$")
     dify_dataset_name: str | None = None
+    dify_dataset_id: str | None = None
     delete_policy: str | None = Field(default=None, pattern="^(keep|sync)$")
     cron: str | None = None
     enabled: bool | None = None
+    pipeline_inputs: dict[str, Any] | None = None
 
 
 class SyncPreviewItemSetting(BaseModel):
@@ -172,6 +206,21 @@ class SyncSourceOut(SyncSourceBase):
     dify_dataset_id: str | None = None
     created_at: datetime
     updated_at: datetime
+
+    @field_validator("pipeline_inputs", mode="before")
+    @classmethod
+    def _parse_pipeline_inputs(cls, value: Any) -> dict[str, Any]:
+        """ORM 里 pipeline_inputs 是 Text 存的 JSON 字符串，序列化时转回 dict。"""
+        import json as _json
+        if value is None or value == "":
+            return {}
+        if isinstance(value, dict):
+            return value
+        try:
+            parsed = _json.loads(value)
+            return parsed if isinstance(parsed, dict) else {}
+        except (ValueError, TypeError):
+            return {}
 
 
 class SyncRunOut(BaseModel):

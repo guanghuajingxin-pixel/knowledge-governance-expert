@@ -253,6 +253,29 @@ class KnowledgeSource(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
 
+# ===== 知识库（检索抽象层）=====
+# 智能体检索用的统一「知识库」：只做外部检索引擎库的镜像登记（platform + dataset_id），
+# 不支持导入/解析新文档；检索时按 platform 由抽象层决定各自检索策略。
+# 与 knowledge_sources（推送路径定义）相互独立。
+
+class KnowledgeLibrary(Base):
+    """知识库镜像：检索抽象层注册表（仅 RAGFlow / Dify）。
+
+    platform: dify | ragflow
+    dataset_id: 对应平台的数据集 ID（同平台内唯一）
+    """
+    __tablename__ = "knowledge_libraries"
+    __table_args__ = (UniqueConstraint("platform", "dataset_id", name="uq_knowledge_library_platform_dataset"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    platform: Mapped[str] = mapped_column(String(16), nullable=False)
+    dataset_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    description: Mapped[str] = mapped_column(Text, server_default="", nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, server_default=sa_text('true'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
 class DingtalkFolderStat(Base):
     """钉钉知识库文件夹统计快照（知识缺口页数据源）。
 
@@ -270,22 +293,50 @@ class DingtalkFolderStat(Base):
     fetched_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
 
 
+class DingtalkFileSnapshot(Base):
+    """钉钉知识库文件列表快照（知识加工 → 钉钉知识页数据源）。
+
+    全量遍历操作人可见的全部团队知识库需 25–30 分钟、约 4,500 次节点请求，
+    因此**只在用户手动点「刷新」时**执行；列表接口只读本快照，
+    遍历结果持久化在此表（进程重启 / 容器重建后仍可用），只保留最新一份：
+    payload 为文件字典列表的 JSON（含创建人姓名，前端展示无需再调用钉钉）。
+    """
+    __tablename__ = "dingtalk_file_snapshots"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    file_count: Mapped[int] = mapped_column(Integer, server_default="0", nullable=False)
+    payload: Mapped[str] = mapped_column(Text, nullable=False)
+
+
 # ===== 钉钉知识库 → Dify 定时增量同步（合并自 DingDingKonwledgePipeline）=====
 # 每个同步源自带 cron 字段，不保留独立 jobs 表。表结构由 alembic 0011 创建。
 
 class SyncSource(Base):
-    """同步源：一个钉钉知识库目录 → 一个 Dify 数据集，含 cron 定时表达式。"""
+    """同步源：一个钉钉知识库目录 → 一个外部知识库数据集，含 cron 定时表达式。
+
+    backend_type 决定目标引擎：dify | ragflow。为最小化改动，目标库标识复用
+    dify_dataset_id / dify_dataset_name 两列（对 RAGFlow 存的是其 dataset_id/name），
+    远端文档 ID 复用 SyncDocumentMapping.dify_document_id（对 RAGFlow 存其 document_id）；
+    这样检索召回时的钉钉链接回填对两种引擎自动生效。
+    """
     __tablename__ = "sync_sources"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     workspace_id: Mapped[str] = mapped_column(String(128), nullable=False)
     root_node_id: Mapped[str] = mapped_column(String(128), nullable=False)
     start_dir: Mapped[str] = mapped_column(String(500), server_default="", nullable=False)
+    # 目标引擎：dify（默认，历史行为不变）| ragflow
+    backend_type: Mapped[str] = mapped_column(String(16), server_default="dify", nullable=False)
     dify_dataset_name: Mapped[str] = mapped_column(String(200), nullable=False)
     dify_dataset_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     delete_policy: Mapped[str] = mapped_column(String(10), server_default="keep", nullable=False)  # keep | sync
     cron: Mapped[str] = mapped_column(String(120), server_default="0 2 * * *", nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, server_default=sa_text('true'), nullable=False)
+    # 流水线数据集（runtime_mode=rag_pipeline）的 input form 变量值，JSON 对象字符串，
+    # 如 {"max_chunk_length": 1024, "parent_mode": "full_doc"}。
+    # Dify 的 pipeline/run 接口要求 inputs 携带流水线定义的必填变量，缺失会报 500
+    # "xxx is required in input form"。普通数据集忽略此字段。
+    pipeline_inputs: Mapped[str] = mapped_column(Text, server_default="{}", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
@@ -427,3 +478,21 @@ class DifyDingtalkDocMapping(Base):
     # file=直接上传原文件；text=大文件经 MinerU 解析后 create-by-text
     method: Mapped[str] = mapped_column(String(10), nullable=False, server_default="file")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+
+class DingtalkBinding(Base):
+    """钉钉身份 ↔ 本地用户绑定（H5 免登 / 机器人消息归因）。
+
+    首次免登自动建档：users.username=dd_{dt_userid}、role=viewer（仅问答可见）；
+    绑定表记录 corp/userid/unionid 与钉钉真实姓名，供展示与运营归因。
+    """
+    __tablename__ = "dingtalk_bindings"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"),
+                                               unique=True, index=True)
+    corp_id: Mapped[str] = mapped_column(String(64), nullable=False, server_default="")
+    dt_userid: Mapped[str] = mapped_column(String(128), nullable=False)
+    dt_unionid: Mapped[str | None] = mapped_column(String(128))
+    dt_name: Mapped[str | None] = mapped_column(String(100))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    __table_args__ = (UniqueConstraint("corp_id", "dt_userid", name="uq_dingtalk_binding_corp_user"),)

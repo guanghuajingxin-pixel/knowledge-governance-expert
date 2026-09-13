@@ -270,6 +270,13 @@ services:
       # 本地补丁：知识流水线草稿变量重建文件时，tenant 解析回退查询 pipelines 表，
       # 修复上传文档报「Unable to resolve tenant_id for app <pipeline_id>」。
       - ./patches/workflow.py:/app/api/models/workflow.py:ro
+      # 本地补丁：流水线输入变量必填但缺失时回退默认值，让 Service API（知识同步）
+      # 传 {} 即可按默认分段参数运行 pipeline/run（见 patches/README）。
+      # worker 容器同样挂载了该补丁，两处需同步升级。
+      - ./patches/base_app_generator.py:/app/api/core/app/apps/base_app_generator.py:ro
+      # 本地补丁：rag_pipeline_variables 的 default_value 映射到 VariableEntity.default，
+      # 否则默认值恒为 None，上面的回退补丁无法生效（见 patches/README）。
+      - ./patches/variables_manager.py:/app/api/core/app/app_config/workflow_ui_based_app/variables/manager.py:ro
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5001/health"]
       interval: 30s
@@ -344,6 +351,11 @@ services:
     volumes:
       # Mount the storage directory to the container, for storing user files.
       - ./volumes/app/storage:/app/api/storage
+      # 本地补丁：流水线输入变量必填但缺失时回退默认值（见 patches/README）。
+      # worker 与 api 均会执行 pipeline generator，两边必须同步挂载。
+      - ./patches/base_app_generator.py:/app/api/core/app/apps/base_app_generator.py:ro
+      # 本地补丁：default_value → default 字段映射（见 patches/README），同上双容器挂载。
+      - ./patches/variables_manager.py:/app/api/core/app/app_config/workflow_ui_based_app/variables/manager.py:ro
     healthcheck:
       test: ["CMD-SHELL", "celery -A celery_healthcheck.celery inspect ping"]
       interval: ${COMPOSE_WORKER_HEALTHCHECK_INTERVAL:-30s}
@@ -435,6 +447,11 @@ services:
     profiles:
       - postgresql
     restart: always
+    # 本地新增：暴露到宿主机 5433（避开 dev-postgres 的 5432），
+    # 供宿主机上的 kb-api 只读查询 workflows.rag_pipeline_variables
+    # （流水线分段参数 schema，见 dify_db_url 配置项）。
+    ports:
+      - "5433:5432"
     environment:
       POSTGRES_USER: ${DB_USERNAME:-postgres}
       POSTGRES_PASSWORD: ${DB_PASSWORD:-difyai123456}

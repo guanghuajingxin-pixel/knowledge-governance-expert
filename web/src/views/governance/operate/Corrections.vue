@@ -210,7 +210,7 @@ onMounted(load)
 </script>
 
 <style scoped>
-.corr-page { padding: 16px 20px; }
+.corr-page { padding: 4px 0 24px; }
 .filter-bar {
   display: flex; align-items: center; gap: 12px;
   background: #fff; border: 1px solid var(--line, #E5E7EB); border-radius: 10px;
