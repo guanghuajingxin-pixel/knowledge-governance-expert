@@ -7,7 +7,7 @@
  */
 import { ref, onMounted, reactive, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, Refresh, Edit, Delete } from '@element-plus/icons-vue'
+import { Plus, Refresh, Edit, Delete, MoreFilled } from '@element-plus/icons-vue'
 import {
   listKnowledgeSources,
   createKnowledgeSource,
@@ -18,6 +18,7 @@ import {
 import { listDifyDatasets } from '@/api/dify'
 import { listRagflowDatasets } from '@/api/ragflow'
 import { getDingtalkRefreshStatus } from '@/api/governance'
+import { getSettings } from '@/api/settings'
 import type { KnowledgeSource, KnowledgeSourcePayload, DingTalkWorkspace } from '@/types/knowledge-center'
 
 // 知识库类型配置
@@ -46,6 +47,40 @@ function getTypeTagType(type: string): 'primary' | 'success' | 'warning' | 'info
 const sources = ref<KnowledgeSource[]>([])
 const loading = ref(false)
 const filterType = ref<string>('')
+const viewMode = ref<'table' | 'card'>('card')
+
+// 外部系统访问地址（从 settings 读取，用于构造「跳转到原知识库」链接）
+const difyUiUrl = ref('')   // Dify 前端（从 dify_base_url 剥离 /v1 得到）
+const ragflowUiUrl = ref('') // RAGFlow 前端（从 ragflow_base_url 剥离 /api/v1 得到）
+
+function stripApiSuffix(base: string, suffixes: string[]): string {
+  let v = (base || '').trim()
+  for (const s of suffixes) if (v.endsWith(s)) v = v.slice(0, -s.length)
+  return v.replace(/\/+$/, '')
+}
+
+/** 构造跳转到原始知识库的 URL；构造不出返回空串 */
+function resolveSourceUrl(src: KnowledgeSource): string {
+  switch (src.source_type) {
+    case 'dingtalk_workspace':
+      return `https://alidingsn.dingtalk.com/knowledge/org?workspaceId=${encodeURIComponent(src.external_id)}`
+    case 'dify_dataset':
+      return difyUiUrl.value ? `${difyUiUrl.value}/datasets/${encodeURIComponent(src.external_id)}` : ''
+    case 'ragflow_dataset':
+      return ragflowUiUrl.value ? `${ragflowUiUrl.value}/#/dataset/${encodeURIComponent(src.external_id)}` : ''
+    default:
+      return ''
+  }
+}
+
+function openSource(src: KnowledgeSource) {
+  const url = resolveSourceUrl(src)
+  if (!url) {
+    ElMessage.info('该类型暂不支持跳转到原知识库')
+    return
+  }
+  window.open(url, '_blank', 'noopener')
+}
 
 // 弹窗
 const dialogVisible = ref(false)
@@ -303,6 +338,17 @@ async function handleToggle(source: KnowledgeSource) {
   }
 }
 
+/** 卡片右上角「...」下拉命令 */
+function onCardCommand(cmd: string, src: KnowledgeSource) {
+  if (cmd === 'edit') {
+    openEditDialog(src)
+  } else if (cmd === 'toggle') {
+    handleToggle(src)
+  } else if (cmd === 'delete') {
+    handleDelete(src)
+  }
+}
+
 // 统计
 const stats = computed(() => ({
   total: sources.value.length,
@@ -313,8 +359,15 @@ const stats = computed(() => ({
   enabled: sources.value.filter((s) => s.enabled).length,
 }))
 
-onMounted(() => {
+onMounted(async () => {
   loadSources()
+  try {
+    const s = await getSettings()
+    difyUiUrl.value = stripApiSuffix((s.dify_base_url?.value as string) || '', ['/v1', '/v1/'])
+    ragflowUiUrl.value = stripApiSuffix((s.ragflow_base_url?.value as string) || '', ['/api/v1', '/api/v1/'])
+  } catch {
+    // 设置读取失败则跳过跳转 URL，卡片仍可查看
+  }
 })
 </script>
 
@@ -358,13 +411,70 @@ onMounted(() => {
             {{ opt.label }}
           </el-radio-button>
         </el-radio-group>
+        <el-radio-group v-model="viewMode" size="small" style="margin-left: 12px">
+          <el-radio-button value="card">卡片视图</el-radio-button>
+          <el-radio-button value="table">列表视图</el-radio-button>
+        </el-radio-group>
         <div class="filter-actions">
           <el-button :icon="Refresh" :loading="loading" @click="loadSources">刷新</el-button>
           <el-button type="primary" :icon="Plus" @click="openAddDialog">新增知识库</el-button>
         </div>
       </div>
 
-      <el-table :data="sources" v-loading="loading" stripe style="width: 100%" empty-text="暂无知识库登记，点击「新增知识库」新增">
+      <!-- ======== 卡片视图（默认） ======== -->
+      <div v-if="viewMode === 'card'" class="ks-grid" v-loading="loading">
+        <el-card
+          v-for="src in sources"
+          :key="src.id"
+          shadow="hover"
+          class="ks-card"
+          :class="{ 'ks-card--disabled': !src.enabled }"
+          @click="openSource(src)"
+        >
+          <!-- 右上角 ... 菜单 -->
+          <el-dropdown trigger="click" @command="(cmd: string) => onCardCommand(cmd, src)">
+            <el-button class="ks-card-more" text circle :icon="MoreFilled" @click.stop />
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item command="edit" :icon="Edit">编辑</el-dropdown-item>
+                <el-dropdown-item command="toggle" divided>
+                  {{ src.enabled ? '停用' : '启用' }}
+                </el-dropdown-item>
+                <el-dropdown-item command="delete" divided :icon="Delete" style="color: var(--el-color-danger)">删除</el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
+
+          <div class="ks-card-top">
+            <el-tag :type="getTypeTagType(src.source_type)" size="small" effect="light">
+              {{ getTypeLabel(src.source_type) }}
+            </el-tag>
+            <el-tag
+              v-if="isRefreshing(src as KnowledgeSource)"
+              size="small"
+              type="warning"
+              effect="light"
+            >目录获取中…</el-tag>
+            <span v-else-if="!src.enabled" size="small" class="ks-card-disabled-tag">已停用</span>
+          </div>
+          <div class="ks-card-name" :title="src.name">{{ src.name }}</div>
+          <div class="ks-card-desc">{{ src.description || '点击卡片跳转到原知识库' }}</div>
+          <div class="ks-card-meta">
+            <span class="external-id">{{ src.external_id }}</span>
+          </div>
+        </el-card>
+        <el-empty v-if="!loading && sources.length === 0" description="暂无知识库登记，点击「新增知识库」新增" />
+      </div>
+
+      <!-- ======== 列表视图 ======== -->
+      <el-table
+        v-else
+        :data="sources"
+        v-loading="loading"
+        stripe
+        style="width: 100%"
+        empty-text="暂无知识库登记，点击「新增知识库」新增"
+      >
         <el-table-column prop="name" label="知识库名称" min-width="180">
           <template #default="{ row }">
             <div class="source-name">
@@ -387,14 +497,6 @@ onMounted(() => {
         <el-table-column prop="description" label="描述" min-width="200">
           <template #default="{ row }">
             <span class="desc">{{ row.description || '—' }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="配置" min-width="160">
-          <template #default="{ row }">
-            <span v-if="row.config && Object.keys(row.config).length" class="config-info">
-              {{ Object.entries(row.config).map(([k, v]) => `${k}: ${v}`).join(' | ') }}
-            </span>
-            <span v-else class="desc">—</span>
           </template>
         </el-table-column>
         <el-table-column prop="enabled" label="启用" width="80" align="center">
@@ -632,12 +734,6 @@ onMounted(() => {
   font-size: 13px;
 }
 
-.config-info {
-  font-size: 12px;
-  color: #666;
-  font-family: 'Menlo', 'Consolas', monospace;
-}
-
 .action-btns {
   display: flex;
   gap: 4px;
@@ -708,5 +804,82 @@ onMounted(() => {
   font-size: 12px;
   font-weight: 400;
   color: var(--el-text-color-secondary);
+}
+
+/* ======== 卡片视图 ======== */
+.ks-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 14px;
+  min-height: 120px;
+}
+
+.ks-card {
+  position: relative;
+  cursor: pointer;
+  transition: transform 0.15s, box-shadow 0.15s;
+}
+.ks-card:hover {
+  transform: translateY(-2px);
+}
+.ks-card :deep(.el-card__body) {
+  padding: 16px 18px 14px;
+}
+
+.ks-card--disabled {
+  opacity: 0.62;
+}
+
+.ks-card-more {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 2;
+  color: var(--el-text-color-secondary);
+}
+.ks-card-more:hover {
+  color: var(--el-text-color-primary);
+}
+
+.ks-card-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.ks-card-disabled-tag {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+
+.ks-card-name {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--el-text-color-primary);
+  line-height: 1.4;
+  margin-bottom: 6px;
+  word-break: break-all;
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.ks-card-desc {
+  font-size: 13px;
+  color: var(--el-text-color-secondary);
+  line-height: 1.5;
+  min-height: 20px;
+  margin-bottom: 10px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.ks-card-meta {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
 }
 </style>
