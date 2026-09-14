@@ -29,8 +29,8 @@ async function confirm() {
     await updatePreviewSettings(props.sourceId, props.items.filter((item) => item.node_id).map((item) => ({
       node_id: item.node_id!, name: item.name || item.doc, category: item.category || 'DOCUMENT', enabled: item.enabled !== false,
     })))
-    await syncSource(props.sourceId)
-    ElMessage.success('同步任务已启动，可在运行监控中查看结果')
+    const res = await syncSource(props.sourceId) as { message?: string } | undefined
+    ElMessage.success(res?.message || '同步任务已启动，可在同步队列查看结果')
     emit('done')
     emit('update:visible', false)
   } finally { running.value = false }

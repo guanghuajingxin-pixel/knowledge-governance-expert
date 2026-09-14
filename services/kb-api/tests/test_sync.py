@@ -13,7 +13,7 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from kb_common.models import SyncSource, SyncRun, SyncDocumentMapping, SyncLog, SyncFailure
+from kb_common.models import SyncSource, SyncRun, SyncDocumentMapping, SyncLog, SyncFailure, SyncTask
 from app.services.sync import engine, runtime
 from app.services.sync.dify_sync_client import DifyClient, DifyError
 
@@ -122,7 +122,7 @@ def make_fake_settings(**overrides):
 class EngineTests(unittest.TestCase):
     def setUp(self):
         self.sql = create_engine('sqlite://', poolclass=StaticPool, connect_args={'check_same_thread': False})
-        for model in (SyncSource, SyncRun, SyncDocumentMapping, SyncLog, SyncFailure):
+        for model in (SyncSource, SyncRun, SyncDocumentMapping, SyncLog, SyncFailure, SyncTask):
             model.__table__.create(self.sql)
         self.sessions = sessionmaker(bind=self.sql, expire_on_commit=False)
         with self.sessions() as db:

@@ -129,3 +129,49 @@ export interface SourceStats {
   doc_count: number | null
   last_run: Run | null
 }
+
+// ===== 同步队列：逐文档任务 =====
+export interface SyncTask {
+  id: number
+  run_id: number | null
+  source_id: number | null
+  kind: string
+  action: 'create' | 'update' | 'delete'
+  node_id: string | null
+  name: string
+  file_ext: string
+  file_size: number | null
+  dataset_id: string
+  dataset_name: string
+  status: 'pending' | 'running' | 'success' | 'failed'
+  error: string
+  trigger: 'manual' | 'schedule'
+  operator: string
+  retry_count: number
+  started_at: string | null
+  finished_at: string | null
+  created_at: string
+  /** 列表接口附加：同步源名称 */
+  source_name?: string
+  /** 列表接口附加：处理时长（秒） */
+  duration_sec?: number | null
+}
+
+export interface TaskQuery {
+  tab: 'pending' | 'running' | 'done'
+  status?: string
+  source_id?: number
+  ext?: string
+  duration?: string
+  keyword?: string
+  start_from?: string
+  start_to?: string
+  page?: number
+  size?: number
+}
+
+export interface TaskListResponse {
+  items: SyncTask[]
+  total: number
+  tabs: { pending: number; running: number; done: number }
+}

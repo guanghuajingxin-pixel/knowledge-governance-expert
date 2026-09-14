@@ -92,6 +92,8 @@ def knowledge_search_tool(query: str, top_k: int = 8, config: RunnableConfig = N
         "ragflow_dataset_ids": ragflow_dataset_ids,
         "kb_ids": kb_ids,
         "top_k": effective_top_k,
+        # 问答线程 ID：kb-api 据此回溯用户身份，执行检索返回脱敏策略
+        "thread_id": thread_id,
     }
     data: dict[str, Any] | None = None
     last_err: Exception | None = None
@@ -311,6 +313,8 @@ def dingtalk_read_doc_tool(node_id: str, title: str = "", extension: str = "", c
         "node_id": node_id,
         "title": title or "",
         "extension": extension or "",
+        # 问答线程 ID：kb-api 据此回溯用户身份，执行正文送LLM前脱敏
+        "thread_id": thread_id,
     }
     try:
         with httpx.Client(timeout=min(60.0, budget)) as client:

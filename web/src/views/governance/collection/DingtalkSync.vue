@@ -38,7 +38,32 @@ function formatSize(bytes: number) {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`
 }
+// Dify 知识库列表持久缓存 1 小时（与 ManualUpload 共用一份）：
+// 命中秒开下拉并后台校准，切「文档同步」页签不再等 Dify API
+const DS_STORE_KEY = 'kge:dify_datasets_v1'
+const DS_STORE_TTL = 3_600_000
+
 async function loadDatasets() {
+  try {
+    const raw = localStorage.getItem(DS_STORE_KEY)
+    if (raw) {
+      const c = JSON.parse(raw) as { ts: number; items: DifyDataset[] }
+      if (Date.now() - c.ts <= DS_STORE_TTL && c.items?.length) {
+        datasets.value = c.items
+        if (!datasets.value.some((item) => item.id === targetDatasetId.value)) targetDatasetId.value = datasets.value[0]?.id || ''
+        listDifyDatasets().then((response) => {
+          const items = response.error ? [] : response.items || []
+          if (items.length) {
+            datasets.value = items
+            datasetsError.value = response.error || ''
+            if (!datasets.value.some((item) => item.id === targetDatasetId.value)) targetDatasetId.value = datasets.value[0]?.id || ''
+            try { localStorage.setItem(DS_STORE_KEY, JSON.stringify({ ts: Date.now(), items })) } catch { /* 忽略 */ }
+          }
+        }).catch(() => { /* 后台校准失败保留缓存 */ })
+        return
+      }
+    }
+  } catch { /* 缓存读取失败走网络 */ }
   datasetsLoading.value = true
   datasetsError.value = ''
   try {
@@ -46,6 +71,9 @@ async function loadDatasets() {
     datasets.value = response.items || []
     datasetsError.value = response.error || ''
     if (!datasets.value.some((item) => item.id === targetDatasetId.value)) targetDatasetId.value = datasets.value[0]?.id || ''
+    if (datasets.value.length) {
+      try { localStorage.setItem(DS_STORE_KEY, JSON.stringify({ ts: Date.now(), items: datasets.value })) } catch { /* 忽略 */ }
+    }
   } catch (e: any) {
     datasets.value = []
     targetDatasetId.value = ''
@@ -55,6 +83,10 @@ async function loadDatasets() {
 
 // ============ 钉钉按目录查询（知识库 + 文件夹 → 查询） ============
 const CACHE_TTL = 5 * 60 * 1000 // 浏览器内存缓存 5 分钟，不持久化
+// 知识库列表持久缓存 1 小时：钉钉侧接口重（1.5~3s）且列表极少变化，
+// 命中秒开级联选择器，后台校准；「强制刷新」绕过
+const WS_STORE_KEY = 'kge:dingtalk_workspaces_v1'
+const WS_STORE_TTL = 3_600_000
 const wsCache = ref<{ ts: number; items: DingTalkWorkspace[] } | null>(null)
 const nodesCache = new Map<string, { ts: number; items: DingTalkNode[] }>()
 
@@ -91,10 +123,35 @@ const filteredFiles = computed(() => {
 })
 const pageFiles = computed(() => filteredFiles.value.slice((page.value - 1) * size.value, page.value * size.value))
 
+function readWsStore(): DingTalkWorkspace[] | null {
+  try {
+    const raw = localStorage.getItem(WS_STORE_KEY)
+    if (!raw) return null
+    const c = JSON.parse(raw) as { ts: number; items: DingTalkWorkspace[] }
+    return Date.now() - c.ts <= WS_STORE_TTL && c.items?.length ? c.items : null
+  } catch { return null }
+}
+function writeWsStore(items: DingTalkWorkspace[]) {
+  try { localStorage.setItem(WS_STORE_KEY, JSON.stringify({ ts: Date.now(), items })) } catch { /* 忽略 */ }
+}
+
 async function loadWorkspaces(force = false) {
   if (!force && wsCache.value && Date.now() - wsCache.value.ts < CACHE_TTL) {
     workspaces.value = wsCache.value.items
     return
+  }
+  // 持久缓存命中：立即填充（秒开），后台静默校准并回写两层缓存
+  if (!force) {
+    const stored = readWsStore()
+    if (stored) {
+      workspaces.value = stored
+      wsCache.value = { ts: Date.now(), items: stored }
+      fetchDingTalkWorkspaces().then((res) => {
+        const items = res.items || []
+        if (items.length) { workspaces.value = items; wsCache.value = { ts: Date.now(), items }; writeWsStore(items) }
+      }).catch(() => { /* 后台校准失败保留缓存数据 */ })
+      return
+    }
   }
   wsLoading.value = true
   wsError.value = ''
@@ -103,6 +160,7 @@ async function loadWorkspaces(force = false) {
     workspaces.value = res.items || []
     wsError.value = res.error || ''
     wsCache.value = { ts: Date.now(), items: workspaces.value }
+    if (workspaces.value.length) writeWsStore(workspaces.value)
   } catch (e: any) {
     wsError.value = e?.response?.data?.detail || e?.message || '获取钉钉知识库失败'
   } finally { wsLoading.value = false }

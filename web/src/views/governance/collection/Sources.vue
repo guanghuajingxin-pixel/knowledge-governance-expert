@@ -31,31 +31,69 @@ function docsOf(id: number) { return statsMap.value[id]?.doc_count ?? '—' }
 function workspaceName(id: string) { return workspaces.value.find((w) => w.workspaceId === id)?.name || id }
 function isRunning(id: number) { return statsMap.value[id]?.last_run?.status === 'running' }
 
-async function refresh(silent = false) {
+// ---------- 页面缓存（1 小时）：列表/统计/知识库名秒开，后台校准 ----------
+// 首屏瓶颈是钉钉 workspaces 接口（1.5~3s）；缓存命中 <50ms 出全表。
+const PAGE_CACHE_KEY = 'kge:sync_sources_page_v1'
+const PAGE_CACHE_TTL = 3_600_000
+interface PageCache { savedAt: number; sources: Source[]; workspaces: Workspace[]; stats: Record<number, SourceStats> }
+
+function readPageCache(): PageCache | null {
+  try {
+    const raw = localStorage.getItem(PAGE_CACHE_KEY)
+    if (!raw) return null
+    const c = JSON.parse(raw) as PageCache
+    return Date.now() - c.savedAt <= PAGE_CACHE_TTL ? c : null
+  } catch { return null }
+}
+function writePageCache() {
+  try {
+    localStorage.setItem(PAGE_CACHE_KEY, JSON.stringify({
+      savedAt: Date.now(), sources: sources.value, workspaces: workspaces.value, stats: statsMap.value,
+    } as PageCache))
+  } catch { /* 隐私模式等写入失败可忽略 */ }
+}
+function bustPageCache() { try { localStorage.removeItem(PAGE_CACHE_KEY) } catch { /* 忽略 */ } }
+
+function syncPolling() {
+  // 有运行中任务时启动 3s 轮询（只轮询轻量的列表+统计），全部结束自动停止
+  const hasRunning = sources.value.some((s) => isRunning(s.id))
+  if (hasRunning && polling.value === null) polling.value = window.setInterval(() => fetchCore(true), 3000)
+  if (!hasRunning && polling.value !== null) { window.clearInterval(polling.value); polling.value = null }
+}
+
+async function fetchCore(silent = false) {
+  // 源列表 + 批量统计（纯数据库查询，索引齐全 ~30ms）——先出表格；
+  // 不等钉钉知识库名接口，拿不到前 workspaceName 显示 workspace_id
   if (loading.value) return
   if (!silent) loading.value = true
   try {
-    // 一次并发拿回：源列表 + 全部源的统计（原先还要逐源请求 /sources/{id}/stats，
-    // N 个源就是 N 个请求，运行中每 3 秒重复一轮，后端连接池会被瞬间打满）
-    // 知识库名称仅用于展示，静默轮询且本地已有时不再重复拉（钉钉侧接口较重）
-    const needWs = !silent || workspaces.value.length === 0
-    const [list, statsRes, ws] = await Promise.all([
+    const [list, statsRes] = await Promise.all([
       listSources(),
       sourcesStatsAll().catch(() => ({ items: [] as SourceStatsItem[] })),
-      needWs ? listWorkspaces().catch(() => []) : Promise.resolve(workspaces.value),
     ])
     const next: Record<number, SourceStats> = {}
     for (const it of statsRes.items) {
       next[it.source_id] = { doc_count: it.doc_count, last_run: it.last_run }
     }
     sources.value = list
-    workspaces.value = ws
     statsMap.value = next
-    // 有运行中任务时启动 3s 轮询，全部结束后自动停止（按钮恢复“立即同步”）。
-    const hasRunning = list.some((s) => isRunning(s.id))
-    if (hasRunning && polling.value === null) polling.value = window.setInterval(() => refresh(true), 3000)
-    if (!hasRunning && polling.value !== null) { window.clearInterval(polling.value); polling.value = null }
+    writePageCache()
+    syncPolling()
   } finally { if (!silent) loading.value = false }
+}
+
+async function fetchWorkspaces() {
+  // 钉钉侧接口较重（1.5~3s），绝不阻塞首屏；失败时知识库名降级显示 workspace_id
+  try {
+    const ws = await listWorkspaces()
+    if (ws.length) { workspaces.value = ws; writePageCache() }
+  } catch { /* 降级为 ID 显示 */ }
+}
+
+async function refresh() {
+  // 增删改/启停后主动刷新：清缓存直取最新数据
+  bustPageCache()
+  await fetchCore(false)
 }
 
 function openAdd() { editingSource.value = null; formVisible.value = true }
@@ -137,7 +175,7 @@ async function runNow(s: Source) {
       id: -s.id, source_id: s.id, trigger: 'manual', status: 'running', started_at: new Date().toISOString(),
       finished_at: null, total: 0, created_count: 0, updated_count: 0, deleted_count: 0, failed_count: 0, message: '',
     } }
-    if (polling.value === null) polling.value = window.setInterval(() => refresh(true), 3000)
+    if (polling.value === null) polling.value = window.setInterval(() => fetchCore(true), 3000)
     emit('refresh-monitor')
   } catch (error) {
     if (error !== 'cancel') { /* request interceptor displays API errors */ }
@@ -151,7 +189,22 @@ function onMore(command: string, row: Source) {
   else if (command === 'delete') remove(row)
 }
 
-onMounted(refresh)
+onMounted(() => {
+  const cached = readPageCache()
+  if (cached) {
+    // ① 1 小时内缓存秒开（<50ms 出全表：列表+统计+知识库名），后台再校准列表与统计
+    sources.value = cached.sources
+    workspaces.value = cached.workspaces
+    statsMap.value = cached.stats
+    syncPolling()
+    fetchCore(true)
+  } else {
+    // ② 无缓存：先出列表（纯数据库查询 ~50ms），统计同行；知识库名后台补
+    fetchCore(false)
+  }
+  // 知识库名缺失（无缓存/过期/上次拉取失败）才调钉钉接口，绝不阻塞首屏
+  if (!workspaces.value.length) fetchWorkspaces()
+})
 onBeforeUnmount(() => { if (polling.value !== null) { window.clearInterval(polling.value); polling.value = null } })
 </script>
 
@@ -171,6 +224,13 @@ onBeforeUnmount(() => { if (polling.value !== null) { window.clearInterval(polli
         <template #default="{ row }">
           {{ workspaceName(row.workspace_id) }}
           <div style="color:var(--el-text-color-secondary);font-size:12px">{{ row.start_dir || '根目录' }}</div>
+        </template>
+      </el-table-column>
+      <el-table-column label="目标知识库类型" width="110">
+        <template #default="{ row }">
+          <el-tag :type="row.backend_type === 'ragflow' ? 'success' : 'primary'" size="small">
+            {{ row.backend_type === 'ragflow' ? 'RAGFlow' : 'Dify' }}
+          </el-tag>
         </template>
       </el-table-column>
       <el-table-column label="目标知识库" min-width="120">
@@ -207,7 +267,7 @@ onBeforeUnmount(() => { if (polling.value !== null) { window.clearInterval(polli
           </div>
         </template>
       </el-table-column>
-      <template #empty><div style="padding:24px;color:var(--el-text-color-secondary)">暂无同步源，点击右上角新增</div></template>
+    <template #empty><div style="padding:24px;color:var(--el-text-color-secondary)">暂无同步任务，点击右上角新增同步任务</div></template>
     </el-table>
 
     <SourceFormDialog v-model:visible="formVisible" :source="editingSource" @saved="onSaved" />

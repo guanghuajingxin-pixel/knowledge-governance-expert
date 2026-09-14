@@ -50,3 +50,6 @@ dify/docker/*
 dify/docker/patches/*
 !dify/docker/patches/README.md
 !dify/docker/patches/*.py
+
+# 凭据文件（含真实密码，严禁提交）
+CREDENTIALS.md

@@ -49,7 +49,31 @@ function validateFile(file: UploadFile) {
   }
 }
 
+// Dify 知识库列表持久缓存 1 小时：listDifyDatasets 走 Dify API（1~3s），
+// 命中秒开下拉并后台校准；上传前 extensions/大小限制仍实时拉取（watch targetId）
+const DS_STORE_KEY = 'kge:dify_datasets_v1'
+const DS_STORE_TTL = 3_600_000
+
 async function refresh() {
+  // ① 持久缓存命中：先出列表，后台静默校准
+  try {
+    const raw = localStorage.getItem(DS_STORE_KEY)
+    if (raw) {
+      const c = JSON.parse(raw) as { ts: number; items: typeof datasets.value }
+      if (Date.now() - c.ts <= DS_STORE_TTL && c.items?.length) {
+        datasets.value = c.items
+        listDifyDatasets().then((response) => {
+          const items = response.error ? [] : response.items || []
+          if (items.length) {
+            datasets.value = items
+            localStorage.setItem(DS_STORE_KEY, JSON.stringify({ ts: Date.now(), items }))
+          }
+        }).catch(() => { /* 后台校准失败保留缓存 */ })
+        return
+      }
+    }
+  } catch { /* 缓存读取失败走网络 */ }
+  // ② 未命中：正常拉取并回写缓存
   loading.value = true
   error.value = ''
   try {
@@ -57,6 +81,9 @@ async function refresh() {
     error.value = response.error || ''
     datasets.value = response.error ? [] : response.items || []
     if (!datasets.value.some((item) => item.id === targetId.value)) targetId.value = ''
+    if (datasets.value.length) {
+      try { localStorage.setItem(DS_STORE_KEY, JSON.stringify({ ts: Date.now(), items: datasets.value })) } catch { /* 忽略 */ }
+    }
   } catch (e: any) {
     error.value = e?.response?.data?.detail || e?.message || '加载知识库失败'
     datasets.value = []

@@ -242,12 +242,40 @@ class SyncRunOut(BaseModel):
 class SyncFailureOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
-    run_id: int
+    run_id: int | None
     source_id: int
     node_id: str | None
     name: str
     error: str
     created_at: datetime
+
+
+class SyncTaskOut(BaseModel):
+    """同步队列：逐文档任务记录输出。"""
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    run_id: int | None
+    source_id: int | None
+    kind: str
+    action: str
+    node_id: str | None
+    name: str
+    file_ext: str
+    file_size: int | None
+    dataset_id: str
+    dataset_name: str
+    status: str
+    error: str
+    trigger: str
+    operator: str
+    retry_count: int
+    started_at: datetime | None
+    finished_at: datetime | None
+    created_at: datetime
+
+
+class SyncTaskBatchIn(BaseModel):
+    ids: list[int]
 
 
 class SyncLogOut(BaseModel):

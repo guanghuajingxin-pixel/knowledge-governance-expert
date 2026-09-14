@@ -42,7 +42,7 @@ onMounted(() => { app.refreshAll().catch(() => {}) })
 <template>
   <div>
     <div class="page-head">
-      <div><h2>工作台</h2><div class="desc">各同步源运行状态与最近同步情况</div></div>
+      <div><h2>工作台</h2><div class="desc">各同步任务运行状态与最近同步情况</div></div>
       <div style="display:flex;gap:10px">
         <el-button @click="router.push('/sources')">+ 新增同步任务</el-button>
         <el-button type="primary" @click="runAll">立即同步全部</el-button>
@@ -58,7 +58,7 @@ onMounted(() => { app.refreshAll().catch(() => {}) })
 
     <div class="card">
       <div class="sect-title">同步源概览</div>
-      <div v-if="!app.sources.length" class="empty">暂无同步源，点击右上角新增</div>
+      <div v-if="!app.sources.length" class="empty">暂无同步任务，点击右上角新增同步任务</div>
       <div v-for="s in app.sources" :key="s.id" class="src-card">
         <div class="l">
           <div class="name">{{ s.name }} <StatusPill :status="statusOf(s)" /></div>

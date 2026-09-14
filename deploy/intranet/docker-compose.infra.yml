@@ -87,11 +87,52 @@ services:
     mem_limit: 1g
     networks: [kge-network]
 
+  # XXL-Job 调度中心：定时同步调度（kb-api 内嵌执行器注册到 admin）。
+  # 建表 SQL 仅首次初始化数据卷时执行；admin 默认账号 admin/123456，上线后请改密码。
+  xxl-job-mysql:
+    image: mysql:8.0
+    container_name: kge-xxl-job-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${XXL_JOB_MYSQL_PASSWORD:-xxljob123}
+      MYSQL_DATABASE: xxl_job
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - xxl-job-mysql-data:/var/lib/mysql
+      - ../xxl-job/tables_xxl_job.sql:/docker-entrypoint-initdb.d/tables_xxl_job.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p${XXL_JOB_MYSQL_PASSWORD:-xxljob123}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks: [kge-network]
+
+  xxl-job-admin:
+    image: xuxueli/xxl-job-admin:2.4.1
+    container_name: kge-xxl-job-admin
+    restart: unless-stopped
+    depends_on:
+      xxl-job-mysql:
+        condition: service_healthy
+    environment:
+      PARAMS: >-
+        --spring.datasource.url=jdbc:mysql://xxl-job-mysql:3306/xxl_job?useUnicode=true&characterEncoding=UTF-8&autoReconnect=true&serverTimezone=Asia/Shanghai
+        --spring.datasource.username=root
+        --spring.datasource.password=${XXL_JOB_MYSQL_PASSWORD:-xxljob123}
+        --xxl.job.accessToken=${XXL_JOB_ACCESS_TOKEN:-}
+      JAVA_OPTS: "-Xms256m -Xmx512m"
+    ports:
+      - "${XXL_JOB_ADMIN_PORT:-8080}:8080"
+    mem_limit: 1536m
+    networks: [kge-network]
+
 volumes:
   postgres-data: {}
   redis-data: {}
   es-data: {}
   minio-data: {}
+  xxl-job-mysql-data: {}
 
 networks:
   kge-network:

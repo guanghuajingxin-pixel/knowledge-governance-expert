@@ -54,6 +54,105 @@ class RetrieveIn(BaseModel):
     ragflow_dataset_ids: list[str] | None = None   # RAGFlow 数据集
     kb_ids: list[str] | None = None                # 平台本地 ES 知识库
     top_k: int = 8
+    thread_id: str = ""                            # 问答线程 ID：回溯用户身份以执行脱敏策略
+
+
+async def _resolve_thread_user(s: AsyncSession, thread_id: str):
+    """从问答线程 ID 回溯用户身份 (user_id, role)，供脱敏策略联合判断。
+
+    格式（见 search._prepare_qa）：UUID=会话 ID（长期记忆）；
+    nomem-{会话UUID}-{rand}；anon-{用户UUID}-{rand}。解析失败按最严格 viewer 处理。
+    """
+    import uuid as _uuid
+    from kb_common.models import ChatSession, User
+
+    tid = (thread_id or "").strip()
+    if not tid:
+        return None, "viewer"
+    if tid.startswith("anon-"):
+        try:
+            uid = _uuid.UUID(tid[5:41])
+        except ValueError:
+            return None, "viewer"
+        u = (await s.execute(select(User).where(User.id == uid))).scalar_one_or_none()
+        return (u.id if u else None), (u.role if u else "viewer")
+    sid = None
+    if tid.startswith("nomem-"):
+        try:
+            sid = _uuid.UUID(tid[6:42])
+        except ValueError:
+            return None, "viewer"
+    else:
+        try:
+            sid = _uuid.UUID(tid)
+        except ValueError:
+            return None, "viewer"
+    sess = (await s.execute(select(ChatSession).where(ChatSession.id == sid))).scalar_one_or_none()
+    if not sess or not sess.user_id:
+        return None, "viewer"
+    u = (await s.execute(select(User).where(User.id == sess.user_id))).scalar_one_or_none()
+    return sess.user_id, (u.role if u else "viewer")
+
+
+async def _mask_pre_llm(s: AsyncSession, hits: list[dict], query: str, *,
+                        thread_id: str = "", scope_ids: set[str] | None = None,
+                        scene: str = "chat", text_fields: tuple[str, ...] = ("content", "text"),
+                        title_fields: tuple[str, ...] = ("document_title", "title")) -> tuple[list[dict], dict | None]:
+    """送LLM前脱敏（底线节点）：LLM 不接触未脱敏明文。
+
+    返回 (脱敏后 hits, masking 元信息)。引擎失败按失败策略兜底：
+    block=清空阻断 / deny=提示无权限 / non_sensitive=仅按内置正则降级遮蔽。
+    """
+    from app.services import masking as masking_svc
+
+    user_id, role = await _resolve_thread_user(s, thread_id)
+    ctx = await masking_svc.load_mask_context(
+        s, scene=scene, user_role=role, user_id=user_id,
+        scope_ids=scope_ids or set(), node="pre_llm")
+    if ctx is None:
+        return hits, None
+    gcfg = await masking_svc.get_global_config(s)
+    hint = gcfg.get("hint") or "部分内容因权限隐藏"
+    try:
+        kept, _detail, summary = masking_svc.mask_hits(hits, ctx, text_fields=text_fields)
+        for h in kept:
+            for tf in title_fields:
+                if h.get(tf):
+                    h[tf] = masking_svc.mask_title(h[tf], ctx)
+        masked_count = sum(h.count for h in summary)
+        if masked_count:
+            masking_svc.log_masking_async(
+                user_id=user_id, username="", scene=scene, node="pre_llm",
+                query=masking_svc.mask_text(query or "", ctx)[0],
+                policy_ids=ctx.policy_ids, rule_hits=summary, masked_count=masked_count,
+                exempted=bool(ctx.exempt_types))
+        return kept, {"applied": True, "masked_count": masked_count}
+    except Exception:  # noqa: BLE001 - 引擎失败走兜底，绝不让明文带出
+        import logging
+        logging.getLogger(__name__).exception("pre-LLM masking engine failed")
+        strict = 0
+        strategy = gcfg.get("failure_strategy", "non_sensitive")
+        for p in ctx.policies:
+            fs = (p.get("failure_strategy") or "") if isinstance(p, dict) else None
+            if fs not in masking_svc.FAILURE_STRATEGIES:
+                continue
+            rank = {"block": 3, "deny": 2, "non_sensitive": 1}[fs]
+            strict = max(strict, rank)
+            strategy = {3: "block", 2: "deny", 1: "non_sensitive"}[strict]
+        if strategy == "block":
+            masking_svc.log_masking_async(
+                user_id=user_id, username="", scene=scene, node="pre_llm",
+                query="", policy_ids=ctx.policy_ids, rule_hits=[], masked_count=0, blocked=True)
+            return [], {"applied": True, "blocked": True}
+        if strategy == "deny":
+            masking_svc.log_masking_async(
+                user_id=user_id, username="", scene=scene, node="pre_llm",
+                query="", policy_ids=ctx.policy_ids, rule_hits=[], masked_count=0, blocked=True)
+            return [], {"applied": True, "blocked": True, "message": hint}
+        fb = masking_svc.MaskContext()
+        fb.actions = {et: "partial" for et in ("phone", "id_card", "bank_card", "email")}
+        kept, _d, summary = masking_svc.mask_hits(hits, fb, text_fields=text_fields)
+        return kept, {"applied": True, "masked_count": sum(h.count for h in summary), "degraded": True}
 
 
 @router.post("/internal/kb/retrieve", dependencies=[Depends(_verify_internal_token)])
@@ -190,7 +289,19 @@ async def internal_kb_retrieve(body: RetrieveIn, s: AsyncSession = Depends(get_s
 
     if local_hits:
         hits = hits + local_hits
-    return {"results": hits, "total": len(hits)}
+
+    # 送LLM前脱敏（底线节点）：LLM 不得接触未脱敏明文
+    scope_ids = {f"kb:{k}" for k in kb_ids if k}
+    libs = (await s.execute(select(KnowledgeLibrary))).scalars().all()
+    ds2lib = {r.dataset_id: r.id for r in libs}
+    scope_ids |= {f"library:{ds2lib[d]}" for d in list(dataset_ids) + list(ragflow_ids) if d in ds2lib}
+    hits, masking_meta = await _mask_pre_llm(
+        s, hits, body.query, thread_id=body.thread_id, scope_ids=scope_ids,
+        scene="chat", text_fields=("content", "text"), title_fields=("document_title", "title"))
+    resp = {"results": hits, "total": len(hits)}
+    if masking_meta:
+        resp["masking"] = masking_meta
+    return resp
 
 
 @router.post("/internal/process/context-expand", dependencies=[Depends(_verify_internal_token)])
@@ -304,6 +415,39 @@ class DingTalkContentIn(BaseModel):
     node_id: str
     extension: str = ""
     title: str = ""
+    thread_id: str = ""   # 问答线程 ID：回溯用户身份以执行脱敏策略
+
+
+async def _mask_dingtalk_content(s: AsyncSession, data: dict, thread_id: str) -> dict:
+    """钉钉文档正文送LLM前脱敏：与知识检索同一底线节点、同一策略引擎。"""
+    from app.services import masking as masking_svc
+
+    ctx = None
+    try:
+        user_id, role = await _resolve_thread_user(s, thread_id)
+        ctx = await masking_svc.load_mask_context(
+            s, scene="chat", user_role=role, user_id=user_id, scope_ids=set(), node="pre_llm")
+    except Exception:  # noqa: BLE001 - 脱敏装载失败不阻断正文返回，引擎层仍兜底
+        ctx = None
+    if ctx is None:
+        return data
+    content = data.get("content") or ""
+    try:
+        masked, summary = masking_svc.mask_text(content, ctx)
+        if summary:
+            masked_count = sum(h.count for h in summary)
+            masking_svc.log_masking_async(
+                user_id=user_id, username="", scene="chat", node="pre_llm",
+                query=(data.get("title") or "")[:200], policy_ids=ctx.policy_ids,
+                rule_hits=summary, masked_count=masked_count, exempted=bool(ctx.exempt_types))
+            data["content"] = masked
+            data["masking"] = {"applied": True, "masked_count": masked_count}
+    except Exception:  # noqa: BLE001 - 引擎失败降级为内置正则遮蔽
+        fb = masking_svc.MaskContext()
+        fb.actions = {et: "partial" for et in ("phone", "id_card", "bank_card", "email")}
+        data["content"] = masking_svc.mask_text(content, fb)[0]
+        data["masking"] = {"applied": True, "degraded": True}
+    return data
 
 
 # 可由 dws doc read 直读 Markdown 的在线/文本类文档扩展名
@@ -470,13 +614,13 @@ async def internal_dingtalk_content(body: DingTalkContentIn, s: AsyncSession = D
                 # 可能是二进制文件（extension 为空时兜底）
                 pass
             else:
-                return {
+                return await _mask_dingtalk_content(s, {
                     "title": data.get("title") or body.title,
                     "content": data.get("markdown") or "",
                     "format": "markdown",
                     "node_id": node_id,
                     "url": doc_url,
-                }
+                }, body.thread_id)
         except Exception:
             # 在线文档读取失败，降级到下载解析
             pass
@@ -511,28 +655,28 @@ async def internal_dingtalk_content(body: DingTalkContentIn, s: AsyncSession = D
             parsed = await mineru_client.parse(file_bytes, filename, api_key=mineru_api_key)
             md = (parsed.get("markdown") or "").strip()
             if md:
-                return {
+                return await _mask_dingtalk_content(s, {
                     "title": body.title or local_file.name,
                     "content": md,
                     "format": "markdown",
                     "node_id": node_id,
                     "url": doc_url,
                     "engine": "mineru",
-                }
+                }, body.thread_id)
             mineru_error = "MinerU 返回空内容"
         except Exception as e:  # noqa: BLE001 - 引擎失败时尝试本地兜底
             mineru_error = f"{e.__class__.__name__}: {e}"
 
         local_md = _local_parse(file_bytes, filename)
         if local_md and local_md.strip():
-            return {
+            return await _mask_dingtalk_content(s, {
                 "title": body.title or local_file.name,
                 "content": local_md,
                 "format": "markdown",
                 "node_id": node_id,
                 "url": doc_url,
                 "engine": "local",
-            }
+            }, body.thread_id)
 
         raise HTTPException(
             status_code=502,

@@ -91,6 +91,23 @@ const graphLoading = ref(false)
 const graph = ref<KnowledgeGraph>({ nodes: [], edges: [] })
 
 async function loadGraphDatasets() {
+  // 复用全局 Dify 数据集持久缓存（kge:dify_datasets_v1，1 小时）：
+  // 命中秒开，后台校准；与知识采集两个页签共享
+  try {
+    const raw = localStorage.getItem('kge:dify_datasets_v1')
+    if (raw) {
+      const c = JSON.parse(raw) as { ts: number; items: DifyDataset[] }
+      if (Date.now() - c.ts <= 3_600_000 && c.items?.length) {
+        graphDatasets.value = c.items
+        if (!graphDatasetId.value && graphDatasets.value.length) graphDatasetId.value = graphDatasets.value[0].id
+        listDifyDatasets().then((res) => {
+          const items = res.items || []
+          if (items.length) graphDatasets.value = items
+        }).catch(() => { /* 保留缓存 */ })
+        return
+      }
+    }
+  } catch { /* 走网络 */ }
   try {
     const res = await listDifyDatasets()
     graphDatasets.value = res.items || []

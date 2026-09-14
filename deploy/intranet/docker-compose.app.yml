@@ -12,11 +12,8 @@ services:
       - "8001:8000"
     env_file: .env.app
     environment:
-      BGE_EMBED_MODEL: /models/bge-m3
-      BGE_RERANK_MODEL: /models/bge-reranker-v2-m3
       MINERU_LOCAL_URL: ""
     volumes:
-      - ./models:/models:ro
       - kb-api-data:/app/services/kb-api/data
     networks: [kge-network]
 

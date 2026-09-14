@@ -40,7 +40,7 @@ docker compose -f docker-compose.app.yml up -d --build
 docker compose -f docker-compose.app.yml down
 ```
 
-> **colima memory**: BGE-M3 requires ≥8GB: `colima stop && colima start --cpu 4 --memory 8`
+> Models are all external HTTP APIs (embedding/rerank/LLM); no local model loading, no extra colima memory needed.
 
 ### Frontend
 
@@ -65,7 +65,7 @@ pnpm test:run     # vitest run
 **MVP**: 3 application processes + 5 Docker infrastructure containers, sharing one PostgreSQL database.
 
 ```
-Web (Vue 3) :5173  ──/api/v1──►  kb-api :8000       (FastAPI + BGE-M3)
+Web (Vue 3) :5173  ──/api/v1──►  kb-api :8000       (FastAPI, models external)
                       /api/v1/faq ► faq-service :8004  (FastAPI)
 
 kb-worker  (Celery, queue: ingestion)
@@ -83,7 +83,7 @@ Docker infrastructure (dev-services compose, external dev-network):
 | **faq-service** | 8004 | FastAPI | FAQ KB CRUD, FAQ directory tree, Q&A pair CRUD, CSV/Excel batch import, FAQ search (exact + semantic fusion) |
 | **kb-worker** | — | Celery (kb-api package) | Async ingestion pipeline: PENDING → PARSING (MinerU) → INDEXING (chunk+embed+ES) → COMPLETED |
 
-BGE-M3 + bge-reranker-v2-m3 are loaded **once** in kb-api (~2-3GB RSS). faq-service and kb-worker reuse them via `/internal/embed` on kb-api to avoid duplicating models in memory.
+Embedding & rerank models are **all external** (OpenAI-compatible `/embeddings` + `/rerank` APIs, configured via `EMBEDDING_*` / `RERANK_*`). kb-api does not load any local model; faq-service and kb-worker go through `/internal/embed` on kb-api, which forwards to the external API.
 
 ### Shared Package: kb-common
 
@@ -95,7 +95,7 @@ BGE-M3 + bge-reranker-v2-m3 are loaded **once** in kb-api (~2-3GB RSS). faq-serv
 | `kb_common/database.py` | AsyncSession factory (`SessionLocal`) |
 | `kb_common/config.py` | Pydantic Settings from `.env` |
 | `kb_common/security.py` | JWT creation/verification, API key hashing, RBAC helpers |
-| `kb_common/rag/` | `embedder.py` (BGE-M3), `chunker.py`, `indexer.py`, `searcher.py` (ES hybrid search), `reranker.py` (bge-reranker-v2-m3), `tracer.py` (retrieval trace) |
+| `kb_common/rag/` | `embedder.py` (external embeddings API), `chunker.py`, `indexer.py`, `searcher.py` (ES hybrid search), `reranker.py` (external rerank API, skipped when unconfigured), `tracer.py` (retrieval trace) |
 | `kb_common/clients/` | `minio_client.py`, `es_client.py`, `mineru_client.py`, `llm_client.py` (OpenAI-compatible) |
 
 ### Processing Pipeline

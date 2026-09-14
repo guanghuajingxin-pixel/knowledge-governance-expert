@@ -2,8 +2,9 @@
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { formatDate } from '@/utils/format'
-import { listSources, sourceStats, syncSource } from '@/api/sync'
+import { listSources, sourcesStatsAll, syncSource } from '@/api/sync'
 import type { Run, Source, SourceStats } from '@/types/sync'
+import type { SourceStatsItem } from '@/api/sync'
 import StatusPill from './components/StatusPill.vue'
 
 const sources = ref<Source[]>([])
@@ -23,9 +24,17 @@ async function refresh() {
   if (loading.value) return
   loading.value = true
   try {
-    sources.value = await listSources()
-    const entries = await Promise.all(sources.value.map(async (source) => [source.id, await sourceStats(source.id)] as const))
-    stats.value = Object.fromEntries(entries)
+    // 批量统计（2 条聚合 SQL）替代逐源 sourceStats 的 N+1
+    const [list, statsRes] = await Promise.all([
+      listSources(),
+      sourcesStatsAll().catch(() => ({ items: [] as SourceStatsItem[] })),
+    ])
+    sources.value = list
+    const next: Record<number, SourceStats> = {}
+    for (const it of statsRes.items) {
+      next[it.source_id] = { doc_count: it.doc_count, last_run: it.last_run }
+    }
+    stats.value = next
     const hasRunning = sources.value.some((source) => isRunning(source.id))
     if (hasRunning && polling.value === null) polling.value = window.setInterval(refresh, 3000)
     if (!hasRunning && polling.value !== null) { window.clearInterval(polling.value); polling.value = null }

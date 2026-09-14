@@ -18,14 +18,14 @@ from kb_common.clients import minio_client
 from kb_common.clients.dify_document import dataset_runtime
 from kb_common.config import get_settings
 from kb_common.models import (
-    SyncDocumentMapping, SyncFailure, SyncLog, SyncRun, SyncSource,
+    SyncDocumentMapping, SyncFailure, SyncLog, SyncRun, SyncSource, SyncTask,
 )
 
 from .dingtalk_sync_client import DingTalkClient, DingTalkError
 from .dify_sync_client import DifyClient, DifyError
 from .dify_pipeline_vars import resolve_pipeline_inputs
 from .export_service import ExportError, safe_name
-from .source_files import fetch_source_file, source_file_name, skip_reason
+from .source_files import fetch_source_file, node_extension, source_file_name, skip_reason
 from .sync_database import SyncSessionLocal
 from .sync_settings import make_backend, make_dify_client, make_dingtalk_client
 
@@ -94,6 +94,8 @@ class SyncEngine:
                     raise RuntimeError("同步任务已结束或不存在")
 
             stats = {"created": 0, "updated": 0, "deleted": 0, "skipped": 0, "failed": 0}
+            # 队列任务行的操作人：run.operator 记录触发用户名，定时运行兜底「系统」。
+            operator = run.operator or ("系统" if run.trigger == "schedule" else "")
 
             s = get_settings()
             dt = make_dingtalk_client(db)
@@ -147,22 +149,57 @@ class SyncEngine:
                     if node_id in remote:
                         continue
                     if source.delete_policy == "sync":
+                        task = SyncTask(
+                            run_id=run.id, source_id=source.id, kind="sync", action="delete",
+                            node_id=node_id, name=(mapping.name or node_id)[:500],
+                            file_ext=Path(mapping.name or "").suffix.lower().lstrip("."),
+                            dataset_id=dataset_id, dataset_name=dataset_name,
+                            status="running", started_at=datetime.utcnow(),
+                            trigger=run.trigger, operator=operator)
+                        db.add(task)
+                        db.commit()
                         try:
                             if mapping.dify_document_id:
                                 self._delete_dify_doc(backend, dataset_id, mapping)
                             db.delete(mapping)
                             stats["deleted"] += 1
+                            task.status = "success"
+                            task.finished_at = datetime.utcnow()
                             self._log(db, run.id, "INFO", f"删除已同步文档: {mapping.name}")
                         except Exception as exc:  # noqa: BLE001
+                            task.status = "failed"
+                            task.finished_at = datetime.utcnow()
+                            task.error = f"删除失败: {exc}"[:2000]
                             self._record_failure(db, run, source.id, mapping.node_id,
                                                  mapping.name, f"删除失败: {exc}")
                             stats["failed"] += 1
+                        db.commit()
                     else:
                         self._log(db, run.id, "INFO",
                                   f"钉钉侧已删除但策略为 keep，保留 Dify 文档: {mapping.name}")
                 db.commit()
 
-                # ② 新增/更新
+                # ② 新增/更新：先为本轮将处理的文档预建队列任务（pending），
+                # 同步队列页「待处理」页签即来源于此；处理时在 _process_node 内流转状态。
+                tasks: dict[str, SyncTask] = {}
+                for node in nodes:
+                    node_id = node.get("nodeId", "")
+                    if not node_id or skip_reason(node, s, runtime_mode):
+                        continue
+                    pre_mapping = mappings.get(node_id)
+                    if pre_mapping is not None and not pre_mapping.enabled:
+                        continue
+                    task = SyncTask(
+                        run_id=run.id, source_id=source.id, kind="sync",
+                        action="update" if (pre_mapping and pre_mapping.dify_document_id) else "create",
+                        node_id=node_id, name=(node.get("name", node_id) or node_id)[:500],
+                        file_ext=node_extension(node), dataset_id=dataset_id,
+                        dataset_name=dataset_name, status="pending",
+                        trigger=run.trigger, operator=operator)
+                    db.add(task)
+                    tasks[node_id] = task
+                db.commit()
+
                 base_dir = _local_storage_dir() / str(source.id)
                 for node in nodes:
                     node_id = node["nodeId"]
@@ -178,97 +215,14 @@ class SyncEngine:
                         stats["skipped"] += 1
                         self._log(db, run.id, "INFO", f"跳过（预演中已关闭）: {name}")
                         continue
-                    meta_hash = _meta_hash(node)
-
-                    rel_dir = Path(node.get("relative_dir", "").strip("/"))
-                    try:
-                        self._progress(db, run, f"下载/导出文档: {name}")
-                        local_file, content_hash = self._fetch(dt, node, name, base_dir, rel_dir)
-                        # 用户口径：预演开关打开的文档一律老实同步，不做内容 hash 跳过；
-                        # 已同步过的走更新，未同步过的新建。
-                        # 源文档直传：下载文件保留源扩展名（缺失时按 OSS 文件名/节点 extension 补齐），
-                        # 在线文档带导出目标扩展名（xxx.docx/xxx.xlsx/xxx.pdf）；
-                        # 上传名恒为本地源文件名，不做任何格式转换，引擎靠扩展名识别格式
-                        upload_name = local_file.name
-                        self._progress(db, run, f"上传至目标知识库: {name}")
-                        if runtime_mode == "rag_pipeline":
-                            # Dify 流水线数据集：pipeline/run 阻塞执行，完成即返回；
-                            # 更新场景先索引新文档，成功后才替换旧文档。
-                            pipeline_timeout = float(s.sync_indexing_timeout_seconds)
-                            if mapping and mapping.dify_document_id:
-                                result = backend.update_file_via_pipeline(
-                                    dataset_id, mapping.dify_document_id, local_file,
-                                    file_name=upload_name, timeout=pipeline_timeout,
-                                    inputs=pipeline_inputs)
-                                self._log(db, run.id, "INFO", f"更新文档（知识流水线）: {name}")
-                            else:
-                                result = backend.upload_file_via_pipeline(
-                                    dataset_id, local_file, file_name=upload_name,
-                                    timeout=pipeline_timeout, inputs=pipeline_inputs)
-                                self._log(db, run.id, "INFO", f"新建文档（知识流水线）: {name}")
-                        elif mapping and mapping.dify_document_id:
-                            result = backend.update_file(dataset_id, mapping.dify_document_id,
-                                                         local_file, file_name=upload_name)
-                            self._log(db, run.id, "INFO", f"更新文档: {name}")
-                        else:
-                            result = backend.upload_file(dataset_id, local_file, file_name=upload_name)
-                            self._log(db, run.id, "INFO", f"新建文档: {name}")
-                        doc_id = (result.get("document") or {}).get("id")
-                        batch = result.get("batch", "")
-                        if not doc_id:
-                            raise DifyError("目标知识库上传未返回文档 ID")
-                        was_update = bool(mapping and mapping.dify_document_id)
-                        if mapping is None:
-                            mapping = SyncDocumentMapping(source_id=source.id, node_id=node_id,
-                                                          name=name, category=node.get("category", ""))
-                            db.add(mapping)
-                        # 上传成功即保存远端 ID；索引失败重试时更新同一文档，避免重复创建。
-                        mapping.dify_document_id = doc_id
-                        mapping.dify_batch = batch
-                        mapping.content_hash = content_hash
-                        mapping.status = "indexing"
-                        db.commit()
-                        if s.sync_dify_wait_indexing and batch and result["document"].get("indexing_status") != "completed":
-                            self._progress(db, run, f"等待索引: {name}")
-                            status = backend.wait_indexing(
-                                dataset_id, batch, s.sync_indexing_timeout_seconds,
-                                on_progress=lambda progress: self._progress(db, run, f"索引: {name} · {progress}"),
-                            )
-                            self._log(db, run.id, "INFO", f"索引状态: {name} -> {status}")
-                        stats["updated" if was_update else "created"] += 1
-
-                        mapping.parent_node_id = self._parent_of(node, source.root_node_id)
-                        mapping.name = name
-                        mapping.relative_path = str(rel_dir / safe_name(name))
-                        mapping.category = node.get("category", "")
-                        mapping.meta_hash = meta_hash
-                        mapping.content_hash = content_hash
-                        mapping.local_path = str(local_file)
-                        mapping.dify_document_id = doc_id
-                        mapping.dify_batch = batch
-                        mapping.status = "synced"
-                        mapping.error = ""
-                        mapping.last_synced_at = datetime.utcnow()
-                    except (DingTalkError, ExportError, DifyError, OSError) as exc:
-                        self._record_failure(db, run, source.id, node_id, name, str(exc))
-                        stats["failed"] += 1
-                        if mapping is not None:
-                            mapping.status = "error"
-                            mapping.error = str(exc)
-                        else:
-                            m = SyncDocumentMapping(source_id=source.id, node_id=node_id, name=name,
-                                                   category=node.get("category", ""), status="error",
-                                                   error=str(exc))
-                            db.add(m)
-                    except Exception as exc:  # noqa: BLE001
-                        self._record_failure(db, run, source.id, node_id, name, f"未知错误: {exc}")
-                        stats["failed"] += 1
+                    outcome, _error = self._process_node(
+                        db, run, source, node, mapping, base_dir, dataset_id, dataset_name,
+                        runtime_mode, pipeline_inputs, dt, backend, task=tasks.get(node_id))
+                    stats[outcome] += 1
                     run.created_count = stats["created"]
                     run.updated_count = stats["updated"]
                     run.deleted_count = stats["deleted"]
                     run.failed_count = stats["failed"]
-                    if mapping is not None and mapping.status == "synced":
-                        db.query(SyncFailure).filter_by(source_id=source.id, node_id=node_id).delete()
                     db.commit()
 
                 run.created_count = stats["created"]
@@ -285,6 +239,14 @@ class SyncEngine:
                 run.message = (f"total={run.total} skipped={stats['skipped']} created={stats['created']} "
                                f"updated={stats['updated']} deleted={stats['deleted']} "
                                f"failed={stats['failed']}")
+                # 防御收尾：本轮仍停在 pending/running 的任务标记失败，
+                # 避免运行提前结束时队列里永久挂着「待处理/处理中」。
+                db.query(SyncTask).filter(
+                    SyncTask.run_id == run.id,
+                    SyncTask.status.in_(["pending", "running"]),
+                ).update({"status": "failed", "finished_at": datetime.utcnow(),
+                          "error": "同步运行已结束，该文档未被处理"},
+                         synchronize_session=False)
                 db.commit()
                 return self._summary(run)
             finally:
@@ -300,9 +262,129 @@ class SyncEngine:
         finally:
             db.close()
 
-    def _progress(self, db, run: SyncRun, message: str) -> None:
-        run.message = message
-        self._log(db, run.id, "INFO", message)
+    def _process_node(self, db, run: SyncRun | None, source: SyncSource, node: dict,
+                      mapping: SyncDocumentMapping | None, base_dir: Path, dataset_id: str,
+                      dataset_name: str, runtime_mode: str, pipeline_inputs: dict,
+                      dt: DingTalkClient, backend, task: SyncTask | None = None) -> tuple[str, str]:
+        """处理单个文档节点：下载/导出 → 上传目标知识库 → 回写映射与队列任务。
+
+        同步主循环与队列任务级重试共用：重试时 run=None 并复用失败任务行。
+        返回 (created|updated|failed, 错误信息)。
+        """
+        node_id = node["nodeId"]
+        name = node.get("name", node_id)
+        run_id = run.id if run is not None else None
+        if task is not None:
+            task.status = "running"
+            task.started_at = datetime.utcnow()
+            task.finished_at = None
+            task.error = ""
+        meta_hash = _meta_hash(node)
+        rel_dir = Path(node.get("relative_dir", "").strip("/"))
+        error = ""
+        try:
+            self._progress(db, run, f"下载/导出文档: {name}")
+            local_file, content_hash = self._fetch(dt, node, name, base_dir, rel_dir)
+            # 用户口径：预演开关打开的文档一律老实同步，不做内容 hash 跳过；
+            # 已同步过的走更新，未同步过的新建。
+            # 源文档直传：下载文件保留源扩展名（缺失时按 OSS 文件名/节点 extension 补齐），
+            # 在线文档带导出目标扩展名（xxx.docx/xxx.xlsx/xxx.pdf）；
+            # 上传名恒为本地源文件名，不做任何格式转换，引擎靠扩展名识别格式
+            upload_name = local_file.name
+            self._progress(db, run, f"上传至目标知识库: {name}")
+            if runtime_mode == "rag_pipeline":
+                # Dify 流水线数据集：pipeline/run 阻塞执行，完成即返回；
+                # 更新场景先索引新文档，成功后才替换旧文档。
+                pipeline_timeout = float(get_settings().sync_indexing_timeout_seconds)
+                if mapping and mapping.dify_document_id:
+                    result = backend.update_file_via_pipeline(
+                        dataset_id, mapping.dify_document_id, local_file,
+                        file_name=upload_name, timeout=pipeline_timeout,
+                        inputs=pipeline_inputs)
+                    self._log(db, run_id, "INFO", f"更新文档（知识流水线）: {name}")
+                else:
+                    result = backend.upload_file_via_pipeline(
+                        dataset_id, local_file, file_name=upload_name,
+                        timeout=pipeline_timeout, inputs=pipeline_inputs)
+                    self._log(db, run_id, "INFO", f"新建文档（知识流水线）: {name}")
+            elif mapping and mapping.dify_document_id:
+                result = backend.update_file(dataset_id, mapping.dify_document_id,
+                                             local_file, file_name=upload_name)
+                self._log(db, run_id, "INFO", f"更新文档: {name}")
+            else:
+                result = backend.upload_file(dataset_id, local_file, file_name=upload_name)
+                self._log(db, run_id, "INFO", f"新建文档: {name}")
+            doc_id = (result.get("document") or {}).get("id")
+            batch = result.get("batch", "")
+            if not doc_id:
+                raise DifyError("目标知识库上传未返回文档 ID")
+            was_update = bool(mapping and mapping.dify_document_id)
+            if mapping is None:
+                mapping = SyncDocumentMapping(source_id=source.id, node_id=node_id,
+                                              name=name, category=node.get("category", ""))
+                db.add(mapping)
+            # 上传成功即保存远端 ID；索引失败重试时更新同一文档，避免重复创建。
+            mapping.dify_document_id = doc_id
+            mapping.dify_batch = batch
+            mapping.content_hash = content_hash
+            mapping.status = "indexing"
+            db.commit()
+            s = get_settings()
+            if s.sync_dify_wait_indexing and batch and result["document"].get("indexing_status") != "completed":
+                self._progress(db, run, f"等待索引: {name}")
+                status = backend.wait_indexing(
+                    dataset_id, batch, s.sync_indexing_timeout_seconds,
+                    on_progress=lambda progress: self._progress(db, run, f"索引: {name} · {progress}"),
+                )
+                self._log(db, run_id, "INFO", f"索引状态: {name} -> {status}")
+
+            mapping.parent_node_id = self._parent_of(node, source.root_node_id)
+            mapping.name = name
+            mapping.relative_path = str(rel_dir / safe_name(name))
+            mapping.category = node.get("category", "")
+            mapping.meta_hash = meta_hash
+            mapping.content_hash = content_hash
+            mapping.local_path = str(local_file)
+            mapping.dify_document_id = doc_id
+            mapping.dify_batch = batch
+            mapping.status = "synced"
+            mapping.error = ""
+            mapping.last_synced_at = datetime.utcnow()
+            if task is not None:
+                task.status = "success"
+                task.finished_at = datetime.utcnow()
+                task.error = ""
+                try:
+                    task.file_size = local_file.stat().st_size
+                except OSError:
+                    task.file_size = None  # 取尺寸失败不影响同步成败（如虚拟路径）
+                task.file_ext = local_file.suffix.lower().lstrip(".") or task.file_ext
+                task.dataset_id = dataset_id
+                task.dataset_name = dataset_name
+            db.query(SyncFailure).filter_by(source_id=source.id, node_id=node_id).delete()
+            return ("updated" if was_update else "created"), ""
+        except (DingTalkError, ExportError, DifyError, OSError) as exc:
+            error = str(exc)
+        except Exception as exc:  # noqa: BLE001
+            error = f"未知错误: {exc}"
+        self._record_failure(db, run, source.id, node_id, name, error)
+        if mapping is not None:
+            mapping.status = "error"
+            mapping.error = error
+        else:
+            db.add(SyncDocumentMapping(source_id=source.id, node_id=node_id, name=name,
+                                       category=node.get("category", ""), status="error",
+                                       error=error))
+        if task is not None:
+            task.status = "failed"
+            task.finished_at = datetime.utcnow()
+            task.error = error[:2000]
+        return "failed", error
+
+    def _progress(self, db, run: SyncRun | None, message: str) -> None:
+        if run is not None:
+            run.message = message
+        self._log(db, run.id if run is not None else None, "INFO", message)
 
     # ---------- 辅助 ----------
     @staticmethod
@@ -342,11 +424,11 @@ class SyncEngine:
         except Exception as exc:  # noqa: BLE001
             logger.warning("源文档存对象存储失败 %s: %s", key, exc)
 
-    def _record_failure(self, db, run: SyncRun, source_id: int, node_id: str | None,
+    def _record_failure(self, db, run: SyncRun | None, source_id: int, node_id: str | None,
                         name: str, error: str) -> None:
-        db.add(SyncFailure(run_id=run.id, source_id=source_id, node_id=node_id,
-                           name=name, error=error))
-        self._log(db, run.id, "ERROR", f"失败 [{name}]: {error}")
+        db.add(SyncFailure(run_id=run.id if run is not None else None, source_id=source_id,
+                           node_id=node_id, name=name, error=error))
+        self._log(db, run.id if run is not None else None, "ERROR", f"失败 [{name}]: {error}")
 
     @staticmethod
     def _summary(run: SyncRun) -> dict:
@@ -362,6 +444,6 @@ class SyncEngine:
         }
 
 
-def run_sync(source_id: int, trigger: str = "manual") -> dict:
+def run_sync(source_id: int, trigger: str = "manual", operator: str = "") -> dict:
     from .runtime import run_sync as supervised_run
-    return supervised_run(source_id, trigger)
+    return supervised_run(source_id, trigger, operator)

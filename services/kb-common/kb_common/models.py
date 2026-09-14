@@ -276,6 +276,91 @@ class KnowledgeLibrary(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
 
+class SensitiveItem(Base):
+    """敏感信息：知识应用侧的敏感内容登记表（关键词/号码等），供问答与检索链路脱敏管控。
+
+    content: 敏感信息内容（全文唯一，避免重复登记）
+    type:    类型（phone|id_card|bank_card|email|custom）
+    status:  enabled=True 启用管控 / False 停用（保留条目不参与管控）
+    """
+    __tablename__ = "sensitive_items"
+    __table_args__ = (UniqueConstraint("content", name="uq_sensitive_items_content"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    content: Mapped[str] = mapped_column(String(500), nullable=False)
+    type: Mapped[str] = mapped_column(String(32), nullable=False, default="custom")
+    description: Mapped[str] = mapped_column(Text, server_default="", nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, server_default=sa_text('true'), nullable=False)
+    created_by: Mapped[str] = mapped_column(String(100), server_default="", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class MaskingPolicy(Base):
+    """检索返回脱敏策略：条件→识别→动作→执行节点→兜底。
+
+    - scope_type/scope_id：作用域（global 全局 / library 知识库镜像 / kb 本地知识库），继承叠加
+    - user_roles/scenes：触发条件（空 = 全部角色 / 全部场景；场景 search|chat）
+    - regex_rules：自定义正则 [{"pattern","label","entity_type"}]
+    - dict_types：敏感词典来源（sensitive_items.type 列表，空 = 不启用词典）
+    - context_rules：上下文规则 [{"keyword","entity_type"}]（关键词邻近金额）
+    - actions：entity_type -> partial|generalize|replace|hash|truncate|reject
+    - pre_llm_enabled/post_output_enabled：执行节点（送LLM前脱敏 / 输出后二次过滤）
+    - failure_strategy：引擎失败兜底 block|non_sensitive|deny
+    多策略命中同一实体类型时取最严格动作（reject>hash>replace>truncate>generalize>partial）。
+    """
+    __tablename__ = "masking_policies"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    description: Mapped[str] = mapped_column(Text, server_default="", nullable=False)
+    scope_type: Mapped[str] = mapped_column(String(16), default="global", nullable=False)
+    scope_id: Mapped[str] = mapped_column(String(64), server_default="", nullable=False)  # global 为空
+    priority: Mapped[int] = mapped_column(Integer, default=100, nullable=False)  # 小者优先
+    user_roles: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    scenes: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    regex_rules: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    dict_types: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    context_rules: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    actions: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    pre_llm_enabled: Mapped[bool] = mapped_column(Boolean, server_default=sa_text('true'), nullable=False)
+    post_output_enabled: Mapped[bool] = mapped_column(Boolean, server_default=sa_text('true'), nullable=False)
+    failure_strategy: Mapped[str] = mapped_column(String(20), default="non_sensitive", nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, server_default=sa_text('true'), nullable=False)
+    created_by: Mapped[str] = mapped_column(String(100), server_default="", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class MaskingExemption(Base):
+    """脱敏豁免：绑定人+范围+实体类型+有效期，到期自动失效；明文访问走审计。"""
+    __tablename__ = "masking_exemptions"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    scope_type: Mapped[str] = mapped_column(String(16), default="global", nullable=False)
+    scope_id: Mapped[str] = mapped_column(String(64), server_default="", nullable=False)
+    entity_types: Mapped[list] = mapped_column(JSON, default=list, nullable=False)  # 空 = 全部
+    reason: Mapped[str] = mapped_column(Text, server_default="", nullable=False)
+    granted_by: Mapped[str] = mapped_column(String(100), server_default="", nullable=False)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # 空 = 永久
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+
+class MaskingLog(Base):
+    """脱敏审计日志：记录策略命中/豁免/阻断（日志自身脱敏——只记规则标签与数量，不存原文实体）。"""
+    __tablename__ = "masking_logs"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    username: Mapped[str] = mapped_column(String(100), server_default="", nullable=False)
+    scene: Mapped[str] = mapped_column(String(20), nullable=False)      # search|chat|sandbox
+    node: Mapped[str] = mapped_column(String(20), nullable=False)       # pre_llm|post_output
+    query: Mapped[str] = mapped_column(String(500), server_default="", nullable=False)  # 已脱敏后的查询
+    policy_ids: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    rule_hits: Mapped[list] = mapped_column(JSON, default=list, nullable=False)  # [{"rule","entity_type","count"}]
+    masked_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    blocked: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    exempted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False, index=True)
+
+
 class DingtalkFolderStat(Base):
     """钉钉知识库文件夹统计快照（知识缺口页数据源）。
 
@@ -347,6 +432,8 @@ class SyncRun(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     source_id: Mapped[int] = mapped_column(ForeignKey("sync_sources.id", ondelete="CASCADE"), nullable=False)
     trigger: Mapped[str] = mapped_column(String(20), server_default="manual", nullable=False)  # manual | schedule
+    # 触发人：定时为「系统」，手动为登录用户名；同步队列的逐文档任务行继承该值。
+    operator: Mapped[str] = mapped_column(String(100), server_default="", nullable=False)
     status: Mapped[str] = mapped_column(String(20), server_default="running", nullable=False)  # running | success | partial | failed
     started_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -387,12 +474,43 @@ class SyncFailure(Base):
     """同步失败项（待重试清单）。"""
     __tablename__ = "sync_failures"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    run_id: Mapped[int] = mapped_column(ForeignKey("sync_runs.id", ondelete="CASCADE"), nullable=False)
+    # 可空：任务级重试（同步队列）产生的失败记录不归属任何同步运行。
+    run_id: Mapped[int | None] = mapped_column(ForeignKey("sync_runs.id", ondelete="CASCADE"), nullable=True)
     source_id: Mapped[int] = mapped_column(ForeignKey("sync_sources.id", ondelete="CASCADE"), nullable=False)
     node_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     name: Mapped[str] = mapped_column(String(500), server_default="", nullable=False)
     error: Mapped[str] = mapped_column(Text, server_default="", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+
+class SyncTask(Base):
+    """同步队列：逐文档任务记录（知识同步过程中的任务列表）。
+
+    状态流转：pending（本轮已排队）→ running（下载/上传中）→ success | failed；
+    删除类动作（钉钉侧已删除）同样记一行，action=delete。
+    失败任务支持任务级重试：重试复用同一行（retry_count 累加），不整源重跑。
+    """
+    __tablename__ = "sync_tasks"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[int | None] = mapped_column(ForeignKey("sync_runs.id", ondelete="CASCADE"), nullable=True)
+    source_id: Mapped[int | None] = mapped_column(ForeignKey("sync_sources.id", ondelete="CASCADE"), nullable=True)
+    kind: Mapped[str] = mapped_column(String(20), server_default="sync", nullable=False)  # sync
+    action: Mapped[str] = mapped_column(String(20), server_default="create", nullable=False)  # create | update | delete
+    node_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    name: Mapped[str] = mapped_column(String(500), nullable=False)
+    file_ext: Mapped[str] = mapped_column(String(32), server_default="", nullable=False)
+    file_size: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    dataset_id: Mapped[str] = mapped_column(String(128), server_default="", nullable=False)
+    dataset_name: Mapped[str] = mapped_column(String(300), server_default="", nullable=False)
+    status: Mapped[str] = mapped_column(String(20), server_default="pending", nullable=False, index=True)  # pending | running | success | failed
+    error: Mapped[str] = mapped_column(Text, server_default="", nullable=False)
+    trigger: Mapped[str] = mapped_column(String(20), server_default="manual", nullable=False)  # manual | schedule
+    operator: Mapped[str] = mapped_column(String(100), server_default="", nullable=False)
+    retry_count: Mapped[int] = mapped_column(Integer, server_default="0", nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
 
 class CollectionTransfer(Base):

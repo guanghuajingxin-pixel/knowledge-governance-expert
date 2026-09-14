@@ -29,7 +29,8 @@ export default defineConfig({
     host: true,
     proxy: {
       '/api/v1/faq': { target: 'http://127.0.0.1:8004', changeOrigin: true },
-      '/api/v1': { target: 'http://127.0.0.1:8000', changeOrigin: true },
+      // timeout/proxyTimeout=0：显式禁用代理层超时，SSE 流式问答长连接不被掐断
+      '/api/v1': { target: 'http://127.0.0.1:8000', changeOrigin: true, timeout: 0, proxyTimeout: 0 },
     },
   },
   css: {

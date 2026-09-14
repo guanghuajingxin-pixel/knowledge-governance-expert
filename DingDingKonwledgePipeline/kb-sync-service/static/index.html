@@ -353,7 +353,7 @@ async function loadSources() {
   try {
     sources = await api('/sources');
     const tb = document.getElementById('sourceTbody');
-    if (!sources.length) { tb.innerHTML = '<tr><td colspan="6" class="empty">暂无同步源，点击右上角新增</td></tr>'; return; }
+    if (!sources.length) { tb.innerHTML = '<tr><td colspan="6" class="empty">暂无同步任务，点击右上角新增同步任务</td></tr>'; return; }
     let html = '';
     sources.forEach(s => {
       html += '<tr>';

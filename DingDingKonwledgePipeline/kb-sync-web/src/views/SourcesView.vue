@@ -86,7 +86,7 @@ onMounted(() => { app.refreshSources(); app.refreshRuns(); app.refreshFailures()
               <el-button size="small" type="danger" plain @click="remove(s)">删除</el-button>
             </div></td>
           </tr>
-          <tr v-if="!app.sources.length"><td colspan="8" class="empty">暂无同步源，点击右上角新增</td></tr>
+        <tr v-if="!app.sources.length"><td colspan="8" class="empty">暂无同步任务，点击右上角新增同步任务</td></tr>
         </tbody>
       </table>
     </div>

@@ -11,7 +11,7 @@ import sys
 from sqlalchemy import text
 
 from kb_common.config import get_settings
-from kb_common.models import SyncLog, SyncRun, SyncSource
+from kb_common.models import SyncLog, SyncRun, SyncSource, SyncTask
 from .sync_database import SyncSessionLocal, sync_engine
 
 logger = logging.getLogger(__name__)
@@ -56,6 +56,12 @@ def finish_interrupted(run_id: int, reason: str) -> None:
             level = 'ERROR'
         run.message = summary
         db.add(SyncLog(run_id=run.id, level=level, message=summary))
+        # 同步队列：未开始/进行中的任务随运行中断一并标记失败，可任务级重试。
+        db.query(SyncTask).filter(
+            SyncTask.run_id == run_id,
+            SyncTask.status.in_(['pending', 'running']),
+        ).update({'status': 'failed', 'finished_at': datetime.utcnow(),
+                  'error': reason[:2000]}, synchronize_session=False)
         db.commit()
 
 
@@ -86,7 +92,7 @@ def kill_process_group(process: subprocess.Popen) -> None:
     process.wait()
 
 
-def run_sync(source_id: int, trigger: str = 'manual') -> dict:
+def run_sync(source_id: int, trigger: str = 'manual', operator: str = '') -> dict:
     with source_lock(source_id, SUPERVISOR_LOCK) as acquired:
         if not acquired:
             return {'status': 'skipped', 'message': '该同步源正在运行'}
@@ -99,7 +105,9 @@ def run_sync(source_id: int, trigger: str = 'manual') -> dict:
                 source = db.get(SyncSource, source_id)
                 if source is None or not source.enabled:
                     return {'status': 'skipped', 'message': '同步源不存在或已停用'}
-                run = SyncRun(source_id=source_id, trigger=trigger, status='running', message='准备启动同步')
+                run = SyncRun(source_id=source_id, trigger=trigger, status='running',
+                              message='准备启动同步',
+                              operator=operator or ('系统' if trigger == 'schedule' else ''))
                 db.add(run)
                 db.commit()
                 run_id = run.id

@@ -23,12 +23,12 @@ async def index_document(s, kb, doc, markdown: str) -> int:
     chunks = chunker.chunk(markdown, kb.chunk_strategy, kb.chunk_size, kb.chunk_overlap, kb.delimiter)
     if not chunks: return 0
     texts = [c["text"] for c in chunks]
-    # 低内存部署（EMBED_VIA_INTERNAL=true，如 kb-worker 容器）：走 kb-api 内部接口复用模型；
-    # 默认本地 FlagEmbedding（kb-api 自身），行为不变。
+    # 低内存部署（EMBED_VIA_INTERNAL=true，如 kb-worker 容器）：走 kb-api 内部接口转发外部向量 API；
+    # 默认由 kb-api 进程直接调外接 embedder。
     if os.getenv("EMBED_VIA_INTERNAL", "").lower() in ("1", "true", "yes"):
         vectors = await _embed_internal(texts)
     else:
-        vectors = embedder.embed(texts)   # 本地 FlagEmbedding
+        vectors = embedder.embed(texts)   # 外接 embeddings API
     index = await es_client.ensure_index(str(kb.id))
 
     docs = []

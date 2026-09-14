@@ -373,7 +373,14 @@ async def walk_workspace_folders(root_node_id: str, max_folders: int = 5000,
         child_folders: list[tuple[str, str]] = []
         for n in nodes:
             if n.get("type") == "FOLDER":
-                child_folders.append((n.get("nodeId") or "", n.get("name") or ""))
+                fname = n.get("name") or ""
+                # .dlink 为「文件夹快捷方式」：其子节点无法通过 API 列出（递归只会
+                # 得到空），作为父文件夹的一个文档计数；不递归，避免产生 0 文档的
+                # 假目录行且父文件夹漏计
+                if (n.get("extension") or "") == "dlink" or fname.endswith(".dlink"):
+                    doc_count += 1
+                else:
+                    child_folders.append((n.get("nodeId") or "", fname))
             else:
                 doc_count += 1
         folders.append({"node_id": node_id, "path": path, "document_count": doc_count})

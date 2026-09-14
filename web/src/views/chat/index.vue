@@ -236,6 +236,8 @@ interface RunState {
   abort: () => void
   status: 'running' | 'choice'
   model: string
+  /** 连接中断后是否已自动重试过一次（防循环重连） */
+  retried?: boolean
 }
 const runs = reactive(new Map<string, RunState>())
 // reactive Map 读取会返回响应式代理，与原始对象严格比较恒为 false；
@@ -703,137 +705,159 @@ async function askQuestion(q: string, action: '' | 'continue' | 'stop' = '', tar
         .map((m) => ({ role: m.role, content: m.content }))
     : []
 
-  abortCurrent = streamChat(
-    {
-      query: q,
-      library_ids: kbSearch.value ? (selectedLibraryIds.value.length ? selectedLibraryIds.value : null) : [],
-      last_query: ctx.q,
-      last_answer: ctx.a,
-      history,
-      model: selectedModel.value,
-      llm_profile_id: selectedProfileId.value,
-      session_id: sid,
-      action,
-    },
-    {
-      onStep: (e: StreamEvent) => {
-        const msg = assistantMsg
-        if (!msg.steps) msg.steps = []
-        updateStep(msg.steps, e)
-        // 执行中实时展示步骤流（首个步骤到达即显示）
-        if (viewActive()) scrollToBottom()
+  // 发起/重发 SSE 流：连接中断自动恢复时复用同一套回调与运行态（消息槽不换）
+  const launchStream = () => {
+    abortCurrent = streamChat(
+      {
+        query: q,
+        library_ids: kbSearch.value ? (selectedLibraryIds.value.length ? selectedLibraryIds.value : null) : [],
+        last_query: ctx.q,
+        last_answer: ctx.a,
+        history,
+        model: selectedModel.value,
+        llm_profile_id: selectedProfileId.value,
+        session_id: sid,
+        action,
       },
-      onDelta: (delta, reset) => {
-        const msg = assistantMsg
-        // reset=true：该模型轮被判定为工具过渡轮，清空已流出的临时文本
-        msg.streamed = true
-        msg.content = reset ? '' : (msg.content || '') + delta
-        if (viewActive()) scrollToBottom()
-      },
-      onCitations: (list) => {
-        // 引用来源随检索命中实时上屏；final 到达后替换为答案真正引用的过滤列表
-        const msg = assistantMsg
-        if (!msg.done) msg.citations = list
-      },
-      onChoice: (question, options) => {
-        // 确认按钮卡片先渲染（流可能还在收尾），暂停落定前按钮不可点
-        const msg = assistantMsg
-        msg.choice = { question, options: options.length ? options : ['继续探索', '先基于已检索内容回答'], answered: false }
-        if (viewActive()) scrollToBottom()
-      },
-      onChoicePause: (question, options, usage, assessment) => {
-        const msg = assistantMsg
-        msg.done = true
-        settleSteps(msg.steps, 'paused')
-        msg.choice = {
-          question,
-          options: options.length ? options : ['继续探索', '先基于已检索内容回答'],
-          answered: false,
-          // 钉钉首次授权及普通澄清必须等待明确选择；仅延时探索沿用倒计时。
-          autoContinueAt: assessment?.choice_kind === 'exploration_timeout' ? Date.now() + CHOICE_AUTO_CONTINUE_SECONDS * 1000 : undefined,
-          countdown: assessment?.choice_kind === 'exploration_timeout' ? CHOICE_AUTO_CONTINUE_SECONDS : undefined,
-        }
-        if (assessment?.choice_kind === 'dingtalk_opt_in') {
-          msg.content = assessment.evidence_summary || '当前知识库未检索到可用依据。'
-          msg.assessment = { confidence: assessment.confidence ?? 0, reason: assessment.confidence_reason || '' }
-          msg.answerStatus = 'awaiting_choice'
-          if (assessment.citations) msg.citations = assessment.citations
-        }
-        if (usage && usage.total_tokens > 0) msg.usage = usage
-        msg.meta = `🦌 DeerFlow · 等待确认 · ${run.model}`
-        // 流已结束：转为「等待确认」态（不占后端并发），用户点选后发起新请求续跑
-        // 注意 runs 为 reactive Map，get 返回代理，须用 isRun（toRaw 归一）判断身份
-        if (isRun(sid, run)) runs.get(sid)!.status = 'choice'
-        if (viewActive()) scrollToBottom()
-      },
-      onFinal: (res) => {
-        const msg = assistantMsg
-        msg.done = true
-        // 完成：最后一步标记完成，过程条自动收起（用户可点击展开）
-        settleSteps(msg.steps, 'failed')
-        const citations = res.citations || []
-        const configError = res.config_error || ''
-        const noResult = res.answer_status === 'insufficient'
-        if (res.usage && res.usage.total_tokens > 0) msg.usage = res.usage
-        if (citations.length > 0) {
-          msg.meta = `企业知识问答 · ${citations.length} 条原文依据 · ${run.model}`
-        } else if (res.answer) {
-          msg.meta = `企业知识问答 · ${run.model}`
-        } else {
-          msg.meta = `未在知识库找到相关内容 · ${run.model}`
-        }
-        if (res.answer) {
-          // 未收到任何流式增量（答案整段生成）→ 打字机效果逐字渲染；已流式过则直接落定
-          if (!msg.streamed && res.answer.length > 24) typewriterReveal(msg, res.answer, sid)
-          else msg.content = res.answer
-        }
-        else if (!msg.content) msg.content = '（未生成回答）'
-        msg.quality = res.quality
-        msg.answerStatus = res.answer_status
-        msg.citations = citations
-        msg.noResult = noResult
-        msg.configError = configError
-        msg.followUps = followUpEnabled.value ? res.follow_ups || [] : []
-        if (!configError) {
-          if (res.last_query) ctx.q = res.last_query
-          else if (res.rewritten_query) ctx.q = res.rewritten_query
-          ctx.a = res.last_answer ?? ''
-        }
-        // 运行结束：出注册表；绿点提示（查看该会话时立即清除）
-        if (isRun(sid, run)) runs.delete(sid)
-        finishedSids.add(sid)
-        if (viewActive()) scrollToBottom()
-      },
-      onError: (code, message) => {
-        const msg = assistantMsg
-        msg.done = true
-        settleSteps(msg.steps, 'failed')
-        msg.configError = code
-        msg.meta = code === 'llm_not_configured' || code === 'dify_not_configured'
-          ? '需要先完成系统配置'
-          : '⚠️ 回答失败，可重试'
-        msg.content = message || '问答请求失败，请稍后重试。'
-        if (isRun(sid, run)) runs.delete(sid)
-        finishedSids.add(sid)
-        if (viewActive()) scrollToBottom()
-      },
-      onClosed: () => {
-        // 流异常收尾（未收到 final/choice_pause/config_error）：收尾运行态，避免永久「转圈」
-        const msg = assistantMsg
-        if (!msg.done && !msg.configError) {
+      {
+        onStep: (e: StreamEvent) => {
+          const msg = assistantMsg
+          if (!msg.steps) msg.steps = []
+          updateStep(msg.steps, e)
+          // 执行中实时展示步骤流（首个步骤到达即显示）
+          if (viewActive()) scrollToBottom()
+        },
+        onDelta: (delta, reset) => {
+          const msg = assistantMsg
+          // reset=true：该模型轮被判定为工具过渡轮，清空已流出的临时文本
+          msg.streamed = true
+          msg.content = reset ? '' : (msg.content || '') + delta
+          if (viewActive()) scrollToBottom()
+        },
+        onCitations: (list) => {
+          // 引用来源随检索命中实时上屏；final 到达后替换为答案真正引用的过滤列表
+          const msg = assistantMsg
+          if (!msg.done) msg.citations = list
+        },
+        onChoice: (question, options) => {
+          // 确认按钮卡片先渲染（流可能还在收尾），暂停落定前按钮不可点
+          const msg = assistantMsg
+          msg.choice = { question, options: options.length ? options : ['继续探索', '先基于已检索内容回答'], answered: false }
+          if (viewActive()) scrollToBottom()
+        },
+        onChoicePause: (question, options, usage, assessment) => {
+          const msg = assistantMsg
+          msg.done = true
+          settleSteps(msg.steps, 'paused')
+          msg.choice = {
+            question,
+            options: options.length ? options : ['继续探索', '先基于已检索内容回答'],
+            answered: false,
+            // 钉钉首次授权及普通澄清必须等待明确选择；仅延时探索沿用倒计时。
+            autoContinueAt: assessment?.choice_kind === 'exploration_timeout' ? Date.now() + CHOICE_AUTO_CONTINUE_SECONDS * 1000 : undefined,
+            countdown: assessment?.choice_kind === 'exploration_timeout' ? CHOICE_AUTO_CONTINUE_SECONDS : undefined,
+          }
+          if (assessment?.choice_kind === 'dingtalk_opt_in') {
+            msg.content = assessment.evidence_summary || '当前知识库未检索到可用依据。'
+            msg.assessment = { confidence: assessment.confidence ?? 0, reason: assessment.confidence_reason || '' }
+            msg.answerStatus = 'awaiting_choice'
+            if (assessment.citations) msg.citations = assessment.citations
+          }
+          if (usage && usage.total_tokens > 0) msg.usage = usage
+          msg.meta = `🦌 DeerFlow · 等待确认 · ${run.model}`
+          // 流已结束：转为「等待确认」态（不占后端并发），用户点选后发起新请求续跑
+          // 注意 runs 为 reactive Map，get 返回代理，须用 isRun（toRaw 归一）判断身份
+          if (isRun(sid, run)) runs.get(sid)!.status = 'choice'
+          if (viewActive()) scrollToBottom()
+        },
+        onFinal: (res) => {
+          const msg = assistantMsg
+          msg.done = true
+          // 完成：最后一步标记完成，过程条自动收起（用户可点击展开）
+          settleSteps(msg.steps, 'failed')
+          const citations = res.citations || []
+          const configError = res.config_error || ''
+          const noResult = res.answer_status === 'insufficient'
+          if (res.usage && res.usage.total_tokens > 0) msg.usage = res.usage
+          if (citations.length > 0) {
+            msg.meta = `企业知识问答 · ${citations.length} 条原文依据 · ${run.model}`
+          } else if (res.answer) {
+            msg.meta = `企业知识问答 · ${run.model}`
+          } else {
+            msg.meta = `未在知识库找到相关内容 · ${run.model}`
+          }
+          if (res.answer) {
+            // 未收到任何流式增量（答案整段生成）→ 打字机效果逐字渲染；已流式过则直接落定
+            if (!msg.streamed && res.answer.length > 24) typewriterReveal(msg, res.answer, sid)
+            else msg.content = res.answer
+          }
+          else if (!msg.content) msg.content = '（未生成回答）'
+          msg.quality = res.quality
+          msg.answerStatus = res.answer_status
+          msg.citations = citations
+          msg.noResult = noResult
+          msg.configError = configError
+          msg.followUps = followUpEnabled.value ? res.follow_ups || [] : []
+          if (!configError) {
+            if (res.last_query) ctx.q = res.last_query
+            else if (res.rewritten_query) ctx.q = res.rewritten_query
+            ctx.a = res.last_answer ?? ''
+          }
+          // 运行结束：出注册表；绿点提示（查看该会话时立即清除）
+          if (isRun(sid, run)) runs.delete(sid)
+          finishedSids.add(sid)
+          if (viewActive()) scrollToBottom()
+        },
+        onError: (code, message) => {
+          const msg = assistantMsg
+          msg.done = true
+          settleSteps(msg.steps, 'failed')
+          msg.configError = code
+          msg.meta = code === 'llm_not_configured' || code === 'dify_not_configured'
+            ? '需要先完成系统配置'
+            : '⚠️ 回答失败，可重试'
+          msg.content = message || '问答请求失败，请稍后重试。'
+          if (isRun(sid, run)) runs.delete(sid)
+          finishedSids.add(sid)
+          if (viewActive()) scrollToBottom()
+        },
+        onClosed: () => {
+          // 流异常收尾（未收到 final/choice_pause/config_error；主动停止时 stopRun 已置 done）
+          const msg = assistantMsg
+          if (msg.done || msg.configError || !isRun(sid, run)) return
+          // 首次中断：自动重发一次（覆盖网络抖动/代理瞬断/后端 dev 重启场景）
+          // 后端泵 0.2s 轮询断连并停图收尾，稍候再发避免与旧流清理竞争
+          if (!run.retried) {
+            run.retried = true
+            msg.content = ''
+            msg.streamed = false
+            msg.steps = []
+            msg.citations = []
+            msg.choice = undefined
+            msg.usage = undefined
+            msg.meta = `重连中 · ${run.model}`
+            if (viewActive()) scrollToBottom()
+            setTimeout(() => {
+              // 等待期间用户可能已停止/删除会话
+              if (isRun(sid, run) && run.status === 'running' && !msg.done) launchStream()
+            }, 800)
+            return
+          }
+          // 重试仍断：落定失败态，避免永久「转圈」
           msg.done = true
           settleSteps(msg.steps, 'failed')
           if (!msg.content && !msg.choice) msg.content = '（连接中断，回答未完成）'
           msg.meta = `⚠️ 连接中断 · ${run.model}`
-        }
-        if (runs.get(sid) === run) runs.delete(sid)
-        finishedSids.add(sid)
-        if (viewActive()) scrollToBottom()
+          if (isRun(sid, run)) runs.delete(sid)
+          finishedSids.add(sid)
+          if (viewActive()) scrollToBottom()
+        },
       },
-    },
-  )
-  // 中断句柄挂到运行态（停止按钮/切换清理用），并保留全局兜底引用
-  run.abort = abortCurrent
+    )
+    // 中断句柄挂到运行态（停止按钮/切换清理用），并保留全局兜底引用
+    run.abort = abortCurrent
+  }
+  launchStream()
   // 轮询等待 final 或 error（DeerFlow 模式下 content 会随 delta 提前出现，不能以 content 为准）
   const waitDone = () =>
     new Promise<void>((resolve) => {

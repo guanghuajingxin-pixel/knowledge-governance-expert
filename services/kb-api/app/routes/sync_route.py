@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta
 from time import time
 from typing import Any
 
@@ -18,10 +19,11 @@ from app.deps import require_role
 from app.schemas import (
     SyncFailureOut, SyncLogOut, SyncRunOut,
     SyncPreviewSettingsUpdate, SyncSourceCreate, SyncSourceOut, SyncSourceTest, SyncSourceUpdate,
+    SyncTaskBatchIn, SyncTaskOut,
 )
 from kb_common.clients.dify_document import dataset_runtime
 from kb_common.models import (
-    SyncDocumentMapping, SyncFailure, SyncLog, SyncRun, SyncSource, CollectionTransfer,
+    SyncDocumentMapping, SyncFailure, SyncLog, SyncRun, SyncSource, SyncTask, CollectionTransfer,
 )
 
 from app.services.sync.dingtalk_sync_client import DingTalkError
@@ -29,9 +31,10 @@ from app.services.sync.dify_sync_client import DifyError
 from app.services.sync.engine import run_sync
 from app.services.sync.export_service import check_dws
 from app.services.sync.source_files import skip_reason
-from app.services.sync.scheduler import reload_sync_jobs
+from app.services.sync.scheduler import reload_sync_jobs, remove_source_job
 from app.services.sync.sync_database import get_sync_session
 from app.services.sync.sync_settings import make_backend, make_dify_client, make_dingtalk_client
+from app.services.sync.xxljob_admin import crontab_to_quartz
 
 router = APIRouter(prefix="/api/v1/sync", tags=["同步"])
 _executor = ThreadPoolExecutor(max_workers=4)
@@ -203,6 +206,31 @@ def import_pipeline_schema(file: UploadFile, dataset_id: str = Query(...), db=De
         client.close()
 
 
+def _source_dataset_runtime(source: SyncSource, db) -> str:
+    """同步源目标数据集的 runtime 模式（general / rag_pipeline）。
+
+    RAGFlow 一律按普通库（general），不调 resolve（服务未启动时
+    会抛非预期异常导致 500，且 RAGFlow 没有流水线概念）。
+    Dify 模式基本不变，走 10 分钟缓存（_dataset_runtime_cache），
+    避免预演每次都调 resolve_dataset。失败原样抛出，调用方决定是否容错。
+    """
+    if (source.backend_type or "dify") != "dify":
+        return "general"
+    cache_key = f"dify:{source.dify_dataset_id or source.dify_dataset_name}"
+    now = time()
+    cached_mode = _dataset_runtime_cache.get(cache_key)
+    if cached_mode is not None and now - cached_mode[0] < 600:
+        return cached_mode[1]
+    backend = make_backend(source, db)
+    try:
+        dataset = backend.resolve_dataset(source.dify_dataset_id, source.dify_dataset_name)
+        mode = dataset_runtime(dataset)
+    finally:
+        backend.close()
+    _dataset_runtime_cache[cache_key] = (now, mode)
+    return mode
+
+
 @router.get("/sources", response_model=list[SyncSourceOut],
             dependencies=[Depends(require_role("super_admin", "admin", "editor"))])
 def list_sources(db=Depends(get_sync_db)):
@@ -246,6 +274,10 @@ def create_source(payload: SyncSourceCreate, db=Depends(get_sync_db)):
     data = payload.model_dump()
     if not (data.get("dify_dataset_name") or "").strip():
         raise HTTPException(status_code=422, detail="请选择目标知识库")
+    try:
+        crontab_to_quartz(data.get("cron") or "0 2 * * *")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     data["pipeline_inputs"] = _serialize_pipeline_inputs(data.get("pipeline_inputs"))
     client = make_backend(data.get("backend_type", "dify"), db)
     try:
@@ -282,6 +314,11 @@ def update_source(source_id: int, payload: SyncSourceUpdate, db=Depends(get_sync
     updates = payload.model_dump(exclude_unset=True)
     if "dify_dataset_name" in updates and not (updates.get("dify_dataset_name") or "").strip():
         raise HTTPException(status_code=422, detail="请选择目标知识库")
+    if "cron" in updates:
+        try:
+            crontab_to_quartz(updates.get("cron") or source.cron)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
     if "pipeline_inputs" in updates:
         updates["pipeline_inputs"] = _serialize_pipeline_inputs(updates.get("pipeline_inputs"))
     if "dify_dataset_id" in updates or "dify_dataset_name" in updates:
@@ -321,15 +358,18 @@ def delete_source(source_id: int, db=Depends(get_sync_db)):
     source = db.get(SyncSource, source_id)
     if source is None:
         raise HTTPException(status_code=404, detail="同步源不存在")
+    job_id = source.xxl_job_id
     db.delete(source)
     db.commit()
+    remove_source_job(job_id)
     reload_sync_jobs()
     return {"ok": True}
 
 
 @router.post("/sources/{source_id}/sync",
              dependencies=[Depends(require_role("super_admin", "admin", "editor"))])
-def sync_source_now(source_id: int, db=Depends(get_sync_db)):
+def sync_source_now(source_id: int, u=Depends(require_role("super_admin", "admin", "editor")),
+                    db=Depends(get_sync_db)):
     source = db.get(SyncSource, source_id)
     if source is None:
         raise HTTPException(status_code=404, detail="同步源不存在")
@@ -340,8 +380,13 @@ def sync_source_now(source_id: int, db=Depends(get_sync_db)):
     ).first()
     if running:
         raise HTTPException(status_code=409, detail="该同步源正在运行，请在运行监控中查看结果")
-    _executor.submit(run_sync, source_id, "manual")
-    return {"ok": True, "message": "同步任务已启动，可在运行监控中查看结果"}
+    from app.services.sync.scheduler import trigger_source_sync
+    from app.services.sync.xxljob_admin import XxlJobAdminError
+    try:
+        result = trigger_source_sync(source_id, u.username)
+    except XxlJobAdminError as exc:
+        raise HTTPException(status_code=503, detail=f"调度中心不可用: {exc}") from exc
+    return {"ok": True, "via": result["via"], "message": result["message"]}
 
 
 @router.get("/sources/{source_id}/stats",
@@ -445,24 +490,10 @@ def preview_source(source_id: int, refresh: bool = False, db=Depends(get_sync_db
 
     mappings = {m.node_id: m for m in
                 db.query(SyncDocumentMapping).filter_by(source_id=source_id).all()}
-    # 数据集 runtime 模式缓存：模式（general/rag_pipeline）基本不变，
-    # 缓存 10 分钟，免去每次预演都调一次 Dify resolve_dataset
-    cache_key = f"{source.backend_type or 'dify'}:{source.dify_dataset_id or source.dify_dataset_name}"
-    now = time()
-    cached_mode = _dataset_runtime_cache.get(cache_key)
-    if cached_mode is not None and now - cached_mode[0] < 600:
-        mode = cached_mode[1]
-    else:
-        backend = make_backend(source, db)
-        try:
-            dataset = backend.resolve_dataset(source.dify_dataset_id, source.dify_dataset_name)
-            # 知识流水线（rag_pipeline）是 Dify 专属；RAGFlow 一律按普通库
-            mode = dataset_runtime(dataset) if (source.backend_type or "dify") == "dify" else "general"
-        except (DifyError, ValueError) as exc:
-            raise HTTPException(502, str(exc)) from exc
-        finally:
-            backend.close()
-        _dataset_runtime_cache[cache_key] = (now, mode)
+    try:
+        mode = _source_dataset_runtime(source, db)
+    except (DifyError, ValueError) as exc:
+        raise HTTPException(502, str(exc)) from exc
     items: list[dict] = []
     remote_ids: set[str] = set()
     for node in nodes:
@@ -552,25 +583,150 @@ def list_failures(source_id: int | None = None, limit: int = Query(50, le=200),
 
 @router.post("/failures/{failure_id}/retry",
              dependencies=[Depends(require_role("super_admin", "admin", "editor"))])
-def retry_failure(failure_id: int, db=Depends(get_sync_db)):
+def retry_failure(failure_id: int, u=Depends(require_role("super_admin", "admin", "editor")),
+                  db=Depends(get_sync_db)):
     failure = db.get(SyncFailure, failure_id)
     if failure is None:
         raise HTTPException(status_code=404, detail="失败记录不存在")
     source_id = failure.source_id
-    _executor.submit(run_sync, source_id, "manual")
+    _executor.submit(run_sync, source_id, "manual", u.username)
     return {"ok": True, "message": "已触发重试"}
 
 
 @router.post("/failures/retry-all",
              dependencies=[Depends(require_role("super_admin", "admin", "editor"))])
-def retry_all_failures(db=Depends(get_sync_db)):
+def retry_all_failures(u=Depends(require_role("super_admin", "admin", "editor")),
+                       db=Depends(get_sync_db)):
     rows = db.query(SyncFailure).all()
     if not rows:
         return {"ok": True, "message": "没有待重试的失败项"}
     source_ids = sorted({r.source_id for r in rows})
     for sid in source_ids:
-        _executor.submit(run_sync, sid, "manual")
+        _executor.submit(run_sync, sid, "manual", u.username)
     return {"ok": True, "message": f"已触发 {len(source_ids)} 个同步源重试"}
+
+
+# ---------- 同步队列：逐文档任务 ----------
+@router.get("/tasks",
+            dependencies=[Depends(require_role("super_admin", "admin", "editor"))])
+def list_tasks(tab: str = Query("done"), status: str = "", source_id: int | None = None,
+               ext: str = "", duration: str = "", keyword: str = "",
+               start_from: str = "", start_to: str = "",
+               page: int = Query(1, ge=1), size: int = Query(20, ge=1, le=100),
+               db=Depends(get_sync_db)):
+    """同步队列任务列表：tab=pending|running|done 三个页签，done 内可再按执行结果筛选。"""
+    conditions = []
+    if tab == "pending":
+        conditions.append(SyncTask.status == "pending")
+    elif tab == "running":
+        conditions.append(SyncTask.status == "running")
+    else:
+        conditions.append(SyncTask.status.in_(["success", "failed"]))
+        if status in ("success", "failed"):
+            conditions.append(SyncTask.status == status)
+    if source_id is not None:
+        conditions.append(SyncTask.source_id == source_id)
+    if ext:
+        conditions.append(SyncTask.file_ext == ext)
+    if keyword.strip():
+        conditions.append(SyncTask.name.contains(keyword.strip(), autoescape=True))
+    dur_sec = func.extract("epoch", SyncTask.finished_at - SyncTask.started_at)
+    if duration == "lt10":
+        conditions.append(dur_sec <= 10)
+    elif duration == "10_60":
+        conditions.append(dur_sec > 10)
+        conditions.append(dur_sec <= 60)
+    elif duration == "60_300":
+        conditions.append(dur_sec > 60)
+        conditions.append(dur_sec <= 300)
+    elif duration == "gt300":
+        conditions.append(dur_sec > 300)
+    if start_from:
+        try:
+            conditions.append(SyncTask.started_at >= datetime.fromisoformat(start_from))
+        except ValueError:
+            pass
+    if start_to:
+        try:
+            conditions.append(SyncTask.started_at < datetime.fromisoformat(start_to) + timedelta(days=1))
+        except ValueError:
+            pass
+
+    # 页签计数：全局口径，不受筛选条件影响
+    counts = dict(db.execute(
+        select(SyncTask.status, func.count()).group_by(SyncTask.status)).all())
+    tabs = {"pending": counts.get("pending", 0), "running": counts.get("running", 0),
+            "done": counts.get("success", 0) + counts.get("failed", 0)}
+    total = db.scalar(select(func.count()).select_from(SyncTask).where(*conditions)) or 0
+    rows = db.execute(
+        select(SyncTask, SyncSource.name.label("source_name"))
+        .outerjoin(SyncSource, SyncSource.id == SyncTask.source_id)
+        .where(*conditions).order_by(SyncTask.id.desc())
+        .offset((page - 1) * size).limit(size)).all()
+    items = []
+    for task, source_name in rows:
+        data = SyncTaskOut.model_validate(task).model_dump()
+        data["source_name"] = source_name or ""
+        data["duration_sec"] = (int((task.finished_at - task.started_at).total_seconds())
+                                if task.started_at and task.finished_at else None)
+        items.append(data)
+    return {"items": items, "total": total, "tabs": tabs}
+
+
+@router.post("/tasks/batch-retry",
+             dependencies=[Depends(require_role("super_admin", "admin", "editor"))])
+def batch_retry_tasks(payload: SyncTaskBatchIn, db=Depends(get_sync_db)):
+    """批量重试：仅失败且带节点信息的任务可重试；同步源正在运行的跳过。"""
+    from app.services.sync.task_retry import submit_task_retry
+    tasks = db.query(SyncTask).filter(SyncTask.id.in_(payload.ids)).all()
+    running_sources = {r[0] for r in
+                       db.query(SyncRun.source_id).filter(SyncRun.status == "running").all()}
+    submitted = 0
+    skipped = 0
+    for task in tasks:
+        if task.status == "failed" and task.node_id and task.source_id is not None \
+                and task.source_id not in running_sources:
+            submit_task_retry(task.id)
+            submitted += 1
+        else:
+            skipped += 1
+    skipped += max(0, len(payload.ids) - len(tasks))
+    message = f"已提交 {submitted} 个任务重试"
+    if skipped:
+        message += f"，跳过 {skipped} 个（非失败、缺节点信息或同步源运行中）"
+    return {"ok": True, "submitted": submitted, "skipped": skipped, "message": message}
+
+
+@router.post("/tasks/batch-delete",
+             dependencies=[Depends(require_role("super_admin", "admin"))])
+def batch_delete_tasks(payload: SyncTaskBatchIn, db=Depends(get_sync_db)):
+    """批量清理已结束（成功/失败）的任务记录；进行中的不允许删除。"""
+    deleted = db.query(SyncTask).filter(
+        SyncTask.id.in_(payload.ids),
+        SyncTask.status.in_(["success", "failed"]),
+    ).delete(synchronize_session=False)
+    db.commit()
+    return {"ok": True, "deleted": deleted, "message": f"已删除 {deleted} 条已结束的任务记录"}
+
+
+@router.post("/tasks/{task_id}/retry",
+             dependencies=[Depends(require_role("super_admin", "admin", "editor"))])
+def retry_task(task_id: int, db=Depends(get_sync_db)):
+    """任务级重试：只重处理这一个钉钉节点，不整源重跑。"""
+    from app.services.sync.task_retry import submit_task_retry
+    task = db.get(SyncTask, task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if task.status != "failed":
+        raise HTTPException(status_code=409, detail="仅失败任务可重试")
+    if not task.node_id or task.source_id is None:
+        raise HTTPException(status_code=409, detail="任务缺少钉钉节点或同步源信息，无法重试")
+    running = db.query(SyncRun.id).filter(
+        SyncRun.source_id == task.source_id, SyncRun.status == "running").first()
+    if running:
+        raise HTTPException(status_code=409, detail="该同步源正在同步中，请等待结束后再重试")
+    submit_task_retry(task_id)
+    return {"ok": True, "message": "重试已提交，队列稍后刷新可见结果"}
 
 
 @router.get("/logs", response_model=list[SyncLogOut],

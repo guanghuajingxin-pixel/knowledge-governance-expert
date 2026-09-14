@@ -56,17 +56,18 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '知识加工', icon: 'Setting', group: 'feature' },
       },
       {
-        // 知识应用：拆分为二级页（应用总览/知识库），父级仅作分组，重定向到首个子页
+        // 知识应用：拆分为二级页（脱敏策略/知识库），父级仅作分组，重定向到首个子页
         path: 'apply',
         name: 'Apply',
-        redirect: '/apply/overview',
+        redirect: '/apply/masking',
         meta: { title: '知识应用', icon: 'Connection', group: 'feature' },
       },
       {
-        path: 'apply/overview',
-        name: 'ApplyOverview',
-        component: () => import('@/views/governance/apply.vue'),
-        meta: { title: '应用总览', icon: 'Connection', group: 'feature', parent: '/apply', menuOrder: 1 },
+        // 脱敏策略：检索返回脱敏策略控制台（策略编排/敏感词典/豁免/审计/沙箱），仅管理员可管
+        path: 'apply/masking',
+        name: 'MaskingStrategy',
+        component: () => import('@/views/masking/index.vue'),
+        meta: { title: '脱敏策略', icon: 'Hide', group: 'feature', parent: '/apply', menuOrder: 1, roles: ['super_admin', 'admin'] },
       },
       {
         // 知识库：检索抽象层镜像（RAGFlow / DIFY），仅供智能体检索选库，不支持导入解析
@@ -107,6 +108,13 @@ const routes: RouteRecordRaw[] = [
         name: 'CollectionUpload',
         component: () => import('@/views/governance/collection/ManualUpload.vue'),
         meta: { title: '本地上传', icon: 'Upload', group: 'feature', parent: '/collection', menuOrder: 3 },
+      },
+      {
+        // 同步队列：知识同步过程的逐文档任务列表（待处理/处理中/已完成 + 失败任务重试）
+        path: 'collection/queue',
+        name: 'CollectionQueue',
+        component: () => import('@/views/governance/collection/SyncQueue.vue'),
+        meta: { title: '同步队列', icon: 'Tickets', group: 'feature', parent: '/collection', menuOrder: 4 },
       },
       {
         path: 'model',

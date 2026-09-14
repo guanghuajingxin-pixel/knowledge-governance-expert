@@ -3,9 +3,10 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { formatDate } from '@/utils/format'
 import {
-  listFailures, listLogs, listRuns, listSources, retryAllFailures, retryFailure, sourceStats,
+  listFailures, listLogs, listRuns, listSources, retryAllFailures, retryFailure, sourcesStatsAll,
 } from '@/api/sync'
 import type { Failure, Log, Run, Source, SourceStats } from '@/types/sync'
+import type { SourceStatsItem } from '@/api/sync'
 import StatusPill from './components/StatusPill.vue'
 
 // ===== 数据 =====
@@ -52,12 +53,19 @@ async function refresh() {
   await Promise.all([loadRuns(), loadFailures(), loadLogs(), loadSourcesAndStats()])
 }
 async function loadSourcesAndStats() {
+  // 批量统计接口（2 条聚合 SQL）替代逐源 sourceStats 的 N+1：
+  // 10 个源从 11 请求/轮（每 5s）降到 2 请求
   try {
-    sources.value = await listSources()
-    statsMap.value = {}
-    await Promise.all(sources.value.map(async (s) => {
-      try { statsMap.value[s.id] = await sourceStats(s.id) } catch { /* ignore */ }
-    }))
+    const [list, statsRes] = await Promise.all([
+      listSources(),
+      sourcesStatsAll().catch(() => ({ items: [] as SourceStatsItem[] })),
+    ])
+    sources.value = list
+    const next: Record<number, SourceStats> = {}
+    for (const it of statsRes.items) {
+      next[it.source_id] = { doc_count: it.doc_count, last_run: it.last_run }
+    }
+    statsMap.value = next
   } catch { /* 拦截器已提示 */ }
 }
 async function loadRuns() {
@@ -88,7 +96,13 @@ let pollTimer: ReturnType<typeof setTimeout> | undefined
 let disposed = false
 async function poll() {
   try { await refresh() } catch { /* 拦截器已提示 */ }
-  finally { if (!disposed) pollTimer = setTimeout(poll, 5000) }
+  finally {
+    if (disposed) return
+    // 动态轮询：有运行中任务 5s 高频盯进度；全部空闲降为 30s 低频巡检
+    const hasRunning = Object.values(statsMap.value).some((st) => st.last_run?.status === 'running')
+      || runs.value.some((r) => r.status === 'running')
+    pollTimer = setTimeout(poll, hasRunning ? 5000 : 30000)
+  }
 }
 onMounted(poll)
 onBeforeUnmount(() => { disposed = true; clearTimeout(pollTimer) })

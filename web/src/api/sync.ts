@@ -2,7 +2,7 @@
 import request from './request'
 import type {
   Failure, Log, PipelineVariablesResponse, PreviewItem, Run, RunDetail, Source, SourcePayload, SourceStats,
-  TreeNode, TreeNodeLite, Workspace,
+  TaskListResponse, TaskQuery, TreeNode, TreeNodeLite, Workspace,
 } from '@/types/sync'
 
 const BASE = '/sync'
@@ -83,3 +83,15 @@ export const importPipelineSchema = (datasetId: string, file: File) => {
   data.append('file', file)
   return request.post<unknown, PipelineVariablesResponse>(`${BASE}/pipeline-schema`, data, { params: { dataset_id: datasetId } })
 }
+
+// ---------- 同步队列：逐文档任务 ----------
+export const listTasks = (params: TaskQuery) =>
+  request.get<unknown, TaskListResponse>(`${BASE}/tasks`, { params })
+
+export const retryTask = (id: number) => request.post(`${BASE}/tasks/${id}/retry`)
+
+export const batchRetryTasks = (ids: number[]) =>
+  request.post<unknown, { ok: boolean; submitted: number; skipped: number; message: string }>(`${BASE}/tasks/batch-retry`, { ids })
+
+export const batchDeleteTasks = (ids: number[]) =>
+  request.post<unknown, { ok: boolean; deleted: number; message: string }>(`${BASE}/tasks/batch-delete`, { ids })

@@ -6,13 +6,13 @@
 
 ```
                      ┌─────────────────────────────────────────┐
-   Web (Vue3)        │  本地原生进程（开发模式，BGE 在 Mac 内存）│
+   Web (Vue3)        │  本地原生进程（开发模式）                │
    :3000 (vite)      │                                         │
-        │            │  kb-api:8000      FastAPI + BGE-M3      │
+        │            │  kb-api:8000      FastAPI（模型外接）   │
         │  /api/v1   │   ├ 文档/目录/检索/问答/认证/设置        │
         │  /api/v1/  │   ├ DeerFlow Runner (SSE 转译/回退)     │
         │   faq      │   ├ 内置 LangGraph Agent (回退工作流)   │
-        └─────┬─────►│   └ /internal/embed (复用 BGE，无鉴权)  │
+        └─────┬─────►│   └ /internal/embed (转发外接向量 API)  │
               │      │                                         │
               │ HTTP │  deerflow:2027  DeerFlow 2.0 sidecar    │
               │  SSE │   (Python 3.12 + uv，独立 venv)         │
@@ -45,7 +45,7 @@
 
 **4 应用进程**（kb-api / faq-service / kb-worker / **deerflow sidecar**）+ **5 基础设施容器**（dev-services compose）+ **本地 Dify 服务**（`dify/docker`，独立 compose，默认 8088 端口）。
 
-BGE-M3 + bge-reranker-v2-m3 仅在 kb-api 进程加载一次（~2-3GB RSS），faq-service 与 kb-worker 经 `/internal/embed` 复用，避免 Mac 内存爆炸。
+向量（BGE-M3 API 版）+ 重排（bge-reranker-v2-m3 API 版）**全部外接**（OpenAI 兼容 `/embeddings` 与 `/rerank` HTTP API，配置 `EMBEDDING_*` / `RERANK_*`），kb-api 不再本地加载模型；faq-service 与 kb-worker 经 `/internal/embed` 复用 kb-api 的外接通道。
 
 **智能问答 Agent 底座：DeerFlow 2.0 sidecar**。问答能力由真实的 [DeerFlow 2.0 Enhanced](https://github.com/stophobia/deerflow2.0-enhanced) harness 驱动（vendor 于 [services/deerflow/backend](services/deerflow/backend)），而非自建流程图。DeerFlow harness 要求 Python ≥3.12（langchain 1.2.x / langgraph 1.0.x），与 kb-api 的 Python 3.11 + langchain 0.x 无法同环境，因此以**独立 sidecar 进程**运行（端口 2027）：
 
@@ -83,13 +83,22 @@ BGE-M3 + bge-reranker-v2-m3 仅在 kb-api 进程加载一次（~2-3GB RSS），f
 
 **菜单显示配置**：「系统配置 → 菜单配置」以列表形式管理侧边栏「功能区」全部菜单的显示/隐藏（开关即存，整体覆盖式更新）。「智能问答」为默认首页固定显示。存储：settings 表 `menu_visibility`（JSON `{"hidden":[路径]}`），接口 `GET/PUT /api/v1/settings/menu-visibility`（GET 所有登录用户可读、PUT 管理员），见 [settings_route.py](services/kb-api/app/routes/settings_route.py) 与 [model.vue](web/src/views/governance/model.vue)「菜单配置」Tab；[Sidebar.vue](web/src/components/layout/Sidebar.vue) 加载配置过滤功能区菜单（含二级子菜单），读取失败或未配置时默认全部显示，隐藏仅作用于导航（路由仍可直接访问）。
 
+**检索返回脱敏策略控制台（知识应用 → 脱敏策略，`/apply/masking`）**：管理「检索返回策略」而非数据本身——管理员改任何配置都能回答：改变哪次检索、链路哪个节点、对哪类用户、把什么敏感实体、变成什么返回形态。框架为**条件 → 识别 → 动作 → 执行节点 → 兜底 → 审计**。页面五页签：策略编排 / 敏感词典 / 豁免管理 / 脱敏审计 / 预览沙箱，顶部全局策略条（总开关 / 送LLM前脱敏 / 输出后二次过滤 / 失败策略 / 用户提示语「部分内容因权限隐藏」，存 settings 表 `masking_global`）。
+
+- **数据模型**：`masking_policies`（作用域 global/library/kb 继承叠加 + 角色/场景条件 + 词典类型/自定义正则/上下文规则三类识别 + 实体类型→动作映射 + 双执行节点开关 + 失败策略）、`masking_exemptions`（人 + 范围 + 实体类型 + 有效期，到期自动失效）、`masking_logs`（脱敏审计：命中规则标签与数量，**不含敏感原文**），迁移 [0028_masking_policies.py](alembic/versions/0028_masking_policies.py)。
+- **脱敏引擎**：[masking.py](services/kb-api/app/services/masking.py)。识别＝内置正则（手机号/身份证/银行卡/邮箱，身份证先于银行卡匹配防吞）＋敏感词典（复用 `sensitive_items`，TTL 30s 缓存）＋上下文规则（如「薪酬」邻近金额）＋策略自定义正则（非法正则跳过不阻断）；动作＝部分遮蔽/泛化/替换/哈希/截断/拒绝返回，**多策略命中同一实体类型取最严格**；**一致性替换**——同一实体文本在同一请求内映射到同一确定性令牌，防多片段拼接还原；`load_mask_context` 无策略或全局关闭时返回 None，调用方零开销直通；审计写入为 fire-and-forget（独立 session，异常不影响主流程）。
+- **执行节点**：①**送LLM前（底线）**——[agent_internal.py](services/kb-api/app/routes/agent_internal.py) `/internal/kb/retrieve` 返回出口按 `thread_id` 回溯提问用户身份（角色/豁免）后对召回片段脱敏（reject 动作整条丢弃），kb_tools 透传 thread_id；②**输出后二次过滤**——统一检索结果与问答流式输出（[search.py](services/kb-api/app/routes/search.py)）再扫描，命中可阻断/替换/降级。
+- **API**：[masking.py](services/kb-api/app/routes/masking.py)（全部仅 super_admin/admin）：`GET/POST/PUT/DELETE /api/v1/masking-policies`、`GET/POST/DELETE /api/v1/masking-exemptions`、`GET /api/v1/masking-logs`（场景/节点筛选 + 分页）、`GET/PUT /api/v1/masking-global`、`POST /api/v1/masking/sandbox`（模拟查询+模拟角色 → 真实检索（本地 ES + Dify/RAGFlow 镜像，fail-soft）→ 原始 vs 脱敏对比 + 命中规则汇总，不调 LLM）。策略校验：重名 409、非法正则/作用域/动作 422。
+- **前端**：[masking/index.vue](web/src/views/masking/index.vue)（全局策略条 + 五页签）+ [PolicyTab.vue](web/src/views/masking/PolicyTab.vue)（编排弹窗：基本信息/触发条件/识别/动作/执行节点四区分节）、[DictTab.vue](web/src/views/masking/DictTab.vue)（敏感词条 CRUD，即原「敏感信息」页下沉为词典来源，[api/sensitive.ts](web/src/api/sensitive.ts) 保留）、[ExemptionTab.vue](web/src/views/masking/ExemptionTab.vue)（豁免 + 限期开关）、[AuditTab.vue](web/src/views/masking/AuditTab.vue)（筛选 + 分页 + 命中规则标签）、[SandboxTab.vue](web/src/views/masking/SandboxTab.vue)（左右对比卡：原始召回 vs 用户视角脱敏后，逐片段命中规则/拒绝标记）。路由 `/apply/masking`（菜单「脱敏策略」）替换原 `/apply/sensitive`，仅 super_admin/admin 可见。
+- **验证**：端到端脚本 [test_masking_e2e.py](scripts/test_masking_e2e.py)（TestClient 直连本地基础设施）：登录鉴权 → 全局配置读写 → 策略 CRUD（重名 409/非法正则 422）→ 沙箱 → 送LLM前脱敏（thread_id 身份回溯 + viewer 兜底 + 片段/标题脱敏）→ 审计落库与日志自身脱敏 → 豁免创建/撤销 → 清理，输出 `ALL E2E PASSED`。原「知识应用 → 应用总览」演示页已移除，`/apply` 重定向到 `/apply/masking`。
+
 **「关于我」产品介绍页**：侧边栏左下角「关于我」按钮（紫色图标，所有登录用户可见，[Sidebar.vue](web/src/components/layout/Sidebar.vue)），点击**新开浏览器页签**打开纯静态介绍页 [web/public/about.html](web/public/about.html)（原生 `<a :href="import.meta.env.BASE_URL + 'about.html'" target="_blank">`，避免弹窗拦截；dev 与构建产物均由根路径直达，不依赖登录态与后端）。页面以营销页形式呈现：平台定位与数据条（4 应用进程 / 5 基础设施容器 / 1.6万+ 钉钉知识节点 / 6.7TB 企业存储 / 1/5/10min 限时探索）、设计理念（答案优先而非链接堆砌、先预判目录再进目录、把时间还给用户、一切皆可配置、安全与稳定是默认值、基于正文作答）、**知识治理闭环全景图**（单张紧凑白色卡片，SVG 环形闭环布局：5 个彩色圆角节点①采集「汇得拢」②加工「读得懂」③应用「用得上」④运营「看得见」⑤治理「管得住」围成圆环，灰色实线弧箭头沿环顺时针流转，**治理→采集的橙色收口弧使首尾相接成闭环**；环中心为紫色「治理飞轮」hub（越用越准·越治越新）；环内两条红色虚线表达跨环节质量回流——治理→加工（重分段/重打标/重建索引）、应用→治理（问答反馈·点赞/踩/无结果），回流标签最后绘制并加白色描边保证压线可读；卡片底部双行图例（环节色点 + 线条类型）；≤960px 窄屏自动降级为纵向紧凑列表）、闭环整体价值三胶囊（知识不沉没/质量自进化/投入可度量）、分层系统架构图（接入层 → DeerFlow 智能体层 → 应用服务层 → 检索与解析 → 基础设施）、八大功能模块卡片与技术亮点清单；内容与 README 架构章节保持同口径（HiAgent 为临时模块未收录）。纯单文件 HTML + 内联 CSS，无外部资源依赖，响应式适配窄屏。
 
 ## 两种运行模式
 
 ### 模式 1（推荐）：本地原生 + Docker 基础设施
 
-应用进程跑在 Mac 原生内存（BGE 模型直接用 Mac RAM），基础设施跑在 Docker。**开发期推荐**，迭代快，无需 colima 加内存。
+应用进程跑在 Mac 原生内存（模型全部外接 HTTP API，无本地模型内存占用），基础设施跑在 Docker。**开发期推荐**，迭代快。
 
 ```bash
 # 1. 启动 Docker 基础设施（dev-services compose，一次性；路径按实际调整）
@@ -131,11 +140,7 @@ cd web && pnpm install && pnpm dev   # http://localhost:3000
 docker compose -f docker-compose.app.yml up -d --build
 ```
 
-> **⚠ colima 内存要求**：BGE-M3 在 kb-api 容器内 CPU 推理，需 colima ≥ 8GB：
-> ```bash
-> colima stop && colima start --cpu 4 --memory 8
-> ```
-> 首次启动较慢（BGE 模型下载 ~2GB，容器内首次 embed 约 30-60s）。MVP 不推荐此模式做开发，仅用于验证镜像可部署。
+> 模型全部外接（向量/重排/LLM 走 HTTP API，见 `.env.docker` 的 `EMBEDDING_*` / `RERANK_*`），kb-api 容器无本地模型加载，colima 无额外内存要求，启动即就绪。
 
 清理应用容器（不清理基础设施）：
 ```bash
@@ -151,7 +156,7 @@ docker compose -f docker-compose.app.yml down
 | 约束 | 适配 |
 |------|------|
 | 老 CPU（仅 x86-64-v1，缺 SSE4.1/POPCNT） | `kb-common` 固定 `numpy<2`（NumPy 2.x 要求 x86-64-v2，会 `Illegal instruction`/`cannot load module`）；minio 固定旧版镜像 `RELEASE.2022-12-12T19-27-27Z`（新镜像要求 x86-64-v2） |
-| 内存偏小（<8GB） | kb-worker 以 `EMBED_VIA_INTERNAL=true` 复用 kb-api 的 BGE 模型（不重复加载，见 [indexer.py](services/kb-common/kb_common/rag/indexer.py)）；ES `-Xms512m -Xmx512m`；服务器加 8G swap 兜底 |
+| 内存偏小（<8GB） | **本地模型已全部停用**（向量/重排外接 HTTP API，kb-api 内存从 ~2-3GB 降到 ~160MB）；kb-worker 以 `EMBED_VIA_INTERNAL=true` 经 kb-api 统一转发外接向量 API（见 [indexer.py](services/kb-common/kb_common/rag/indexer.py)）；ES `-Xms512m -Xmx512m`；服务器加 8G swap 兜底 |
 | 内网网络（docker.io 超时 / HTTP 透明代理污染） | 三个 Dockerfile 内 `UV_INDEX_URL` 走阿里云 pypi；Docker Hub 配 `registry-mirrors`（daocloud 等）；apt 源 / pypi 一律用 **HTTPS**（内网对 HTTP 常有透明代理导致 Hash Sum mismatch） |
 | containerd 并发拉取 overlayfs 偶发 `device or resource busy` | **串行**拉取 / 构建（一次一个服务），失败重试即绕过 |
 
@@ -169,8 +174,10 @@ rsync -a --exclude '.venv' --exclude '__pycache__' --exclude 'node_modules' \
   --exclude 'web/src' --exclude 'services/*/tests' --exclude 'services/*/data' \
   . jack@<服务器IP>:/opt/kge/
 
-# 2. 准备模型（内网无法从 HuggingFace 下载，须预先物化到 deploy/intranet/models/）
-#    bge-m3 + bge-reranker-v2-m3（扁平目录，含权重 + tokenizer）
+# 2. 模型全部外接（本次更新：停用本地 BGE）：无需再物化模型文件！
+#    在 .env.app 配 EMBEDDING_BASE_URL / EMBEDDING_API_KEY / EMBEDDING_MODEL
+#    （与可选 RERANK_API_URL / RERANK_API_KEY / RERANK_MODEL）；
+#    LLM/MinerU Key 也可部署后在「模型配置」页补填
 # 3. 准备前端产物：本地 `cd web && pnpm build`，把 dist/ 上传到 /opt/kge/web/dist（nginx root）
 
 # 4. 基础设施（postgres/redis/elasticsearch/minio/kkfileview）
@@ -202,7 +209,19 @@ sudo ufw allow 8080/tcp comment "KGE 前端"
 
 > **注意 ufw 与 Docker 的交互**：ufw 规则只作用于宿主机进程监听的端口（nginx 8080、kb-sync 80）；Docker 发布的端口（8001/8004/2027/8012/9000-9001/9200/5432/6379）经 iptables PREROUTING/FORWARD 链 DNAT，**会绕过 ufw 直接可访问**。若需限制这些端口，需另行配置 `DOCKER-USER` 链或去掉 compose 的宿主端口映射。
 
-部署文件清单（`deploy/intranet/`）：`docker-compose.infra.yml`（基础设施）、`docker-compose.app.yml`（应用，build context 自动指向上两级 repo root）、`.env.infra.example` / `.env.app.example`（脱敏模板，部署时复制为 `.env.infra` / `.env.app` 填真实密码）、`nginx-kge.conf`（前端反代）。`deploy/intranet/models/` 用于放置物化好的 BGE 模型（勿提交，用 `.gitignore` 忽略）。
+部署文件清单（`deploy/intranet/`）：`docker-compose.infra.yml`（基础设施）、`docker-compose.app.yml`（应用，build context 自动指向上两级 repo root）、`.env.infra.example` / `.env.app.example`（脱敏模板，部署时复制为 `.env.infra` / `.env.app` 填真实密码与外接模型 API 配置）、`nginx-kge.conf`（前端反代）。模型全部外接，无需物化模型文件；旧部署里的 `deploy/intranet/models/` 目录与 `BGE_EMBED_MODEL` / `BGE_RERANK_MODEL` 环境变量已废弃，升级时直接删除。
+
+**⭐ 本次更新重点（2026-09 推送服务器必读）**
+
+本轮优化以「停用本地小模型 + 全链路提速」为核心，**下次推送服务器时按以下清单操作**：
+
+1. **停用本地 BGE-M3 + bge-reranker（模型全部外接）**——kb-api 不再加载本地模型：
+   - 内存：worker 进程 ~2-3GB → ~160MB；镜像不再包含 torch/FlagEmbedding（`deploy/intranet/models/` 与 `BGE_EMBED_MODEL` / `BGE_RERANK_MODEL` 已从 compose 移除）。
+   - **服务器升级操作**：① `.env.app` 新增 `EMBEDDING_BASE_URL` / `EMBEDDING_API_KEY` / `EMBEDDING_MODEL`（OpenAI 兼容端点，模型须 1024 维以对齐既有 ES 索引）与可选 `RERANK_API_URL` / `RERANK_API_KEY` / `RERANK_MODEL`；② 删除服务器上旧的 `deploy/intranet/models/` 目录；③ **必须重新 build 镜像**（依赖已瘦身）。不配置外接向量模型时本地 RAG 检索/入库不可用（Dify/RAGFlow 知识库检索不受影响），重排未配置则自动跳过。
+2. **XXL-Job 定时同步调度上线 + 启动降级**：XXL-Job admin 不可达时 kb-api 自动降级（记录日志、跳过定时调度），不再因调度器缺席拖死整个服务；本地开发可在 `.env` 设 `XXL_JOB_ENABLED=false`。生产启用定时同步需另起 `deploy/xxl-job/`（admin + MySQL）。
+3. **数据库迁移新增 0026-0029**（sync_tasks / 敏感项 / 脱敏策略 / 同步源绑定 XXL 执行器）：升级后必须 `alembic upgrade head` 并验证同步与问答接口。
+4. **同步链路质量与性能**：① 源文档**原样直传 Dify**（不再经本地转换引擎，先备份 MinIO 再上传）；② 钉钉目录树并发遍历（≤3 并发）+ 服务端 10 分钟缓存，「同步列表」从数十秒降到秒级（缓存命中 <100ms）；③ 逐源统计 N+1 改批量聚合接口 + 前端 1 小时持久缓存（`kge:sync_sources_page_v1` / `kge:dify_datasets_v1` / `kge:dingtalk_workspaces_v1`）。
+5. **升级后老规矩**：app 容器重启后 `docker restart` nginx（避免上游 IP 缓存导致 502）。
 
 **访问**：`http://<服务器IP>:8080`，登录 `admin` / `admin123`。
 
@@ -216,7 +235,7 @@ sudo ufw allow 8080/tcp comment "KGE 前端"
 | deerflow | 2027 | 2027 |
 | postgres / redis / es / minio / kkfileview | 5432 / 6379 / 9200 / 9000 / 8012 | 同左 |
 
-> 部署完成后仍需在「模型配置」页补 **LLM API Key**（智能问答，否则 deerflow bootstrap 返回 409「LLM not configured」）与 **MinerU 云 API Key**（PDF/Office 解析，未配仅支持 txt/md/csv 本地解析）。BGE 模型从宿主机 `models/` 以只读卷挂载到 kb-api，`BGE_EMBED_MODEL=/models/bge-m3`、`BGE_RERANK_MODEL=/models/bge-reranker-v2-m3`（内网无法从 HuggingFace 下载，须预先物化好模型文件）。
+> 部署完成后仍需在「模型配置」页补 **LLM API Key**（智能问答，否则 deerflow bootstrap 返回 409「LLM not configured」）与 **MinerU 云 API Key**（PDF/Office 解析，未配仅支持 txt/md/csv 本地解析）。向量/重排模型全部外接：`.env.app` 配 `EMBEDDING_BASE_URL` / `EMBEDDING_API_KEY` / `EMBEDDING_MODEL` 与可选 `RERANK_API_URL` / `RERANK_API_KEY` / `RERANK_MODEL`（本地 BGE 模型与 `models/` 卷挂载已停用）；未配置时本地 RAG 检索/入库不可用（Dify/RAGFlow 检索不受影响），rerank 未配置则检索跳过重排。
 
 ## .env 配置
 
@@ -291,8 +310,7 @@ KB_API_INTERNAL_URL=http://kb-api:8000
 
 | 问题 | 解决 |
 |------|------|
-| BGE 首次 embed 很慢 | FlagEmbedding 首次下载 ~2GB 模型；后续从 `~/.cache/huggingface` 加载，秒级 |
-| Docker 全量模式 OOM | colima ≥ 8GB：`colima stop && colima start --cpu 4 --memory 8` |
+| 检索报「未配置外接向量模型」 | 本地 RAG 检索/入库需在 `.env` 配 `EMBEDDING_BASE_URL` / `EMBEDDING_API_KEY` / `EMBEDDING_MODEL`（OpenAI 兼容端点，维度须与既有 ES 索引一致）；Dify/RAGFlow 知识库检索不受影响 |
 | 问答提示「尚未配置 LLM API Key」 | 智能问答依赖 LLM；在「系统配置 → 接入配置」填 LLM API Key 并保存，或在 `.env` 配 `LLM_API_KEY`。Agent 未配置时返回 `config_error=llm_not_configured`（不再 500），前端在对话气泡给出跳转按钮 |
 | PDF/DOCX 解析失败 | 配置 `MINERU_API_KEY` 后支持 PDF/DOCX/PPTX/XLSX/HTML 云解析；留空则仅 txt/md/csv 本地解析，二进制格式抛「需配置 MINERU_API_KEY」 |
 | `uv sync` 报 `kb-common` 找不到 | 在 `services/kb-common` 先 `uv sync`；Docker 构建已通过 repo-root context 解决 |
@@ -485,7 +503,7 @@ docker compose down -v        # 同时删除卷（清空 Dify 数据库与知识
 
 - **从钉钉同步**：**按目录查询**（避免全量遍历超时）——依次选择钉钉知识库 + 文件夹（级联懒加载子目录，任意层级可选）后点「查询」，仅加载该目录的**直接子文档**；首次进入未选择时列表为空。实时数据 + 浏览器内存缓存（5 分钟 TTL，不持久化），「强制刷新」绕过缓存重新拉取。过滤文件名/分页为前端本地进行。后端新增轻量接口（[knowledge_center.py](services/kb-api/app/routes/knowledge_center.py)）：`GET /knowledge-center/dingtalk/workspaces`（实时列团队知识库，含根节点 ID）、`GET /knowledge-center/dingtalk/nodes?parent_node_id=`（实时列某父节点直接子节点），均为单次钉钉 API 调用（约 1.5s）；勾选文档同步到 Dify 沿用 `POST /api/v1/dify/datasets/{id}/sync-dingtalk`（请求体传 `node_id`，后端用 `dingtalk_client.download_document` 走 `queryDentryId → downloadInfos/query → OSS 直链` 下载原文件；**注意**：钉钉 wiki 节点的 `url` 字段是 alidocs 在线预览页，直接下载会得到 HTML 导致 Dify 解析失败，且 OSS 返回的文件名是无扩展名哈希串，上传时须用前端传入的带扩展名原始文件名）。**源文档直传（不做本地转换）**：源文件先备份对象存储（Minio `raw-docs/dingtalk-sync/{node_id}/`），≤15MB 按目标库类型选择 `create-by-file` 或 `pipeline/run` 以源文档上传；>15MB 时 Dify 硬性限制无法直传，明确报错并返回源文件 OSS key。**禁止经 MinerU/文本抽取转换后上传**（历史转换产物内容失真：表格/图片/排版丢失，仅剩分页文本流）。在线文档（adoc/axls/able 等）无 OSS 原文件，仍走钉钉官方导出接口得 docx/xlsx/pdf 后源文件上传。
 - **上传到 Dify 知识库** / **上传前 AI 预检** / **缺口与征集**：单文件与批量上传、AI 预检与缺口看板（详见各页签内说明）。
-- **同步源管理**（后端 `app/routes/sync_route.py`，`/api/v1/sync/sources`）：配置钉钉知识库目录 → Dify 数据集的映射关系，每个同步源自带独立 `cron` 定时表达式（默认 `0 2 * * *` 每日凌晨 2 点）。支持新增/编辑/启停/删除、**同步列表**（原「预演」，dry-run 只比对不写入；**点击立即弹窗、在弹窗内等待加载**——行内按钮不转圈，表格区域显示 loading 遮罩，加载失败自动收起弹窗；结果弹窗前端分页每页 20 条；**全量展示**该目录下所有文档——未同步过标「新增」、上一轮已同步标「更新」，另有「跳过/删除」，每篇带「参与同步」开关，开关打开的文档同步时一律重新上传、不做内容 hash 跳过；**性能**：目录树快照服务端缓存 10 分钟——内存 + `/tmp/kge_sync_walk_cache.json` 磁盘快照（重启热身）命中秒回，未命中时兄弟目录并发遍历（≤3 并发 + 全局 0.4s 节流防钉钉限流）；弹窗内「刷新列表」传 `refresh=true` 强制重遍历（同样弹窗内等待）并保留已调开关；真实同步始终绕过缓存直读钉钉最新目录；数据集 runtime 模式缓存 10 分钟）、**立即同步**、连接测试。操作列仅保留「立即同步 / 同步列表 / 启停开关 / 更多▼」（编辑与删除收进「更多」下拉）。**文档数 = 该源映射表中 status=synced 的数量**（多源可共享同一 Dify 数据集且数据集可能含手动上传文档，不能用数据集全库文档数作为单源口径）。表单中**目录必选**（点选目录树节点，不再默认整库同步；「已选目录」只读回显所点选路径）；目录树在首次选择知识库时自动拉取完整目录并持久化到 localStorage（`kge:sync_dir_tree:{workspace_id}`），再次打开弹窗直接用缓存不请求，搜索框旁「刷新」按钮强制重新拉取。同步源保存后由 `app/services/sync/scheduler.py`（APScheduler BackgroundScheduler）按 cron 注册任务，增删改自动 `reload_sync_jobs`。
+- **同步源管理**（后端 `app/routes/sync_route.py`，`/api/v1/sync/sources`）：配置钉钉知识库目录 → Dify 数据集的映射关系，每个同步源自带独立 `cron` 定时表达式（默认 `0 2 * * *` 每日凌晨 2 点）。支持新增/编辑/启停/删除、**同步列表**（原「预演」，dry-run 只比对不写入；**点击立即弹窗、在弹窗内等待加载**——行内按钮不转圈，表格区域显示 loading 遮罩，加载失败自动收起弹窗；结果弹窗前端分页每页 20 条；**全量展示**该目录下所有文档——未同步过标「新增」、上一轮已同步标「更新」，另有「跳过/删除」，每篇带「参与同步」开关，开关打开的文档同步时一律重新上传、不做内容 hash 跳过；**性能**：目录树快照服务端缓存 10 分钟——内存 + `/tmp/kge_sync_walk_cache.json` 磁盘快照（重启热身）命中秒回，未命中时兄弟目录并发遍历（≤3 并发 + 全局 0.4s 节流防钉钉限流）；弹窗内「刷新列表」传 `refresh=true` 强制重遍历（同样弹窗内等待）并保留已调开关；真实同步始终绕过缓存直读钉钉最新目录；数据集 runtime 模式缓存 10 分钟）、**立即同步**、连接测试。表格含**目标知识库类型**列（「知识流水线」/「普通知识库」标签，来自数据集 runtime 模式，服务端缓存 10 分钟；查询失败或 RAGFlow 不可用时显示 —）。操作列仅保留「立即同步 / 同步列表 / 启停开关 / 更多▼」（编辑与删除收进「更多」下拉）。**文档数 = 该源映射表中 status=synced 的数量**（多源可共享同一 Dify 数据集且数据集可能含手动上传文档，不能用数据集全库文档数作为单源口径）。表单中**目录必选**（点选目录树节点，不再默认整库同步；「已选目录」只读回显所点选路径）；目录树在首次选择知识库时自动拉取完整目录并持久化到 localStorage（`kge:sync_dir_tree:{workspace_id}`），再次打开弹窗直接用缓存不请求，搜索框旁「刷新」按钮强制重新拉取。同步源保存后由 `app/services/sync/scheduler.py`（APScheduler BackgroundScheduler）按 cron 注册任务，增删改自动 `reload_sync_jobs`。
 - **运行监控**（合并自源项目 Monitor + Logs 单页三区块）：① **失败清单**（待处理，可单项/全部重试）；② **同步历史**（运行记录表：触发方式/耗时/新增·更新·删除·跳过·失败计数/结果状态）；③ **运行日志**（按级别 info/warn/error、关键字、时间窗筛选）。
 
 ### 钉钉知识库 → Dify 定时增量同步（合并自 DingDingKonwledgePipeline）
@@ -595,7 +613,7 @@ knowledge-governance-expert/
     └── src/views/
         ├── chat/                # 智能问答（Dify 数据集多选 + Agent）
         ├── hiagent/             # HiAgent智能问答（火山 HiAgent WebSDK iframe 嵌入）
-        ├── governance/          # 知识治理 7 大模块（默认页签为知识缺口；含 model.vue 接入配置；治理标准页实时读取钉钉多维表《杰克知识管理规范》，需应用开通 Notable.Base.Read.All 权限；知识缺口页知识库过滤选项取自知识源管理中已启用的钉钉知识库，选中钉钉知识库后查询读取 dingtalk_folder_stats 快照表（文件夹直属文档数=在线文档+本地上传文件；「文件夹数量」列=该目录直属子文件夹数，不含目录本身与孙级——钉钉行由快照路径树推导、本地行走 parent_id，CSV 导出同口径），「刷新数据」按钮触发后台全量遍历并覆盖写入快照（几万文档的大库需数分钟，前端轮询进度，刷新保留已维护的 Owner）；知识Owner 支持行内编辑弹窗与批量导入（CSV/XLSX，按目录ID或知识库＋目录路径匹配，本地目录与钉钉文件夹均可），钉钉行另提供「通知」按钮——经钉钉企业机器人向 Owner 发单聊催补提醒（无文档行可点，正文预览见「知识Owner通知」说明）；新增钉钉知识源时自动触发该库快照预热，知识源列表显示「目录获取中」状态；知识采集的同步任务弹窗「目录选择」优先读取该快照表秒开（GET /knowledge-center/knowledge-sources/{id}/dingtalk-folder-snapshot，按路径树还原目录，快照缺失时自动回退实时遍历））
+        ├── governance/          # 知识治理 7 大模块（默认页签为知识缺口；含 model.vue 接入配置；治理标准页实时读取钉钉多维表《杰克知识管理规范》，需应用开通 Notable.Base.Read.All 权限；知识缺口页知识库过滤选项取自知识源管理中已启用的钉钉知识库，选中钉钉知识库后查询读取 dingtalk_folder_stats 快照表（文件夹直属文档数=在线文档+本地上传文件（.dlink 文件夹快捷方式计为其所在文件夹的一个文档，不作为目录遍历——其子节点 API 无法列出）；「文件夹数量」列=该目录直属子文件夹数，不含目录本身与孙级——钉钉行由快照路径树推导、本地行走 parent_id，CSV 导出同口径），「刷新数据」按钮触发后台全量遍历并覆盖写入快照（几万文档的大库需数分钟，前端轮询进度，刷新保留已维护的 Owner）；知识Owner 支持行内编辑弹窗与批量导入（CSV/XLSX，按目录ID或知识库＋目录路径匹配，本地目录与钉钉文件夹均可），钉钉行另提供「通知」按钮——经钉钉企业机器人向 Owner 发单聊催补提醒（无文档行可点，正文预览见「知识Owner通知」说明）；新增钉钉知识源时自动触发该库快照预热，知识源列表显示「目录获取中」状态；知识采集的同步任务弹窗「目录选择」优先读取该快照表秒开（GET /knowledge-center/knowledge-sources/{id}/dingtalk-folder-snapshot，按路径树还原目录，快照缺失时自动回退实时遍历））
         └── settings/            # 兼容旧路由的模型配置页（隐藏）
 ```
 

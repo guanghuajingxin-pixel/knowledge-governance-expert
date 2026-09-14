@@ -38,10 +38,16 @@ class Settings(BaseSettings):
     jwt_algo: str = "HS256"
     jwt_ttl_minutes: int = 1440
 
-    # 模型
-    bge_embed_model: str = "BAAI/bge-m3"
-    bge_rerank_model: str = "BAAI/bge-reranker-v2-m3"
+    # 模型（全部外接，不本地部署 BGE-M3/reranker——启动不拉起小模型）
+    # 向量模型：OpenAI 兼容 /embeddings 端点；留空时本地 RAG 检索/入库不可用（Dify/RAGFlow 检索不受影响）
+    embedding_base_url: str = ""     # 如 https://api.siliconflow.cn/v1（需含 /v1，末尾不带 /embeddings）
+    embedding_api_key: str = ""
+    embedding_model: str = ""        # 如 BAAI/bge-m3（API 版）；维度须与既有 ES 索引一致（embed_dim）
     embed_dim: int = 1024
+    # 重排模型：Jina/SiliconFlow 风格 /rerank 端点；留空时检索跳过重排（RRF/BM25 排序兜底）
+    rerank_api_url: str = ""         # 如 https://api.siliconflow.cn/v1/rerank
+    rerank_api_key: str = ""
+    rerank_model: str = ""           # 如 BAAI/bge-reranker-v2-m3
     mineru_api_url: str = "https://mineru.net/api/v4"
     mineru_api_key: str = ""          # 运行时可被 settings 表覆盖
     # 本地 MinerU 解析引擎（mineru-api 常驻服务，见 services/mineru）；
@@ -113,6 +119,19 @@ class Settings(BaseSettings):
     # 单文档解析/索引等待上限：默认 7 天，避免 RAGFlow/Dify 长解析被 600s 截断。
     sync_indexing_timeout_seconds: int = Field(default=604800, ge=1)
     sync_default_delete_policy: str = "keep"   # keep | sync
+
+    # 定时同步调度：XXL-Job 调度中心（替代内置 APScheduler）。
+    # enabled=true 时 admin 不可达启动即报错（fail fast）；显式置 false 则定时同步整体关闭。
+    xxl_job_enabled: bool = True
+    xxl_job_admin_url: str = "http://127.0.0.1:8080/xxl-job-admin"
+    xxl_job_admin_user: str = "admin"
+    xxl_job_admin_password: str = "123456"
+    # 与 admin 的 xxl.job.accessToken 保持一致；留空表示不启用 token 校验。
+    xxl_job_access_token: str = ""
+    xxl_job_executor_appname: str = "kge-sync-executor"
+    xxl_job_executor_port: int = 9998
+    xxl_job_executor_ip: str = ""   # 空则按到 admin 的出口 IP 自动探测
+    xxl_job_executor_log_path: str = ""   # 空则回退到 services/kb-api/data/xxljob-log
 
     @property
     def sync_skip_ext_list(self) -> list[str]:

@@ -5,15 +5,16 @@
 # natively via uv, and expects Docker dev infra (postgres/redis/elasticsearch/
 # minio/kkfileview on the dev-network) to already be running.
 #
-# Why not Docker full-mode? BGE-M3 + bge-reranker-v2-m3 load in the kb-api
-# process (~2-3GB RSS). colima needs >=8GB to host that in-container - the
-# dev-mode (native) path uses Mac RAM directly and is the recommended fast-
-# iteration loop. See README.md for the Docker full-mode tradeoff.
+# Why not Docker full-mode? Dev infra runs in Docker but apps start natively via
+# uv - the fastest iteration loop (models are all external HTTP APIs, no local
+# BGE-M3/reranker loading). See README.md for the Docker full-mode tradeoff.
 #
 # Usage:
 #   ./scripts/smoke_test.sh                # start services, run, tear down
 #   KEEP_SERVICES=1 ./scripts/smoke_test.sh  # leave services running after
 #   EXTERNAL_SERVICES=1 ./scripts/smoke_test.sh  # services already running externally
+#   XXL_JOB_ENABLED=false ./scripts/smoke_test.sh  # 无 XXL-Job admin 的环境跳过定时调度
+#     （默认 true 时 kb-api 启动会尝试连 admin，不可达时自动降级跳过定时调度）
 #
 # Expected output: SMOKE OK (chat step returns a friendly fallback when
 # LLM_API_KEY is empty - non-blocking, accepted gate).
@@ -123,7 +124,7 @@ echo "$UPLOAD" | python3 -m json.tool | sed 's/^/  /'
 echo "$UPLOAD" | python3 -c "import sys,json;d=json.load(sys.stdin);assert 'document_id' in d, f'upload failed: {d}'; print('  -> document_id OK')"
 
 # --- 4. Wait for processing -------------------------------------------------
-echo "[4/9] 等待处理 (BGE 首次加载较慢)"
+echo "[4/9] 等待处理（向量模型外接，依赖 EMBEDDING_* 配置）"
 for i in $(seq 1 60); do
   ST=$(curl -s "$KB_API/api/v1/documents?kb_id=$KB" -H "$H" \
     | python3 -c "import sys,json;d=json.load(sys.stdin);print(d['items'][0]['status'] if d['items'] else 'EMPTY')")
