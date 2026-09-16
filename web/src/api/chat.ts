@@ -38,6 +38,8 @@ export interface ChatResponse {
   quality?: { verification: string; dws: string; warnings: string[] }
   answer: string
   citations: SearchResult[]
+  /** 全量召回快照（含未被答案引用的分段，cited 标记是否被引用）：问答明细记录用 */
+  retrieval_all?: (SearchResult & { cited?: boolean; source?: string; content?: string })[]
   /** 下一步问题建议（智能体配置开启时返回） */
   follow_ups?: string[]
   classification?: string

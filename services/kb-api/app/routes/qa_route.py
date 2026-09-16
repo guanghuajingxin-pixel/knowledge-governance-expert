@@ -84,8 +84,8 @@ async def qa_details(
     s: AsyncSession = Depends(get_session),
 ):
     """问答明细：用户问题 + 助手回答（含回答链路 steps、召回片段 retrieval、反馈），分页 + 多维过滤。"""
-    # 口径：排除管理类账号，普通用户与钉钉免登/机器人自动建档用户的问答均入明细
-    where = ["u.role NOT IN ('super_admin', 'admin')"]
+    # 口径：u 表只取用户消息（role=user），避免把助手回答当作问题展示
+    where = ["u.role = 'user'"]
     params: dict = {}
     if date_from:
         try:

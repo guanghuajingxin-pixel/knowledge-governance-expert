@@ -86,23 +86,21 @@
           </div>
         </el-collapse-transition>
 
-        <!-- 问题 -->
-        <div class="qa-question">
+        <!-- 问题（点击展开/收起回答） -->
+        <div class="qa-question" @click="toggleAnswer(item)">
           <span class="q-tag">Q</span>
           <span class="q-text">{{ item.question }}</span>
+          <span class="q-hint">{{ answerExpanded.has(item.question_id) ? '收起' : '点击查看回答' }}</span>
+          <el-icon class="q-arrow" :class="{ open: answerExpanded.has(item.question_id) }"><ArrowDown /></el-icon>
         </div>
 
-        <!-- 召回结果 -->
-        <div class="retrieval-box">
-          <div class="retrieval-head">
-            <span class="retrieval-title">召回结果（{{ item.retrieval.length }} 条）</span>
-            <el-button v-if="item.answer" link type="primary" size="small" @click="toggleAnswer(item)">
-              {{ answerExpanded.has(item.question_id) ? '收起回答' : '查看回答' }}
-            </el-button>
-          </div>
-          <el-collapse-transition>
-            <div v-if="answerExpanded.has(item.question_id)" class="answer-box" v-html="renderAnswer(item.answer)"></div>
-          </el-collapse-transition>
+        <!-- 回答 + 召回结果（默认收起） -->
+        <el-collapse-transition>
+          <div v-show="answerExpanded.has(item.question_id)" class="retrieval-box">
+            <div class="retrieval-head">
+              <span class="retrieval-title">召回结果（{{ item.retrieval.length }} 条，其中被答案引用 {{ citedCount(item) }} 条）</span>
+            </div>
+            <div v-if="item.answer" class="answer-box" v-html="renderAnswer(item.answer)"></div>
 
           <div v-if="!item.retrieval.length" class="no-retrieval">本轮未召回到知识库片段（智能体直答或未命中）</div>
           <div
@@ -112,6 +110,8 @@
           >
             <div class="hit-top">
               <span class="top-badge" :class="{ top3: hi < 3 }">TOP {{ String(hi + 1).padStart(2, '0') }}</span>
+              <el-tag v-if="hit.cited === false" size="small" type="info" effect="plain" class="cite-tag">未引用</el-tag>
+              <el-tag v-else size="small" type="success" effect="plain" class="cite-tag">已引用</el-tag>
               <div class="score-area">
                 <span class="score-label">Score</span>
                 <div class="score-bar">
@@ -138,7 +138,8 @@
           <el-button v-if="item.retrieval.length > 3 && !retrievalExpanded.has(item.question_id)" link type="primary" size="small" @click="retrievalExpanded.add(item.question_id)">
             展开全部 {{ item.retrieval.length }} 条召回
           </el-button>
-        </div>
+          </div>
+        </el-collapse-transition>
       </div>
     </div>
 
@@ -163,7 +164,7 @@
 
 <script setup lang="ts">
 import { ref, reactive, onMounted } from 'vue'
-import { Document, View } from '@element-plus/icons-vue'
+import { Document, View, ArrowDown } from '@element-plus/icons-vue'
 import { getQaDetails, type QaDetailItem } from '@/api/qa'
 
 const loading = ref(false)
@@ -188,6 +189,10 @@ function toggleAnswer(item: QaDetailItem) {
 }
 function visibleRetrieval(item: QaDetailItem) {
   return retrievalExpanded.has(item.question_id) ? item.retrieval : item.retrieval.slice(0, 3)
+}
+function citedCount(item: QaDetailItem) {
+  // 旧数据无 cited 字段（仅记录最终引用），视为全部已引用
+  return item.retrieval.filter((h) => h.cited !== false).length
 }
 
 function fbLabel(t: string) {
@@ -304,9 +309,17 @@ onMounted(load)
 .step-title { color: #374151; font-weight: 500; }
 .step-detail { color: #9CA3AF; font-size: 12.5px; }
 
-.qa-question { display: flex; gap: 10px; margin: 12px 0 10px; }
+.qa-question {
+  display: flex; align-items: center; gap: 10px; margin: 12px 0 10px;
+  cursor: pointer; user-select: none; padding: 6px 8px; margin-left: -8px;
+  border-radius: 8px; transition: background 0.15s;
+}
+.qa-question:hover { background: #F3F4F6; }
 .q-tag { color: #2563EB; font-weight: 800; font-size: 15px; flex-shrink: 0; }
-.q-text { color: #2563EB; font-weight: 600; font-size: 15px; line-height: 1.6; }
+.q-text { color: #2563EB; font-weight: 600; font-size: 15px; line-height: 1.6; flex: 1; min-width: 0; }
+.q-hint { font-size: 12.5px; color: #9CA3AF; flex-shrink: 0; white-space: nowrap; }
+.q-arrow { color: #9CA3AF; transition: transform 0.2s; flex-shrink: 0; }
+.q-arrow.open { transform: rotate(180deg); }
 
 .retrieval-box { margin-left: 26px; }
 .retrieval-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
@@ -326,6 +339,7 @@ onMounted(load)
   padding: 12px 14px; margin-bottom: 8px;
 }
 .hit-top { display: flex; align-items: center; gap: 12px; }
+.cite-tag { flex-shrink: 0; }
 .top-badge {
   background: #E5E7EB; color: #6B7280; font-weight: 700; font-size: 12px;
   padding: 4px 8px; border-radius: 6px; flex-shrink: 0;

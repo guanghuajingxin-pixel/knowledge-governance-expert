@@ -85,7 +85,11 @@ def _unwrap(resp: httpx.Response, action: str) -> Any:
     except ValueError:
         raise RagflowError(f"{action}：响应非 JSON（{resp.text[:200]}）", status=resp.status_code)
     if isinstance(body, dict) and body.get("code") not in (0, "0", None):
-        raise RagflowError(f"{action}：{body.get('message') or body}", code=body.get("code"))
+        msg = body.get("message") or str(body)
+        # Rerank 等模型未在租户授权（LookupError('Model(xxx@yyy) not authorized')）：给出可行动提示
+        if "not authorized" in msg and "Model(" in msg:
+            msg += "。该模型未在此 RAGFlow 租户授权，请在 RAGFlow 控制台『模型供应商』添加后重试，或改用『权重设置』子策略"
+        raise RagflowError(f"{action}：{msg}", code=body.get("code"))
     return body.get("data") if isinstance(body, dict) else body
 
 
@@ -226,9 +230,28 @@ async def retrieve(dataset_ids: list[str], query: str, top_k: int | None = None,
                    similarity_threshold: float | None = None,
                    vector_similarity_weight: float | None = None,
                    rerank_id: str | None = None) -> list[dict[str, Any]]:
+    """跨多个 RAGFlow 数据集检索（多库合并请求，无权库降级见 retrieve_with_report）。"""
+    r = await retrieve_with_report(dataset_ids, query, top_k=top_k,
+                                   similarity_threshold=similarity_threshold,
+                                   vector_similarity_weight=vector_similarity_weight,
+                                   rerank_id=rerank_id)
+    return r["hits"]
+
+
+async def retrieve_with_report(dataset_ids: list[str], query: str, top_k: int | None = None,
+                               similarity_threshold: float | None = None,
+                               vector_similarity_weight: float | None = None,
+                               rerank_id: str | None = None) -> dict[str, Any]:
     """跨多个 RAGFlow 数据集检索，归一化为与 dify_client.retrieve 一致的 hit 结构。
 
-    返回每个 hit：
+    与 retrieve 的差异：多库合并请求遇到「无权数据集」（code 102）时，降级为
+    逐库检索——有权库正常返回，无权库记入 skipped（API Key 与库归属租户不匹配
+    是常见配置错误，不能让一个坏库拖垮整轮检索）。
+
+    返回：
+        {"hits": [...], "skipped": [{"dataset_id", "error"}],
+         "params": {实际生效的检索参数}}
+    每个 hit：
         {"score", "content", "document_title", "document_id", "dataset_id",
          "segment_id", "page_number", "source": "ragflow"}
     """
@@ -236,24 +259,49 @@ async def retrieve(dataset_ids: list[str], query: str, top_k: int | None = None,
     s = get_settings()
     ids = [d for d in dataset_ids if d]
     if not ids:
-        return []
+        return {"hits": [], "skipped": [], "params": {}}
     top_k = top_k or s.ragflow_retrieval_top_k
-    payload: dict[str, Any] = {
-        "question": query,
-        "dataset_ids": ids,
-        "page": 1,
-        "page_size": max(int(top_k), 1),
+    params: dict[str, Any] = {
         "similarity_threshold": s.ragflow_similarity_threshold if similarity_threshold is None else similarity_threshold,
         "vector_similarity_weight": s.ragflow_vector_similarity_weight if vector_similarity_weight is None else vector_similarity_weight,
         "top_k": top_k,
     }
     rr = rerank_id if rerank_id is not None else s.ragflow_rerank_id
     if rr:
-        payload["rerank_id"] = rr
+        params["rerank_id"] = rr
 
-    async with httpx.AsyncClient(timeout=60.0) as c:
-        resp = await c.post(f"{_base_url()}/retrieval", json=payload, headers=_headers())
-        data = _unwrap(resp, "RAGFlow 检索")
+    async def _call(ds: list[str]) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "question": query,
+            "dataset_ids": ds,
+            "page": 1,
+            "page_size": max(int(top_k), 1),
+            "similarity_threshold": params["similarity_threshold"],
+            "vector_similarity_weight": params["vector_similarity_weight"],
+            "top_k": top_k,
+        }
+        if "rerank_id" in params:
+            payload["rerank_id"] = params["rerank_id"]
+        async with httpx.AsyncClient(timeout=60.0) as c:
+            resp = await c.post(f"{_base_url()}/retrieval", json=payload, headers=_headers())
+            return _unwrap(resp, "RAGFlow 检索") or {}
+
+    data: dict[str, Any] = {}
+    skipped: list[dict[str, str]] = []
+    try:
+        data = await _call(ids)
+    except RagflowError as e:
+        if len(ids) == 1 or e.code != 102:
+            raise
+        # 多库合并失败且含无权库：逐库降级，坏库跳过、好库照常返回
+        logger.warning("RAGFlow 多库检索失败（%s），降级为逐库检索", e)
+        data = {"chunks": []}
+        for d in ids:
+            try:
+                one = await _call([d])
+                data["chunks"] = (data.get("chunks") or []) + (one.get("chunks") or [])
+            except RagflowError as de:
+                skipped.append({"dataset_id": d, "error": str(de)})
 
     chunks = (data or {}).get("chunks") if isinstance(data, dict) else None
     hits: list[dict[str, Any]] = []
@@ -269,4 +317,4 @@ async def retrieve(dataset_ids: list[str], query: str, top_k: int | None = None,
             "source": "ragflow",
         })
     hits.sort(key=lambda x: x["score"] or 0.0, reverse=True)
-    return hits[:top_k]
+    return {"hits": hits[:top_k], "skipped": skipped, "params": params}

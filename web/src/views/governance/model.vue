@@ -4,8 +4,10 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import PageContainer from '@/components/common/PageContainer.vue'
 import {
   getSettings, setSetting, testLLM, listLlmModels, testDify, testMineru, testDingtalk,
+  testEmbedding, testRerank,
   type SettingsResponse, type SettingItem,
   type TestLLMResult, type TestDifyResult, type TestMinerUResult, type TestDingtalkResult,
+  type TestEmbeddingResult, type TestRerankResult,
   getDingtalkBotStatus, type DingtalkBotStatus,
 } from '@/api/settings'
 import { listDifyProfiles, createDifyProfile, updateDifyProfile, deleteDifyProfile, enableDifyProfile, type DifyProfile } from '@/api/settings'
@@ -31,6 +33,12 @@ const form = ref<SettingsResponse>({
   dify_upload_max_mb: { ...EMPTY, value: '15' },
   ragflow_base_url: { ...EMPTY },
   ragflow_api_key: { ...EMPTY, is_secret: true },
+  embedding_base_url: { ...EMPTY },
+  embedding_api_key: { ...EMPTY, is_secret: true },
+  embedding_model: { ...EMPTY },
+  rerank_api_url: { ...EMPTY },
+  rerank_api_key: { ...EMPTY, is_secret: true },
+  rerank_model: { ...EMPTY },
   dingtalk_app_key: { ...EMPTY },
   dingtalk_app_secret: { ...EMPTY, is_secret: true },
   dingtalk_operator_union_id: { ...EMPTY },
@@ -204,6 +212,44 @@ async function runRagflowTest() {
     ragflowTest.value.result = { ok: false, message: e?.message || '请求失败' }
   } finally {
     ragflowTest.value.testing = false
+  }
+}
+
+// Embedding 连通性测试
+const embeddingTest = ref({ testing: false, result: null as TestEmbeddingResult | null })
+
+async function runEmbeddingTest() {
+  embeddingTest.value.result = null
+  embeddingTest.value.testing = true
+  try {
+    embeddingTest.value.result = await testEmbedding({
+      base_url: form.value.embedding_base_url?.value || '',
+      api_key: form.value.embedding_api_key?.value || '',
+      model: form.value.embedding_model?.value || '',
+    })
+  } catch (e: any) {
+    embeddingTest.value.result = { ok: false, message: e?.message || '请求失败' }
+  } finally {
+    embeddingTest.value.testing = false
+  }
+}
+
+// Rerank 连通性测试
+const rerankTest = ref({ testing: false, result: null as TestRerankResult | null })
+
+async function runRerankTest() {
+  rerankTest.value.result = null
+  rerankTest.value.testing = true
+  try {
+    rerankTest.value.result = await testRerank({
+      api_url: form.value.rerank_api_url?.value || '',
+      api_key: form.value.rerank_api_key?.value || '',
+      model: form.value.rerank_model?.value || '',
+    })
+  } catch (e: any) {
+    rerankTest.value.result = { ok: false, message: e?.message || '请求失败' }
+  } finally {
+    rerankTest.value.testing = false
   }
 }
 
@@ -698,6 +744,75 @@ const usage = [
               :title="ragflowTest.result.message || '连接失败'"
             />
             <div class="field-hint">RAGFlow 与 Dify 并列作为外部知识库引擎；此处只配「连接」，具体哪些库可用请到「知识源管理」以 RAGFlow 类型登记（登记时动态拉取库列表选择）。</div>
+          </el-form-item>
+
+          <el-divider content-position="left">Embedding 向量模型（本地 RAG 检索/入库）</el-divider>
+          <el-form-item label="服务地址">
+            <div class="field-row">
+              <el-input v-model="form.embedding_base_url.value" placeholder="如 https://api.siliconflow.cn/v1（需含 /v1）" />
+              <el-button type="primary" :loading="saving === 'embedding_base_url'" @click="save('embedding_base_url')">保存</el-button>
+            </div>
+            <div class="field-hint">OpenAI 兼容 /embeddings 端点；留空时本地 RAG 检索/入库不可用（Dify/RAGFlow 检索不受影响）。</div>
+          </el-form-item>
+          <el-form-item label="API Key">
+            <div class="field-row">
+              <el-input v-model="form.embedding_api_key.value" show-password placeholder="未设置" />
+              <el-button type="primary" :loading="saving === 'embedding_api_key'" @click="save('embedding_api_key')">保存</el-button>
+            </div>
+          </el-form-item>
+          <el-form-item label="模型名">
+            <div class="field-row">
+              <el-input v-model="form.embedding_model.value" placeholder="如 BAAI/bge-m3" />
+              <el-button type="primary" :loading="saving === 'embedding_model'" @click="save('embedding_model')">保存</el-button>
+            </div>
+            <div class="field-row" style="margin-top: 8px">
+              <el-button :loading="embeddingTest.testing" @click="runEmbeddingTest">测试连通性</el-button>
+            </div>
+            <el-alert
+              v-if="embeddingTest.result?.ok"
+              type="success" :closable="false" show-icon style="margin-top: 8px"
+              :title="`连接成功 · ${embeddingTest.result.latency_ms}ms · ${embeddingTest.result.message}`"
+            />
+            <el-alert
+              v-else-if="embeddingTest.result && !embeddingTest.result.ok"
+              type="error" :closable="false" show-icon style="margin-top: 8px"
+              :title="embeddingTest.result.message || '连接失败'"
+            />
+            <div class="field-hint">向量维度须与既有 ES 索引一致（当前 1024 维）；切换模型需重建索引。</div>
+          </el-form-item>
+
+          <el-divider content-position="left">Rerank 重排模型（检索结果重排序）</el-divider>
+          <el-form-item label="服务地址">
+            <div class="field-row">
+              <el-input v-model="form.rerank_api_url.value" placeholder="如 https://api.siliconflow.cn/v1/rerank" />
+              <el-button type="primary" :loading="saving === 'rerank_api_url'" @click="save('rerank_api_url')">保存</el-button>
+            </div>
+            <div class="field-hint">Jina/SiliconFlow 风格 /rerank 端点；留空时检索跳过重排（RRF/BM25 排序兜底）。</div>
+          </el-form-item>
+          <el-form-item label="API Key">
+            <div class="field-row">
+              <el-input v-model="form.rerank_api_key.value" show-password placeholder="未设置" />
+              <el-button type="primary" :loading="saving === 'rerank_api_key'" @click="save('rerank_api_key')">保存</el-button>
+            </div>
+          </el-form-item>
+          <el-form-item label="模型名">
+            <div class="field-row">
+              <el-input v-model="form.rerank_model.value" placeholder="如 BAAI/bge-reranker-v2-m3" />
+              <el-button type="primary" :loading="saving === 'rerank_model'" @click="save('rerank_model')">保存</el-button>
+            </div>
+            <div class="field-row" style="margin-top: 8px">
+              <el-button :loading="rerankTest.testing" @click="runRerankTest">测试连通性</el-button>
+            </div>
+            <el-alert
+              v-if="rerankTest.result?.ok"
+              type="success" :closable="false" show-icon style="margin-top: 8px"
+              :title="`连接成功 · ${rerankTest.result.latency_ms}ms · ${rerankTest.result.message}`"
+            />
+            <el-alert
+              v-else-if="rerankTest.result && !rerankTest.result.ok"
+              type="error" :closable="false" show-icon style="margin-top: 8px"
+              :title="rerankTest.result.message || '连接失败'"
+            />
           </el-form-item>
 
 

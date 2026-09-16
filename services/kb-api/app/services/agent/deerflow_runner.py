@@ -503,6 +503,9 @@ async def run_deerflow_stream(
     # 同一文档的多个 ref 合并为同一编号；无法解析的序号标记直接删除；
     # 仅以标题提及（如钉钉"可参阅"）而无序号的文档追加在后。
     _store_thread_cites(thread_id, citations)
+    # 全量召回快照（含未被答案引用的分段）：供「问答明细」记录过程中召回了哪些，
+    # 与最终 citations（仅被引用文档）互补；同一对象引用，过滤后回填 cited 标记
+    retrieval_all = list(citations)
     ordered: list[dict[str, Any]] = []
 
     def _resolve_ref(n: int) -> dict[str, Any] | None:
@@ -532,6 +535,13 @@ async def run_deerflow_stream(
         c.setdefault("text", c.get("content", ""))
         # 无服务端硬核验（提示词约束口径）：引用摘录取召回原文片段本身
         c.setdefault("quote", c.get("content", ""))
+    # 全量召集中标记哪些被答案实际引用（问答明细据此区分「已引用/未引用」）
+    cited_ids = {id(c) for c in citations}
+    retrieval_all = [
+        {**c, "cited": id(c) in cited_ids,
+         "content": (c.get("content") or "")[:500], "text": (c.get("content") or "")[:500]}
+        for c in retrieval_all
+    ]
 
     searched = search_count > 0 or ding_calls > 0
     if citations:
@@ -551,6 +561,8 @@ async def run_deerflow_stream(
         "result": {
             "answer": answer or "（未生成回答）",
             "citations": citations,
+            # 全量召回快照（含未引用分段，cited 标记是否被答案引用）：问答明细用
+            "retrieval_all": retrieval_all,
             "follow_ups": follow_ups,
             "classification": "deerflow2",
             "engine": "deerflow",

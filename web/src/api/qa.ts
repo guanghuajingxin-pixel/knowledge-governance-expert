@@ -34,6 +34,10 @@ export interface QaRetrieval {
   chunk_id?: string
   page_number?: number | null
   url?: string
+  /** 检索来源（dify/ragflow/local/dingtalk）；旧数据无此字段 */
+  source?: string
+  /** 该分段是否被答案实际引用（false=仅召回未使用）；旧数据无此字段视为已引用 */
+  cited?: boolean
 }
 
 export interface QaFeedbackTag {

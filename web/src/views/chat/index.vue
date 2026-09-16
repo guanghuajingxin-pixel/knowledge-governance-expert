@@ -184,6 +184,8 @@ interface ChatMsg {
   role: 'user' | 'assistant'
   content: string
   citations?: SearchResult[]
+  /** 本轮全量召回快照（含未被答案引用的分段，cited 标记是否引用）：持久化到问答明细 */
+  retrievalAll?: (SearchResult & { cited?: boolean; source?: string })[]
   quality?: ChatResponse['quality']
   answerStatus?: string
   meta?: string
@@ -773,6 +775,8 @@ async function askQuestion(q: string, action: '' | 'continue' | 'stop' = '', tar
         onFinal: (res) => {
           const msg = assistantMsg
           msg.done = true
+          // 全量召回快照（含未引用分段）：问答明细记录「过程中召回了哪些」
+          msg.retrievalAll = res.retrieval_all || []
           // 完成：最后一步标记完成，过程条自动收起（用户可点击展开）
           settleSteps(msg.steps, 'failed')
           const citations = res.citations || []
@@ -833,6 +837,7 @@ async function askQuestion(q: string, action: '' | 'continue' | 'stop' = '', tar
             msg.streamed = false
             msg.steps = []
             msg.citations = []
+            msg.retrievalAll = undefined
             msg.choice = undefined
             msg.usage = undefined
             msg.meta = `重连中 · ${run.model}`
@@ -901,14 +906,18 @@ async function askQuestion(q: string, action: '' | 'continue' | 'stop' = '', tar
           assessment: finalMsg.assessment,
           choice: finalMsg.choice ? { question: finalMsg.choice.question, options: finalMsg.choice.options, answered: finalMsg.choice.answered } : undefined,
           steps: (finalMsg.steps || []).map((s) => ({ ...s })),
-          retrieval: (finalMsg.citations || []).map((c) => ({
+          // 全量召回快照（含未被答案引用的分段，cited 标记）：问答明细展示「过程中召回了哪些」；
+          // 旧链路无 retrieval_all 时回退为最终引用列表
+          retrieval: (finalMsg.retrievalAll?.length ? finalMsg.retrievalAll : (finalMsg.citations || [])).map((c: any) => ({
             document_title: c.document_title,
-            text: (c as any).text || '',
-            score: (c as any).score,
-            chunk_id: (c as any).chunk_id || '',
-            chunk_index: (c as any).chunk_index,
-            page_number: (c as any).page_number ?? null,
-            url: (c as any).url || (c as any).preview_url || '',
+            text: c.text || c.content || '',
+            score: c.score,
+            chunk_id: c.segment_id || c.chunk_id || '',
+            chunk_index: c.chunk_index,
+            page_number: c.page_number ?? null,
+            url: c.url || c.preview_url || '',
+            source: c.source || '',
+            cited: c.cited !== false,
           })),
           model: selectedModel.value,
         },
@@ -1194,8 +1203,8 @@ async function submitCorrection() {
                 >
                   <div class="steps-bar__header" @click="toggleSteps(i)">
                     <template v-if="!m.done && !m.stepsExpanded">
-                      <!-- 运行中：滚动展示最近几步阶段信息（证据链一目了然），点击展开全部 -->
-                      <div class="step-live-roll" @click.stop>
+                      <!-- 运行中：滚动展示最近几步阶段信息（证据链一目了然），整条 header 可点展开 -->
+                      <div class="step-live-roll">
                         <div
                           v-for="(st, ri) in m.steps.slice(-4)"
                           :key="st.id || ri"
@@ -1210,7 +1219,7 @@ async function submitCorrection() {
                           <span class="step-live-detail">{{ st.detail }}</span>
                         </div>
                       </div>
-                      <span class="steps-expand-hint" @click="toggleSteps(i)">▸ 展开过程</span>
+                      <span class="steps-expand-hint">▸ 展开过程</span>
                     </template>
                     <template v-else>
                       <span class="steps-bar__label">

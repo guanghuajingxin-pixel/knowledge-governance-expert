@@ -70,11 +70,14 @@ async def retrieve(
     query: str,
     top_k: int | None = None,
     score_threshold: float | None = None,
+    search_method: str | None = None,
 ) -> list[dict[str, Any]]:
     """跨多个 Dify 数据集检索，合并并按 score 降序返回。
 
     优先使用各知识库自身保存的检索配置（含其 Rerank 模型）——单一知识库时
     返回顺序即 Dify Rerank 后的顺序；拉取配置失败时回退到环境变量配置。
+    显式传入 search_method（hybrid_search/semantic_search/full_text_search）
+    时置于回退链最前，优先于知识库自身配置的检索方式（检索测试指定模式用）。
 
     返回的每个 hit 统一为：
         {"score": float, "content": str, "document_title": str,
@@ -117,7 +120,13 @@ async def retrieve(
             url = f"{_base_url()}/datasets/{did}/retrieve"
             # 知识库自身配置优先（检索方式、Rerank 模型、分数阈值均以控制台配置为准）
             cfg = await _dataset_retrieval_model(client, did, top_k)
-            attempts = [_payload(cfg)] if cfg else []
+            attempts: list[dict[str, Any]] = []
+            # 检索测试显式指定模式时置于最前：保留知识库配置的 Rerank 等，仅覆盖检索方式
+            if search_method:
+                if cfg:
+                    attempts.append(_payload({**cfg, "search_method": search_method}))
+                attempts.append(_payload(search_method=search_method))
+            attempts.extend([_payload(cfg)] if cfg else [])
             # 不传 retrieval_model 时 Dify 同样使用知识库自身默认配置
             attempts.append({"query": query})
             # 知识库配置请求均失败时，最终回退到环境变量配置

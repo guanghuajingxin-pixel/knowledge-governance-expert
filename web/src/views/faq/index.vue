@@ -2,7 +2,7 @@
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, ChatDotRound } from '@element-plus/icons-vue'
+import { Plus, ChatDotRound, MoreFilled } from '@element-plus/icons-vue'
 import PageContainer from '@/components/common/PageContainer.vue'
 import KbCreateDialog from '@/components/kb/KbCreateDialog.vue'
 import { listKnowledgeBases, deleteKnowledgeBase } from '@/api/knowledge-base'
@@ -69,7 +69,7 @@ onMounted(fetchData)
       <el-empty v-else description="暂无问答库" />
     </div>
   </PageContainer>
-  <KbCreateDialog v-model="dialogVisible" @success="fetchData" />
+  <KbCreateDialog v-model="dialogVisible" fixed-type="FAQ" @success="fetchData" />
 </template>
 
 <style scoped>

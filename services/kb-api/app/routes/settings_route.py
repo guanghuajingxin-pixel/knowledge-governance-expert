@@ -29,6 +29,12 @@ KEYS = {
     "dify_upload_max_mb": ("Dify 单文件上传上限（MB）", False),
     "ragflow_base_url": ("RAGFlow 服务地址", False),
     "ragflow_api_key": ("RAGFlow API Key", True),
+    "embedding_base_url": ("Embedding 服务地址（OpenAI 兼容 /embeddings，需含 /v1）", False),
+    "embedding_api_key": ("Embedding API Key", True),
+    "embedding_model": ("Embedding 模型名（如 BAAI/bge-m3）", False),
+    "rerank_api_url": ("Rerank 服务地址（如 https://api.siliconflow.cn/v1/rerank）", False),
+    "rerank_api_key": ("Rerank API Key", True),
+    "rerank_model": ("Rerank 模型名（如 BAAI/bge-reranker-v2-m3）", False),
     "dingtalk_app_key": ("钉钉 AppKey", False),
     "dingtalk_app_secret": ("钉钉 AppSecret", True),
     "dingtalk_operator_union_id": ("钉钉操作人 UnionId", False),
@@ -406,6 +412,122 @@ async def test_mineru_api(body: TestMinerUIn, u=Depends(require_role("super_admi
         return {"ok": False, "message": f"连接失败（{r.status_code}）：{payload.get('msg') or r.text[:120]}"}
     latency_ms = int((time.perf_counter() - t0) * 1000)
     return {"ok": True, "latency_ms": latency_ms, "message": "Key 有效，云解析服务可用"}
+
+
+class TestEmbeddingIn(BaseModel):
+    base_url: str = ""
+    api_key: str = ""
+    model: str = ""
+
+
+@router.post("/test-embedding")
+async def test_embedding_api(body: TestEmbeddingIn, u=Depends(require_role("super_admin", "admin")),
+                              s: AsyncSession = Depends(get_session)):
+    """Embedding 连通性测试：用填写的参数发一次最小 embed 请求。
+
+    留空时回退已保存值（密钥不回显，测试无需重复输入）。
+    """
+    base_url = body.base_url.strip().rstrip("/")
+    api_key = body.api_key.strip()
+    model = body.model.strip()
+    if not base_url:
+        base_url = await _effective_setting(s, "embedding_base_url")
+    if not api_key or "****" in api_key:
+        api_key = await _effective_setting(s, "embedding_api_key")
+    if not model:
+        model = await _effective_setting(s, "embedding_model")
+    if not base_url:
+        return {"ok": False, "message": "请先填写服务地址"}
+    if not model:
+        return {"ok": False, "message": "请先填写模型名"}
+    if not api_key:
+        return {"ok": False, "message": "请先填写 API Key"}
+    t0 = time.perf_counter()
+    try:
+        async with httpx.AsyncClient(timeout=20) as c:
+            r = await c.post(
+                f"{base_url}/embeddings",
+                headers={"Authorization": f"Bearer {api_key}"},
+                json={"model": model, "input": ["连通性测试"]},
+            )
+    except Exception:
+        return {"ok": False, "message": "无法连接到服务地址（网络不通/超时/DNS 失败），请检查地址"}
+    if r.status_code in (401, 403):
+        return {"ok": False, "message": "API Key 无效或无访问权限"}
+    if r.status_code == 404:
+        return {"ok": False, "message": "端点不存在，请检查地址（需含 /v1，末尾不带 /embeddings）"}
+    if r.status_code >= 400:
+        try:
+            detail = r.json().get("message") or r.text[:120]
+        except Exception:
+            detail = r.text[:120]
+        return {"ok": False, "message": f"请求失败（{r.status_code}）：{detail}"}
+    try:
+        dim = len(r.json()["data"][0]["embedding"])
+    except Exception:
+        return {"ok": False, "message": "响应格式异常，非标准 OpenAI embeddings 返回"}
+    latency_ms = int((time.perf_counter() - t0) * 1000)
+    return {"ok": True, "latency_ms": latency_ms, "dimension": dim,
+            "message": f"连接成功，向量维度 {dim}"}
+
+
+class TestRerankIn(BaseModel):
+    api_url: str = ""
+    api_key: str = ""
+    model: str = ""
+
+
+@router.post("/test-rerank")
+async def test_rerank_api(body: TestRerankIn, u=Depends(require_role("super_admin", "admin")),
+                           s: AsyncSession = Depends(get_session)):
+    """Rerank 连通性测试：用填写的参数发一次最小 rerank 请求。
+
+    留空时回退已保存值（密钥不回显，测试无需重复输入）。
+    """
+    api_url = body.api_url.strip()
+    api_key = body.api_key.strip()
+    model = body.model.strip()
+    if not api_url:
+        api_url = await _effective_setting(s, "rerank_api_url")
+    if not api_key or "****" in api_key:
+        api_key = await _effective_setting(s, "rerank_api_key")
+    if not model:
+        model = await _effective_setting(s, "rerank_model")
+    if not api_url:
+        return {"ok": False, "message": "请先填写服务地址"}
+    if not model:
+        return {"ok": False, "message": "请先填写模型名"}
+    if not api_key:
+        return {"ok": False, "message": "请先填写 API Key"}
+    t0 = time.perf_counter()
+    try:
+        async with httpx.AsyncClient(timeout=20) as c:
+            r = await c.post(
+                api_url,
+                headers={"Authorization": f"Bearer {api_key}"},
+                json={"model": model, "query": "测试",
+                      "documents": ["这是一条测试文档", "无关内容"]},
+            )
+    except Exception:
+        return {"ok": False, "message": "无法连接到服务地址（网络不通/超时/DNS 失败），请检查地址"}
+    if r.status_code in (401, 403):
+        return {"ok": False, "message": "API Key 无效或无访问权限"}
+    if r.status_code == 404:
+        return {"ok": False, "message": "端点不存在，请检查地址（需含完整 /rerank 路径）"}
+    if r.status_code >= 400:
+        try:
+            detail = r.json().get("message") or r.text[:120]
+        except Exception:
+            detail = r.text[:120]
+        return {"ok": False, "message": f"请求失败（{r.status_code}）：{detail}"}
+    try:
+        results = r.json().get("results", [])
+        n = len(results)
+    except Exception:
+        return {"ok": False, "message": "响应格式异常，非标准 rerank 返回"}
+    latency_ms = int((time.perf_counter() - t0) * 1000)
+    return {"ok": True, "latency_ms": latency_ms,
+            "message": f"连接成功，返回 {n} 条重排结果"}
 
 
 def _mask_api_key(val: str) -> str:

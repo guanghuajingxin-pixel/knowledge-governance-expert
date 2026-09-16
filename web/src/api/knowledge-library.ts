@@ -43,3 +43,55 @@ export const updateKnowledgeLibrary = (id: number, data: KnowledgeLibraryUpdate)
 
 export const deleteKnowledgeLibrary = (id: number) =>
   request.delete<unknown, { ok: boolean }>(`/knowledge-libraries/${id}`)
+
+// ===== 检索测试：按知识库逐库执行与智能问答一致的底层检索 =====
+
+export interface RetrievalTestHit {
+  score: number
+  content: string
+  document_title: string
+  document_id?: string
+  dataset_id?: string
+  segment_id?: string
+  page_number?: number | null
+  source?: string
+  library_id: number
+  library_name: string
+}
+
+export interface RetrievalTestLib {
+  library_id: number
+  name: string
+  platform: LibraryPlatform
+  dataset_id: string
+  enabled: boolean
+  ok: boolean
+  count: number
+  error: string
+}
+
+export interface RetrievalTestResult {
+  query: string
+  top_k: number
+  elapsed_ms: number
+  libraries: RetrievalTestLib[]
+  hits: RetrievalTestHit[]
+  total: number
+}
+
+export interface RetrievalTestParams {
+  query: string
+  library_ids?: number[]
+  top_k?: number
+  /** 检索模式：hybrid=混合检索（默认）、vector=向量检索、fulltext=全文检索 */
+  mode?: 'hybrid' | 'vector' | 'fulltext'
+  /** 混合检索 + Rerank 子策略时的 RAGFlow rerank 模型名 */
+  rerank_id?: string
+  /** 仅 RagFlow 生效（与其自带检索测试参数对齐） */
+  similarity_threshold?: number
+  /** 仅 RagFlow 生效：混合检索-权重设置子策略下显式指定向量权重 */
+  vector_similarity_weight?: number
+}
+
+export const testKnowledgeRetrieval = (data: RetrievalTestParams) =>
+  request.post<unknown, RetrievalTestResult>('/knowledge-libraries/retrieval-test', data)

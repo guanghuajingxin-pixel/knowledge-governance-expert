@@ -7,6 +7,8 @@ import type { KnowledgeBase, KbCreateRequest, ChunkStrategy } from '@/types/know
 const props = defineProps<{
   modelValue: boolean
   editingKb?: KnowledgeBase | null
+  /** 固定知识库类型：设置后新建时锁定为该类型（如问答库页只允许建 FAQ） */
+  fixedType?: 'DOCUMENT' | 'FAQ'
 }>()
 const emit = defineEmits<{
   (e: 'update:modelValue', val: boolean): void
@@ -48,7 +50,7 @@ watch(() => props.modelValue, (val) => {
         chunk_overlap: props.editingKb.chunk_overlap,
       })
     } else {
-      Object.assign(form, { name: '', description: '', kb_type: 'DOCUMENT', chunk_strategy: 'PARAGRAPH', chunk_size: 512, chunk_overlap: 150 })
+      Object.assign(form, { name: '', description: '', kb_type: props.fixedType ?? 'DOCUMENT', chunk_strategy: 'PARAGRAPH', chunk_size: 512, chunk_overlap: 150 })
     }
   }
 })
@@ -90,7 +92,7 @@ async function handleSubmit() {
         <el-input v-model="form.description" type="textarea" :rows="3" placeholder="可选" />
       </el-form-item>
       <el-form-item label="类型" prop="kb_type">
-        <el-radio-group v-model="form.kb_type" :disabled="!!editingKb">
+        <el-radio-group v-model="form.kb_type" :disabled="!!editingKb || !!fixedType">
           <el-radio value="DOCUMENT">文档知识库</el-radio>
           <el-radio value="FAQ">FAQ 知识库</el-radio>
         </el-radio-group>

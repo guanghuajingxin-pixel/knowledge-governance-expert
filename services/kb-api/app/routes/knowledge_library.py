@@ -5,6 +5,7 @@
 检索时按 platform 由抽象层（dify/ragflow 客户端）决定各自检索策略。
 """
 from datetime import datetime
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -132,3 +133,105 @@ async def delete_knowledge_library(
     await s.delete(lib)
     await s.commit()
     return {"ok": True}
+
+
+class RetrievalTestIn(BaseModel):
+    query: str = Field(max_length=2000)
+    # 空 = 全部登记的知识库（含停用，便于排查）；也可指定子集
+    library_ids: list[int] = Field(default_factory=list)
+    top_k: int = Field(default=8, ge=1, le=50)
+    # 检索模式：hybrid=混合检索（RAGFlow 按权重/rerank 排序，Dify=hybrid_search）、
+    # vector=向量检索（weight=1.0 / semantic_search）、fulltext=全文检索（weight=0.0 / full_text_search）
+    mode: Literal["hybrid", "vector", "fulltext"] = "hybrid"
+    # 混合检索 + Rerank 子策略时的 RAGFlow rerank 模型名（如 bge--reranker-v2–m3）
+    rerank_id: str | None = Field(default=None, max_length=200)
+    # 以下三项仅对 RagFlow 生效（与其自带检索测试参数对齐，便于断层排查）
+    similarity_threshold: float | None = Field(default=None, ge=0, le=1)
+    vector_similarity_weight: float | None = Field(default=None, ge=0, le=1)
+
+
+async def _eff_setting(s: AsyncSession, key: str) -> str:
+    """DB settings 表优先，回退环境变量默认值（与智能问答链路口径一致）。"""
+    from kb_common.config import get_settings
+    from kb_common.models import Setting
+
+    row = (await s.execute(select(Setting).where(Setting.key == key))).scalar_one_or_none()
+    return (row.value if row else None) or getattr(get_settings(), key, "") or ""
+
+
+@router.post("/retrieval-test", dependencies=[Depends(require_role("super_admin", "admin"))])
+async def retrieval_test(body: RetrievalTestIn,
+                         u=Depends(get_current_user),
+                         s: AsyncSession = Depends(get_session)):
+    """检索测试：按知识库抽象层逐库执行与智能问答一致的底层检索。
+
+    用于排查「引擎自带检索能搜到、智能问答检索不到」的断层：逐库返回
+    ok/失败原因（如 RAGFlow code 102 无权数据集）与命中分段，
+    检索参数原样回显方便与引擎侧测试对齐。
+    """
+    import time as _time
+
+    from kb_common.clients import dify_client, ragflow_client
+    from kb_common.config import get_settings
+
+    if not body.query.strip():
+        raise HTTPException(422, "检索词不能为空")
+
+    q = select(KnowledgeLibrary)
+    if body.library_ids:
+        q = q.where(KnowledgeLibrary.id.in_(body.library_ids))
+    libs = (await s.execute(q.order_by(KnowledgeLibrary.platform, KnowledgeLibrary.id))).scalars().all()
+    if not libs:
+        raise HTTPException(404, "未找到指定知识库")
+
+    # 运行时配置注入（settings 表优先）：与 /internal/kb/retrieve 同口径
+    settings = get_settings()
+    settings.dify_base_url = await _eff_setting(s, "dify_base_url")
+    settings.dify_api_key = await _eff_setting(s, "dify_api_key")
+    settings.ragflow_base_url = await _eff_setting(s, "ragflow_base_url")
+    settings.ragflow_api_key = await _eff_setting(s, "ragflow_api_key")
+
+    started = _time.monotonic()
+    # 模式 → 引擎参数映射：
+    # RagFlow：向量检索 weight=1.0、全文检索 weight=0.0、混合检索用默认/显式权重 + 可选 rerank 模型；
+    # Dify：hybrid_search / semantic_search / full_text_search（Rerank 仍由知识库自身配置决定）
+    ragflow_weight = {"vector": 1.0, "fulltext": 0.0}.get(body.mode)
+    # 混合检索-权重设置子策略：透传前端显式向量权重（0~1，语义=向量权重，全文权重=1-该值）
+    if body.mode == "hybrid" and body.vector_similarity_weight is not None:
+        ragflow_weight = body.vector_similarity_weight
+    ragflow_rerank = body.rerank_id if (body.mode == "hybrid" and body.rerank_id) else None
+    dify_method = {"hybrid": "hybrid_search", "vector": "semantic_search", "fulltext": "full_text_search"}[body.mode]
+    lib_report: list[dict] = []
+    hits: list[dict] = []
+    for lib in libs:
+        entry = {"library_id": lib.id, "name": lib.name, "platform": lib.platform,
+                 "dataset_id": lib.dataset_id, "enabled": lib.enabled,
+                 "ok": False, "count": 0, "error": ""}
+        try:
+            if lib.platform == "ragflow":
+                r = await ragflow_client.retrieve_with_report(
+                    [lib.dataset_id], body.query, top_k=body.top_k,
+                    similarity_threshold=body.similarity_threshold,
+                    vector_similarity_weight=ragflow_weight,
+                    rerank_id=ragflow_rerank)
+                lib_hits = r["hits"]
+            else:
+                lib_hits = await dify_client.retrieve([lib.dataset_id], body.query, top_k=body.top_k,
+                                                      search_method=dify_method)
+            for h in lib_hits:
+                hits.append({**h, "library_id": lib.id, "library_name": lib.name})
+            entry["ok"] = True
+            entry["count"] = len(lib_hits)
+        except Exception as e:  # noqa: BLE001 - 逐库隔离：单库失败不影响其他库测试
+            entry["error"] = f"{e.__class__.__name__}: {e}"
+        lib_report.append(entry)
+
+    hits.sort(key=lambda x: x.get("score") or 0.0, reverse=True)
+    return {
+        "query": body.query,
+        "top_k": body.top_k,
+        "elapsed_ms": int((_time.monotonic() - started) * 1000),
+        "libraries": lib_report,
+        "hits": hits,
+        "total": len(hits),
+    }

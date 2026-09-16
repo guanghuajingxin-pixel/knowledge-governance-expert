@@ -136,11 +136,11 @@ def knowledge_search_tool(query: str, top_k: int = 8, config: RunnableConfig = N
         }
         for i, h in enumerate(hits)
     ]
-    return json.dumps(
-        {"count": len(slim), "results": slim},
-        ensure_ascii=False,
-        indent=1,
-    )
+    out: dict[str, Any] = {"count": len(slim), "results": slim}
+    # 检索源级告警（如 RAGFlow 无权数据集）：透传给智能体，可提示用户排查
+    if data.get("warnings"):
+        out["warnings"] = data["warnings"]
+    return json.dumps(out, ensure_ascii=False, indent=1)
 
 
 @tool("dingtalk_search", parse_docstring=True)

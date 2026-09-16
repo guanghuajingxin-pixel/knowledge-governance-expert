@@ -144,6 +144,27 @@ export interface TestMinerUResult {
 export const testMineru = (data: { api_key?: string }) =>
   request.post<unknown, TestMinerUResult>('/settings/test-mineru', data)
 
+// ============ Embedding / Rerank 模型连通性测试 ============
+
+export interface TestEmbeddingResult {
+  ok: boolean
+  latency_ms?: number
+  dimension?: number
+  message?: string
+}
+
+export const testEmbedding = (data: { base_url?: string; api_key?: string; model?: string }) =>
+  request.post<unknown, TestEmbeddingResult>('/settings/test-embedding', data)
+
+export interface TestRerankResult {
+  ok: boolean
+  latency_ms?: number
+  message?: string
+}
+
+export const testRerank = (data: { api_url?: string; api_key?: string; model?: string }) =>
+  request.post<unknown, TestRerankResult>('/settings/test-rerank', data)
+
 // ============ 菜单显示配置（侧边栏功能区菜单显隐） ============
 
 export const getMenuVisibility = () =>

@@ -192,6 +192,8 @@ async def internal_kb_retrieve(body: RetrieveIn, s: AsyncSession = Depends(get_s
                 (dataset_ids if r.source_type == "dify_dataset" else ragflow_ids).append(r.external_id)
 
     hits: list[dict] = []
+    # 检索源级告警：部分库/引擎失败时 fail-soft（不整轮 502），附在响应里供上层感知
+    retrieve_warnings: list[str] = []
     if dataset_ids:
         try:
             hits = await dify_client.retrieve(dataset_ids, body.query, top_k=body.top_k)
@@ -199,11 +201,17 @@ async def internal_kb_retrieve(body: RetrieveIn, s: AsyncSession = Depends(get_s
             raise HTTPException(status_code=502, detail=f"dify retrieve failed: {e.__class__.__name__}: {e}") from e
     if ragflow_ids:
         try:
-            hits = hits + await ragflow_client.retrieve(ragflow_ids, body.query, top_k=body.top_k)
+            r = await ragflow_client.retrieve_with_report(ragflow_ids, body.query, top_k=body.top_k)
+            hits = hits + r["hits"]
+            for sk in r.get("skipped") or []:
+                retrieve_warnings.append(f"RAGFlow 库 {sk.get('dataset_id')} 检索失败：{sk.get('error')}")
         except ragflow_client.RagflowNotConfigured:
             pass  # RAGFlow 未配置：跳过该来源，不影响 Dify/本地结果（fail-soft 于多源并集）
         except Exception as e:  # noqa: BLE001
-            raise HTTPException(status_code=502, detail=f"ragflow retrieve failed: {e.__class__.__name__}: {e}") from e
+            # RAGFlow 整体异常不再让本轮检索 502：记录告警并返回 Dify/本地结果
+            import logging
+            logging.getLogger(__name__).warning("ragflow retrieve failed: %s", e)
+            retrieve_warnings.append(f"RAGFlow 检索失败：{e.__class__.__name__}: {e}")
 
     # 本地知识库通道（ES hybrid + rerank）：与 Dify 并列，回查 DB 校验软删除可见性
     kb_ids = [k for k in (body.kb_ids or []) if k]
@@ -299,6 +307,8 @@ async def internal_kb_retrieve(body: RetrieveIn, s: AsyncSession = Depends(get_s
         s, hits, body.query, thread_id=body.thread_id, scope_ids=scope_ids,
         scene="chat", text_fields=("content", "text"), title_fields=("document_title", "title"))
     resp = {"results": hits, "total": len(hits)}
+    if retrieve_warnings:
+        resp["warnings"] = retrieve_warnings
     if masking_meta:
         resp["masking"] = masking_meta
     return resp
