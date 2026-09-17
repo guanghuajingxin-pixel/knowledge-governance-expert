@@ -86,6 +86,16 @@ async def warm_pool(count: int | None = None, deadline_s: float = 180.0,
                 conns.append(await asyncio.wait_for(engine.connect(), timeout=8))
         except Exception:  # noqa: BLE001 — 建到一半失败也没关系，已建的照常归还
             pass
+        except BaseException:
+            # CancelledError（外层 wait_for 熔断）：必须回收已建连接再抛出。
+            # 否则半开连接泄漏会污染连接池/事件循环（uvloop 下实测后续所有
+            # connect 永久挂起，lifespan 卡死在启动阶段）。
+            for c in conns:
+                try:
+                    await c.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            raise
         for c in conns:
             try:
                 await c.close()

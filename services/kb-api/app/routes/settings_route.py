@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
 from kb_common.database import get_session
-from kb_common.models import Setting, DifyProfile, LLMProfile
+from kb_common.models import Setting, DifyProfile, LLMProfile, RerankProfile
 from app.deps import require_role, get_principal, get_current_user
 from kb_common.config import get_settings
 from kb_common.clients import llm_client
@@ -42,6 +42,7 @@ KEYS = {
     "dingtalk_corp_id": ("钉钉 corpId（H5 免登）", False),
     "dingtalk_bot_enabled": ("钉钉机器人开关（true/false）", False),
     "dingtalk_bot_allow_users": ("钉钉机器人白名单（userid 逗号分隔，空=全员）", False),
+    "structured_db_url": ("结构化处理写入目标库连接串（postgresql://…；留空=跟随系统数据库）", False),
 }
 
 
@@ -229,6 +230,34 @@ class TestDingtalkIn(BaseModel):
 async def _effective_setting(s: AsyncSession, key: str) -> str:
     row = (await s.execute(select(Setting).where(Setting.key == key))).scalar_one_or_none()
     return (row.value if row else "") or getattr(get_settings(), key, "")
+
+
+def _not_found_message(r: httpx.Response, model: str, endpoint_hint: str) -> str:
+    """拆解 404 的两种成因：模型名不存在 vs 端点路径不对。
+
+    vLLM 等 OpenAI 兼容服务对未知模型同样返回 404，响应体形如
+    {"error": {"message": "The model `X` does not exist.", "type": "NotFoundError"}}。
+    旧实现把所有 404 一律报「端点不存在，请检查地址」，实测会把「模型名写错」
+    （如服务端只有 Qwen3-Embedding-0.6B 却填了 4B）误导成地址问题，排查方向全错。
+    """
+    try:
+        payload = r.json()
+        err = payload.get("error") if isinstance(payload, dict) else None
+        if isinstance(err, dict):
+            detail = str(err.get("message") or err.get("type") or "")
+        elif isinstance(payload, dict):
+            detail = str(payload.get("message") or payload.get("detail") or "")
+        else:
+            detail = ""
+    except Exception:
+        detail = ""
+    detail = detail.strip() or (r.text or "")[:200].strip()
+    low = detail.lower()
+    if "model" in low and ("does not exist" in low or "not found" in low or "不存在" in low):
+        return (f"模型名 `{model}` 在服务端不存在：{detail[:160]}。"
+                f"请核对同一地址下 /v1/models 返回的实际模型 ID（命名空间与大小写需完全一致）")
+    suffix = f"服务端返回：{detail[:160]}" if detail else "服务端无响应体"
+    return f"端点不存在（404）：{endpoint_hint}。{suffix}"
 
 
 @router.post("/test-dingtalk")
@@ -455,7 +484,8 @@ async def test_embedding_api(body: TestEmbeddingIn, u=Depends(require_role("supe
     if r.status_code in (401, 403):
         return {"ok": False, "message": "API Key 无效或无访问权限"}
     if r.status_code == 404:
-        return {"ok": False, "message": "端点不存在，请检查地址（需含 /v1，末尾不带 /embeddings）"}
+        return {"ok": False, "message": _not_found_message(
+            r, model, "请检查地址（需含 /v1，末尾不带 /embeddings）")}
     if r.status_code >= 400:
         try:
             detail = r.json().get("message") or r.text[:120]
@@ -475,6 +505,7 @@ class TestRerankIn(BaseModel):
     api_url: str = ""
     api_key: str = ""
     model: str = ""
+    profile_id: str = ""
 
 
 @router.post("/test-rerank")
@@ -483,10 +514,21 @@ async def test_rerank_api(body: TestRerankIn, u=Depends(require_role("super_admi
     """Rerank 连通性测试：用填写的参数发一次最小 rerank 请求。
 
     留空时回退已保存值（密钥不回显，测试无需重复输入）。
+    API Key 非必填：内网/自建 rerank 服务（如 Xinference）常免鉴权。
     """
     api_url = body.api_url.strip()
     api_key = body.api_key.strip()
     model = body.model.strip()
+    if body.profile_id:
+        pid = _safe_uuid(body.profile_id)
+        row = (await s.execute(select(RerankProfile).where(RerankProfile.id == pid))).scalar_one_or_none()
+        if row:
+            if not api_url:
+                api_url = row.api_url
+            if not api_key or "****" in api_key:
+                api_key = row.api_key
+            if not model:
+                model = row.model
     if not api_url:
         api_url = await _effective_setting(s, "rerank_api_url")
     if not api_key or "****" in api_key:
@@ -497,14 +539,13 @@ async def test_rerank_api(body: TestRerankIn, u=Depends(require_role("super_admi
         return {"ok": False, "message": "请先填写服务地址"}
     if not model:
         return {"ok": False, "message": "请先填写模型名"}
-    if not api_key:
-        return {"ok": False, "message": "请先填写 API Key"}
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     t0 = time.perf_counter()
     try:
         async with httpx.AsyncClient(timeout=20) as c:
             r = await c.post(
                 api_url,
-                headers={"Authorization": f"Bearer {api_key}"},
+                headers=headers,
                 json={"model": model, "query": "测试",
                       "documents": ["这是一条测试文档", "无关内容"]},
             )
@@ -513,7 +554,8 @@ async def test_rerank_api(body: TestRerankIn, u=Depends(require_role("super_admi
     if r.status_code in (401, 403):
         return {"ok": False, "message": "API Key 无效或无访问权限"}
     if r.status_code == 404:
-        return {"ok": False, "message": "端点不存在，请检查地址（需含完整 /rerank 路径）"}
+        return {"ok": False, "message": _not_found_message(
+            r, model, "请检查地址（需含完整 /rerank 路径）")}
     if r.status_code >= 400:
         try:
             detail = r.json().get("message") or r.text[:120]
@@ -940,6 +982,160 @@ async def _clear_other_defaults(s: AsyncSession, keep_profile_id: str) -> None:
                 changed = True
         if changed:
             r.models = _dump_models(models)
+
+
+# ==================== Rerank 重排模型配置（多条只能生效一条） ====================
+
+def _rerank_to_dict(p: RerankProfile, mask: bool = True) -> dict:
+    return {
+        "id": str(p.id),
+        "name": p.name,
+        "api_url": p.api_url,
+        "api_key": _mask_api_key(p.api_key) if mask else p.api_key,
+        "has_key": bool(p.api_key),
+        "model": p.model,
+        "enabled": p.enabled,
+        "created_at": p.created_at.isoformat() if p.created_at else None,
+    }
+
+
+async def _seed_rerank_profiles(s: AsyncSession) -> None:
+    """一次性迁移：rerank_profiles 表为空且旧版单值已配置时，建档并标记生效。"""
+    if (await s.execute(select(RerankProfile).limit(1))).scalar_one_or_none() is not None:
+        return
+    api_url = await _effective_setting(s, "rerank_api_url")
+    if not api_url:
+        return
+    s.add(RerankProfile(
+        name="默认·旧配置迁移",
+        api_url=api_url.strip(),
+        api_key=await _effective_setting(s, "rerank_api_key"),
+        model=await _effective_setting(s, "rerank_model"),
+        enabled=True,
+    ))
+    await s.commit()
+
+
+async def _sync_rerank_settings(s: AsyncSession) -> None:
+    """生效配置回写旧版单值 settings，reranker 运行链路（.env → settings 覆盖）保持兼容。
+
+    无生效配置时清空旧键：检索跳过重排，与「未配置」语义一致。
+    """
+    row = (await s.execute(select(RerankProfile).where(RerankProfile.enabled == True))).scalar_one_or_none()  # noqa: E712
+    values = ([("rerank_api_url", row.api_url), ("rerank_api_key", row.api_key),
+               ("rerank_model", row.model)] if row
+              else [("rerank_api_url", ""), ("rerank_api_key", ""), ("rerank_model", "")])
+    for k, v in values:
+        setting = (await s.execute(select(Setting).where(Setting.key == k))).scalar_one_or_none()
+        if setting:
+            setting.value = v
+        else:
+            s.add(Setting(key=k, value=v, is_secret=(k == "rerank_api_key")))
+
+
+class RerankProfileIn(BaseModel):
+    name: str
+    api_url: str = ""
+    api_key: str = ""
+    model: str = ""
+
+
+@router.get("/rerank-profiles")
+async def list_rerank_profiles(u=Depends(require_role("super_admin", "admin")),
+                               s: AsyncSession = Depends(get_session)):
+    await _seed_rerank_profiles(s)
+    rows = (await s.execute(select(RerankProfile).order_by(RerankProfile.created_at))).scalars().all()
+    return [_rerank_to_dict(r) for r in rows]
+
+
+@router.post("/rerank-profiles")
+async def create_rerank_profile(body: RerankProfileIn,
+                                u=Depends(require_role("super_admin", "admin")),
+                                s: AsyncSession = Depends(get_session)):
+    if not body.name.strip():
+        raise HTTPException(400, "配置名称不能为空")
+    if not body.api_url.strip():
+        raise HTTPException(400, "服务地址不能为空")
+    if not body.model.strip():
+        raise HTTPException(400, "模型名不能为空")
+    profile = RerankProfile(
+        name=body.name.strip(),
+        api_url=body.api_url.strip(),
+        api_key=body.api_key.strip(),
+        model=body.model.strip(),
+        enabled=False,
+    )
+    s.add(profile)
+    await s.commit()
+    await s.refresh(profile)
+    return _rerank_to_dict(profile)
+
+
+@router.put("/rerank-profiles/{profile_id}")
+async def update_rerank_profile(profile_id: str, body: RerankProfileIn,
+                                u=Depends(require_role("super_admin", "admin")),
+                                s: AsyncSession = Depends(get_session)):
+    pid = _safe_uuid(profile_id)
+    row = (await s.execute(select(RerankProfile).where(RerankProfile.id == pid))).scalar_one_or_none()
+    if not row:
+        raise HTTPException(404, "配置不存在")
+    if not body.name.strip():
+        raise HTTPException(400, "配置名称不能为空")
+    if not body.api_url.strip():
+        raise HTTPException(400, "服务地址不能为空")
+    if not body.model.strip():
+        raise HTTPException(400, "模型名不能为空")
+    row.name = body.name.strip()
+    row.api_url = body.api_url.strip()
+    row.model = body.model.strip()
+    # Key 语义：新值非掩码 → 覆盖；留空/掩码 → 保留原值；"__CLEAR__" 哨兵 → 显式清空（免鉴权服务）
+    new_key = body.api_key.strip()
+    if new_key == "__CLEAR__":
+        row.api_key = ""
+    elif new_key and "****" not in new_key:
+        row.api_key = new_key
+    if row.enabled:
+        await _sync_rerank_settings(s)
+    await s.commit()
+    await s.refresh(row)
+    return _rerank_to_dict(row)
+
+
+@router.delete("/rerank-profiles/{profile_id}")
+async def delete_rerank_profile(profile_id: str,
+                                u=Depends(require_role("super_admin", "admin")),
+                                s: AsyncSession = Depends(get_session)):
+    pid = _safe_uuid(profile_id)
+    row = (await s.execute(select(RerankProfile).where(RerankProfile.id == pid))).scalar_one_or_none()
+    if not row:
+        raise HTTPException(404, "配置不存在")
+    was_enabled = row.enabled
+    await s.delete(row)
+    await s.commit()
+    if was_enabled:
+        # 删除生效配置后自动切到最早一条，避免检索链路突然失去重排
+        first = (await s.execute(select(RerankProfile).order_by(RerankProfile.created_at).limit(1))).scalar_one_or_none()
+        if first:
+            first.enabled = True
+        await _sync_rerank_settings(s)
+        await s.commit()
+    return {"ok": True}
+
+
+@router.put("/rerank-profiles/{profile_id}/enable")
+async def enable_rerank_profile(profile_id: str,
+                                u=Depends(require_role("super_admin", "admin")),
+                                s: AsyncSession = Depends(get_session)):
+    """启用指定配置，同时禁用其他所有配置（只能生效一条）。"""
+    pid = _safe_uuid(profile_id)
+    row = (await s.execute(select(RerankProfile).where(RerankProfile.id == pid))).scalar_one_or_none()
+    if not row:
+        raise HTTPException(404, "配置不存在")
+    await s.execute(update(RerankProfile).values(enabled=False))
+    row.enabled = True
+    await _sync_rerank_settings(s)
+    await s.commit()
+    return {"ok": True}
 
 
 # ==================== 菜单显示配置（侧边栏功能区菜单显隐） ====================

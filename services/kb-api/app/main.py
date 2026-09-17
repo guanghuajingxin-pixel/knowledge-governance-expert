@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routes import auth, users, internal, knowledge_base, directory, document, search, settings_route, knowledge_center, knowledge_library, dify_route, ragflow_route, operate, governance, agent_route, agent_internal, chat_session_route, qa_route, sync_route, process_route, knowledge_gaps, metrics_route, sensitive, masking
+from app.routes import auth, users, internal, knowledge_base, directory, document, search, settings_route, knowledge_center, knowledge_library, dify_route, ragflow_route, operate, governance, agent_route, agent_internal, chat_session_route, qa_route, sync_route, process_route, knowledge_gaps, metrics_route, sensitive, masking, structured_route, mineru_route
 
 
 @asynccontextmanager
@@ -53,6 +53,13 @@ async def lifespan(app: FastAPI):
             _perf_log.info("启动阶段连接池预热：%s 条常驻连接", warmed)
         except Exception as exc:  # noqa: BLE001 — 预热超时/失败都不该阻塞启动
             _perf_log.warning("启动阶段连接池预热未完成，转后台继续: %r", exc)
+            # 熔断后同步重置连接池：被取消的 connect 可能留下半开连接，
+            # 不清掉会污染后续取连接（uvloop 下实测后续 connect 永久挂起、启动卡死）。
+            try:
+                from kb_common.database import engine as _kb_engine
+                _kb_engine.sync_engine.dispose()
+            except Exception:  # noqa: BLE001
+                pass
 
         async def _warm_pool_bg() -> None:
             try:
@@ -158,8 +165,10 @@ app.include_router(agent_internal.router)
 app.include_router(chat_session_route.router)
 app.include_router(qa_route.router)
 app.include_router(sync_route.router)
+app.include_router(structured_route.router)
 app.include_router(process_route.router)
 app.include_router(metrics_route.router)
+app.include_router(mineru_route.router)
 
 @app.get("/health")
 def health(): return {"status": "ok"}

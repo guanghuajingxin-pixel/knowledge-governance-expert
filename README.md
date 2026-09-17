@@ -220,7 +220,7 @@ sudo ufw allow 8080/tcp comment "KGE 前端"
    - 内存：worker 进程 ~2-3GB → ~160MB；镜像不再包含 torch/FlagEmbedding（`deploy/intranet/models/` 与 `BGE_EMBED_MODEL` / `BGE_RERANK_MODEL` 已从 compose 移除）。
    - **服务器升级操作**：① `.env.app` 新增 `EMBEDDING_BASE_URL` / `EMBEDDING_API_KEY` / `EMBEDDING_MODEL`（OpenAI 兼容端点，模型须 1024 维以对齐既有 ES 索引）与可选 `RERANK_API_URL` / `RERANK_API_KEY` / `RERANK_MODEL`；② 删除服务器上旧的 `deploy/intranet/models/` 目录；③ **必须重新 build 镜像**（依赖已瘦身）。不配置外接向量模型时本地 RAG 检索/入库不可用（Dify/RAGFlow 知识库检索不受影响），重排未配置则自动跳过。
 2. **XXL-Job 定时同步调度上线 + 启动降级**：XXL-Job admin 不可达时 kb-api 自动降级（记录日志、跳过定时调度），不再因调度器缺席拖死整个服务；本地开发可在 `.env` 设 `XXL_JOB_ENABLED=false`。生产启用定时同步需另起 `deploy/xxl-job/`（admin + MySQL）。
-3. **数据库迁移新增 0026-0029**（sync_tasks / 敏感项 / 脱敏策略 / 同步源绑定 XXL 执行器）：升级后必须 `alembic upgrade head` 并验证同步与问答接口。
+3. **数据库迁移新增 0026-0030**（sync_tasks / 敏感项 / 脱敏策略 / 同步源绑定 XXL 执行器 / rerank_profiles 多配置）：升级后必须 `alembic upgrade head` 并验证同步与问答接口；rerank 多配置表为空且旧单值已配置时自动建档并标记生效。
 4. **同步链路质量与性能**：① 源文档**原样直传 Dify**（不再经本地转换引擎，先备份 MinIO 再上传）；② 钉钉目录树并发遍历（≤3 并发）+ 服务端 10 分钟缓存，「同步列表」从数十秒降到秒级（缓存命中 <100ms）；③ 逐源统计 N+1 改批量聚合接口 + 前端 1 小时持久缓存（`kge:sync_sources_page_v1` / `kge:dify_datasets_v1` / `kge:dingtalk_workspaces_v1`）。
 5. **升级后老规矩**：app 容器重启后 `docker restart` nginx（避免上游 IP 缓存导致 502）。
 
@@ -313,6 +313,7 @@ KB_API_INTERNAL_URL=http://kb-api:8000
 |------|------|
 | 检索报「未配置外接向量模型」 | 本地 RAG 检索/入库需在 `.env` 配 `EMBEDDING_BASE_URL` / `EMBEDDING_API_KEY` / `EMBEDDING_MODEL`（OpenAI 兼容端点，维度须与既有 ES 索引一致）；Dify/RAGFlow 知识库检索不受影响 |
 | 问答提示「尚未配置 LLM API Key」 | 智能问答依赖 LLM；在「系统配置 → 接入配置」填 LLM API Key 并保存，或在 `.env` 配 `LLM_API_KEY`。Agent 未配置时返回 `config_error=llm_not_configured`（不再 500），前端在对话气泡给出跳转按钮 |
+| Rerank 重排配置与切换 | 「系统配置 → 接入配置 → Rerank 重排模型」支持**多条配置 + 单选生效**：`+ 新增重排配置` 弹窗填写服务地址（含完整 `/rerank` 路径）/模型名，API Key **非必填**（内网/自建服务如 Xinference 常免鉴权，测试连通性不再强制 Key）；编辑时 Key 留空保持不变。点行首 radio 切换生效（同名「生效中」标记），生效配置自动回写 `rerank_api_url` / `rerank_api_key` / `rerank_model` 运行值；删除生效配置时自动回退到最早一条，全部删除则清空（检索跳过重排，RRF/BM25 兜底）。首次升级后旧单值配置自动迁移为「默认·旧配置迁移」并标记生效 |
 | PDF/DOCX 解析失败 | 配置 `MINERU_API_KEY` 后支持 PDF/DOCX/PPTX/XLSX/HTML 云解析；留空则仅 txt/md/csv 本地解析，二进制格式抛「需配置 MINERU_API_KEY」 |
 | `uv sync` 报 `kb-common` 找不到 | 在 `services/kb-common` 先 `uv sync`；Docker 构建已通过 repo-root context 解决 |
 | 端口 8000/8004 被占用 | `lsof -i :8000` 找到进程；或改 uvicorn `--port` |
@@ -524,7 +525,13 @@ docker compose down -v        # 同时删除卷（清空 Dify 数据库与知识
 
 ## 知识加工（process 模块）
 
-侧边栏「知识加工」（路由 `/process`）对已进入 Dify 知识库的文档进行 **AI 打标 + 摘要生成 + 知识关系构建**，为智能问答提供结构化上下文工程能力。
+侧边栏「知识加工」（父级路由 `/process`）已拆分为二级菜单：
+
+- **知识打标**（`/process/tagging`，原「知识加工」页内容）：对已进入 Dify 知识库的文档进行 **AI 打标 + 摘要生成 + 知识关系构建**，为智能问答提供结构化上下文工程能力。
+- **解析引擎**（`/process/engine`，双页签）：
+  - **自定义解析**（[ParserCustomTab.vue](web/src/views/governance/components/ParserCustomTab.vue)）：对接 MinerU V1 API（本地 `http://127.0.0.1:8010`，无鉴权，地址可在页面配置并持久化 localStorage）。流程：三步上传（`POST /v1/uploads` → `PUT content` → `complete` 得 `file_id`）→ 建解析任务（`POST /v1/parse/jobs`，支持档位 flash/basic/standard/advanced 动态拉取 `/v1/tiers`、OCR 模式 auto/txt/ocr、页码范围）→ 2s 自动轮询进度 → 懒加载产物。**输出格式仅 markdown + middle_json 双视图**（marked 渲染 / 语法高亮），HTML、TXT 等已按服务实际能力裁剪；支持复制、下载（`.md` / `_middle.json`）、取消任务。队列为本地任务 + 服务端历史合并（`GET /v1/parse/jobs`），查看历史任务时按需拉详情。结果区限高 60vh 窗口内滚动；base64 内联图缩略展示（≤220px 居中带边框），zip 内相对路径图片以占位提示代替。
+  - **MinerU WebUI**：iframe 嵌入官方 WebUI（同源部署直连）。
+  - **CORS 代理**：浏览器直连 MinerU 会被 CORS 拦截（服务不带跨域头），全部请求经 kb-api 同源透传代理（[mineru_route.py](services/kb-api/app/routes/mineru_route.py)）`/api/v1/mineru/*`，目标地址由 `X-Mineru-Base` 请求头指定，仅 super_admin/admin 可用。
 
 ### 核心能力
 

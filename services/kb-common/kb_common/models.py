@@ -152,6 +152,22 @@ class LLMProfile(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
+class RerankProfile(Base):
+    """多条 Rerank 重排模型配置，只能生效一条（enabled=true）。
+
+    生效配置回写旧版单值 settings（rerank_api_url/rerank_api_key/rerank_model），
+    kb_common.rag.reranker 运行链路保持不变。
+    """
+    __tablename__ = "rerank_profiles"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(100))
+    api_url: Mapped[str] = mapped_column(String(500), default="")
+    api_key: Mapped[str] = mapped_column(Text, default="")
+    model: Mapped[str] = mapped_column(String(200), default="")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
 class ChatSession(Base):
     """智能问答会话：每个会话独立隔离，拥有各自的记忆文档。"""
     __tablename__ = "chat_sessions"
@@ -614,3 +630,59 @@ class DingtalkBinding(Base):
     dt_name: Mapped[str | None] = mapped_column(String(100))
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     __table_args__ = (UniqueConstraint("corp_id", "dt_userid", name="uq_dingtalk_binding_corp_user"),)
+
+
+class StructuredTask(Base):
+    """结构化处理 · 解析任务：文件经 MinerU 解析后的结构化 JSON 留存。
+
+    engine: kit_v1=本地 mineru-kit V1 API(8010) / cloud_v4=MinerU 云 API；
+    status: pending/parsing/completed/failed；content_json 为归一化 content 块数组。
+    """
+    __tablename__ = "structured_tasks"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    file_name: Mapped[str] = mapped_column(String(512))
+    file_ext: Mapped[str] = mapped_column(String(16), default="")
+    engine: Mapped[str] = mapped_column(String(32), default="kit_v1")
+    tier: Mapped[str] = mapped_column(String(32), default="standard")
+    ocr_mode: Mapped[str] = mapped_column(String(16), default="auto")
+    status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
+    remote_job_id: Mapped[str | None] = mapped_column(String(128))
+    error: Mapped[str | None] = mapped_column(Text)
+    content_json: Mapped[list | None] = mapped_column(JSON)
+    markdown: Mapped[str | None] = mapped_column(Text)
+    meta: Mapped[dict | None] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+
+class StructuredSchema(Base):
+    """结构化处理 · 表结构 + 字段映射设计。
+
+    target_table: 写入 structured schema 下的表名；
+    row_source: 行源 JSON 路径（默认 content，即每个解析块一行）；
+    columns: [{name, type, path, const}]，path 为行内相对 JSON 路径，const 为常量列。
+    """
+    __tablename__ = "structured_schemas"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(128), unique=True)
+    target_table: Mapped[str] = mapped_column(String(128))
+    row_source: Mapped[str] = mapped_column(String(256), default="content")
+    columns: Mapped[list] = mapped_column(JSON)
+    description: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class StructuredWriteLog(Base):
+    """结构化处理 · 写入历史：目标表、行数、成败。"""
+    __tablename__ = "structured_write_logs"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    schema_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("structured_schemas.id", ondelete="SET NULL"), index=True)
+    task_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("structured_tasks.id", ondelete="SET NULL"))
+    target_table: Mapped[str] = mapped_column(String(128))
+    rows_written: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(32), default="success")
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

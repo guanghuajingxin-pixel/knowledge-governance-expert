@@ -50,10 +50,32 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '知识采集', icon: 'Download', group: 'feature' },
       },
       {
+        // 知识加工：页面拆分为二级页（知识打标/解析引擎），父级仅作分组，重定向到首个子页
         path: 'process',
         name: 'Process',
-        component: () => import('@/views/governance/process.vue'),
+        redirect: '/process/tagging',
         meta: { title: '知识加工', icon: 'Setting', group: 'feature' },
+      },
+      {
+        // 知识打标：原「知识加工」页内容下沉为二级页（AI 打标 + 摘要生成 + 知识关系构建）
+        path: 'process/tagging',
+        name: 'ProcessTagging',
+        component: () => import('@/views/governance/process.vue'),
+        meta: { title: '知识打标', icon: 'CollectionTag', group: 'feature', parent: '/process', menuOrder: 1 },
+      },
+      {
+        // 解析引擎：双页签（自定义解析 + MinerU WebUI iframe）
+        path: 'process/engine',
+        name: 'ProcessEngine',
+        component: () => import('@/views/governance/ProcessEngine.vue'),
+        meta: { title: '解析引擎', icon: 'Odometer', group: 'feature', parent: '/process', menuOrder: 2 },
+      },
+      {
+        // 结构化处理：解析 JSON → 表结构/字段映射 → 预览 → 一键写入共享 PG(structured schema)
+        path: 'process/structured',
+        name: 'ProcessStructured',
+        component: () => import('@/views/governance/StructuredProcess.vue'),
+        meta: { title: '结构化处理', icon: 'Grid', group: 'feature', parent: '/process', menuOrder: 3 },
       },
       {
         // 知识应用：拆分为二级页（脱敏策略/知识库），父级仅作分组，重定向到首个子页

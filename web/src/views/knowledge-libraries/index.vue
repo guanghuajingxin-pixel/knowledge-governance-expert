@@ -1161,7 +1161,7 @@ function shortSegId(id?: string): string {
 }
 
 .rt-left {
-  width: 400px;
+  width: 40%;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;

@@ -65,7 +65,7 @@ function resolveSourceUrl(src: KnowledgeSource): string {
     case 'dingtalk_workspace':
       return `https://alidingsn.dingtalk.com/knowledge/org?workspaceId=${encodeURIComponent(src.external_id)}`
     case 'dify_dataset':
-      return difyUiUrl.value ? `${difyUiUrl.value}/datasets/${encodeURIComponent(src.external_id)}` : ''
+      return difyUiUrl.value ? `${difyUiUrl.value}/datasets/${encodeURIComponent(src.external_id)}/documents` : ''
     case 'ragflow_dataset':
       return ragflowUiUrl.value ? `${ragflowUiUrl.value}/#/dataset/${encodeURIComponent(src.external_id)}` : ''
     default:

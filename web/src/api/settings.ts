@@ -162,8 +162,36 @@ export interface TestRerankResult {
   message?: string
 }
 
-export const testRerank = (data: { api_url?: string; api_key?: string; model?: string }) =>
+export const testRerank = (data: { api_url?: string; api_key?: string; model?: string; profile_id?: string }) =>
   request.post<unknown, TestRerankResult>('/settings/test-rerank', data)
+
+// ============ Rerank 重排模型多配置 ============
+
+export interface RerankProfile {
+  id: string
+  name: string
+  api_url: string
+  api_key: string          // 脱敏回显
+  has_key: boolean
+  model: string
+  enabled: boolean
+  created_at: string | null
+}
+
+export const listRerankProfiles = () =>
+  request.get<unknown, RerankProfile[]>('/settings/rerank-profiles')
+
+export const createRerankProfile = (data: { name: string; api_url: string; api_key: string; model: string }) =>
+  request.post<unknown, RerankProfile>('/settings/rerank-profiles', data)
+
+export const updateRerankProfile = (id: string, data: { name: string; api_url: string; api_key: string; model: string }) =>
+  request.put<unknown, RerankProfile>(`/settings/rerank-profiles/${id}`, data)
+
+export const deleteRerankProfile = (id: string) =>
+  request.delete<unknown, void>(`/settings/rerank-profiles/${id}`)
+
+export const enableRerankProfile = (id: string) =>
+  request.put<unknown, { ok: boolean }>(`/settings/rerank-profiles/${id}/enable`)
 
 // ============ 菜单显示配置（侧边栏功能区菜单显隐） ============
 

@@ -15,6 +15,10 @@ import {
   listLlmProfiles, createLlmProfile, updateLlmProfile, deleteLlmProfile, refreshLlmProfileModels,
   type LlmProfile, type LlmModelEntry,
 } from '@/api/settings'
+import {
+  listRerankProfiles, createRerankProfile, updateRerankProfile, deleteRerankProfile, enableRerankProfile,
+  type RerankProfile,
+} from '@/api/settings'
 import { testRagflow, type TestRagflowResult } from '@/api/ragflow'
 import { getMenuVisibility, setMenuVisibility } from '@/api/settings'
 import { useRouter } from 'vue-router'
@@ -200,6 +204,108 @@ async function removeLlmProfile(p: LlmProfile) {
 // RAGFlow 连通性测试（编辑未保存时可用当前表单值测试；留空则后端回退已保存值）
 const ragflowTest = ref({ testing: false, result: null as TestRagflowResult | null })
 
+// ============ Rerank 重排模型多配置（多条只能生效一条） ============
+const rerankProfiles = ref<RerankProfile[]>([])
+const rerankLoading = ref(false)
+
+const rrDlg = ref({
+  visible: false,
+  editingId: '',
+  name: '',
+  api_url: '',
+  api_key: '',
+  has_key: false,
+  model: '',
+  testing: false,
+  saving: false,
+  testResult: null as TestRerankResult | null,
+})
+
+async function loadRerankProfiles() {
+  rerankLoading.value = true
+  try {
+    rerankProfiles.value = await listRerankProfiles()
+  } finally {
+    rerankLoading.value = false
+  }
+}
+
+function openRrCreate() {
+  rrDlg.value = {
+    visible: true, editingId: '', name: '', api_url: '',
+    api_key: '', has_key: false, model: '',
+    testing: false, saving: false, testResult: null,
+  }
+}
+
+function openRrEdit(p: RerankProfile) {
+  rrDlg.value = {
+    visible: true, editingId: p.id, name: p.name, api_url: p.api_url,
+    api_key: '', has_key: p.has_key, model: p.model,
+    testing: false, saving: false, testResult: null,
+  }
+}
+
+async function runRrTest() {
+  const d = rrDlg.value
+  if (!d.api_url.trim() || !d.model.trim()) {
+    ElMessage.warning('请先填写服务地址与模型名')
+    return
+  }
+  d.testResult = null
+  d.testing = true
+  try {
+    d.testResult = await testRerank({
+      api_url: d.api_url,
+      api_key: d.api_key,
+      model: d.model,
+      profile_id: d.editingId,
+    })
+  } catch (e: any) {
+    d.testResult = { ok: false, message: e?.message || '请求失败' }
+  } finally {
+    d.testing = false
+  }
+}
+
+async function saveRrProfile() {
+  const d = rrDlg.value
+  if (!d.name.trim()) return ElMessage.warning('请填写配置名称')
+  if (!d.api_url.trim()) return ElMessage.warning('请填写服务地址')
+  if (!d.model.trim()) return ElMessage.warning('请填写模型名')
+  d.saving = true
+  try {
+    // 编辑态：留空且原有 Key → 不修改；填 "__CLEAR__" → 清空 Key（免鉴权服务）
+    let key = d.api_key
+    if (d.editingId && !key && d.has_key) key = ''
+    const payload = { name: d.name.trim(), api_url: d.api_url.trim(), api_key: key, model: d.model.trim() }
+    if (d.editingId) {
+      await updateRerankProfile(d.editingId, payload)
+      ElMessage.success('重排配置已更新')
+    } else {
+      await createRerankProfile(payload)
+      ElMessage.success('重排配置已创建，点击「生效」切换当前使用的模型')
+    }
+    d.visible = false
+    await loadRerankProfiles()
+  } finally {
+    d.saving = false
+  }
+}
+
+async function removeRrProfile(p: RerankProfile) {
+  await ElMessageBox.confirm(`确定删除重排配置「${p.name}」？`, '删除确认', { type: 'warning' })
+  await deleteRerankProfile(p.id)
+  ElMessage.success('已删除')
+  await loadRerankProfiles()
+}
+
+async function enableRrProfile(p: RerankProfile) {
+  await enableRerankProfile(p.id)
+  ElMessage.success(`已切换生效：${p.name}`)
+  await loadRerankProfiles()
+}
+
 async function runRagflowTest() {
   ragflowTest.value.result = null
   ragflowTest.value.testing = true
@@ -234,25 +340,6 @@ async function runEmbeddingTest() {
   }
 }
 
-// Rerank 连通性测试
-const rerankTest = ref({ testing: false, result: null as TestRerankResult | null })
-
-async function runRerankTest() {
-  rerankTest.value.result = null
-  rerankTest.value.testing = true
-  try {
-    rerankTest.value.result = await testRerank({
-      api_url: form.value.rerank_api_url?.value || '',
-      api_key: form.value.rerank_api_key?.value || '',
-      model: form.value.rerank_model?.value || '',
-    })
-  } catch (e: any) {
-    rerankTest.value.result = { ok: false, message: e?.message || '请求失败' }
-  } finally {
-    rerankTest.value.testing = false
-  }
-}
-
 onMounted(async () => {
   // 5 个互不依赖的请求并发拉取：原来逐个 await，首屏耗时等于 5 次往返相加
   const [settings] = await Promise.all([
@@ -261,6 +348,7 @@ onMounted(async () => {
     loadLlmProfiles(),
     loadMenuConfig(),
     loadBotSection(),
+    loadRerankProfiles(),
   ])
   form.value = settings
 })
@@ -553,7 +641,7 @@ async function loadMenuConfig() {
         visible: !hidden.includes(r.path),
       }))
     // 保持路由定义顺序
-    const orderedPaths = ['/chat', '/hiagent', '/collection', '/knowledge-sources', '/collection/dingtalk', '/collection/upload', '/process', '/apply', '/operate', '/govern']
+    const orderedPaths = ['/chat', '/hiagent', '/collection', '/knowledge-sources', '/collection/dingtalk', '/collection/upload', '/process', '/process/tagging', '/process/engine', '/apply', '/operate', '/govern']
     items.sort((a, b) => {
       const ia = orderedPaths.indexOf(a.path)
       const ib = orderedPaths.indexOf(b.path)
@@ -694,7 +782,7 @@ const usage = [
               <el-table v-if="profiles.length" :data="profiles" size="small" style="margin-top: 8px">
                 <el-table-column label="生效" width="70">
                   <template #default="{ row }">
-                    <el-radio :model-value="row.enabled" @change="enableProfile(row.id)">&nbsp;</el-radio>
+                    <el-radio :model-value="!!row.enabled" :value="true" :aria-label="`启用 ${row.name}`" @change="enableProfile(row.id)">&nbsp;</el-radio>
                   </template>
                 </el-table-column>
                 <el-table-column prop="name" label="名称" min-width="120" />
@@ -782,39 +870,42 @@ const usage = [
           </el-form-item>
 
           <el-divider content-position="left">Rerank 重排模型（检索结果重排序）</el-divider>
-          <el-form-item label="服务地址">
-            <div class="field-row">
-              <el-input v-model="form.rerank_api_url.value" placeholder="如 https://api.siliconflow.cn/v1/rerank" />
-              <el-button type="primary" :loading="saving === 'rerank_api_url'" @click="save('rerank_api_url')">保存</el-button>
+          <el-form-item label="配置列表">
+            <div class="profile-box">
+              <div class="profile-toolbar">
+                <el-button size="small" type="primary" @click="openRrCreate">+ 新增重排配置</el-button>
+              </div>
+              <el-table v-if="rerankProfiles.length" :data="rerankProfiles" size="small" v-loading="rerankLoading" style="margin-top: 8px">
+                <el-table-column label="生效" width="70">
+                  <template #default="{ row }">
+                    <el-radio :model-value="!!row.enabled" :value="true" :aria-label="`启用 ${row.name}`" @change="enableRrProfile(row as RerankProfile)">&nbsp;</el-radio>
+                  </template>
+                </el-table-column>
+                <el-table-column prop="name" label="名称" min-width="140">
+                  <template #default="{ row }">
+                    <b>{{ row.name }}</b>
+                    <el-tag v-if="row.enabled" size="small" type="success" effect="light" style="margin-left: 6px">生效中</el-tag>
+                  </template>
+                </el-table-column>
+                <el-table-column prop="api_url" label="服务地址" min-width="200" show-overflow-tooltip />
+                <el-table-column prop="model" label="模型名" min-width="170" show-overflow-tooltip />
+                <el-table-column label="API Key" min-width="110">
+                  <template #default="{ row }">
+                    <span v-if="row.has_key" class="mono">{{ row.api_key }}</span>
+                    <span v-else class="muted">免鉴权</span>
+                  </template>
+                </el-table-column>
+                <el-table-column label="操作" width="110">
+                  <template #default="{ row }">
+                    <el-button size="small" link type="primary" @click="openRrEdit(row as RerankProfile)">编辑</el-button>
+                    <el-button size="small" link type="danger" @click="removeRrProfile(row as RerankProfile)">删除</el-button>
+                  </template>
+                </el-table-column>
+              </el-table>
+              <div v-else class="empty">尚无重排配置，点击「新增重排配置」添加；未配置时检索跳过重排（RRF/BM25 排序兜底）。</div>
+              <div class="field-hint" style="margin-top: 6px">Jina/SiliconFlow 风格 /rerank 端点，可配置多条，单选切换生效；API Key 非必填（内网/自建服务常免鉴权）。</div>
             </div>
-            <div class="field-hint">Jina/SiliconFlow 风格 /rerank 端点；留空时检索跳过重排（RRF/BM25 排序兜底）。</div>
           </el-form-item>
-          <el-form-item label="API Key">
-            <div class="field-row">
-              <el-input v-model="form.rerank_api_key.value" show-password placeholder="未设置" />
-              <el-button type="primary" :loading="saving === 'rerank_api_key'" @click="save('rerank_api_key')">保存</el-button>
-            </div>
-          </el-form-item>
-          <el-form-item label="模型名">
-            <div class="field-row">
-              <el-input v-model="form.rerank_model.value" placeholder="如 BAAI/bge-reranker-v2-m3" />
-              <el-button type="primary" :loading="saving === 'rerank_model'" @click="save('rerank_model')">保存</el-button>
-            </div>
-            <div class="field-row" style="margin-top: 8px">
-              <el-button :loading="rerankTest.testing" @click="runRerankTest">测试连通性</el-button>
-            </div>
-            <el-alert
-              v-if="rerankTest.result?.ok"
-              type="success" :closable="false" show-icon style="margin-top: 8px"
-              :title="`连接成功 · ${rerankTest.result.latency_ms}ms · ${rerankTest.result.message}`"
-            />
-            <el-alert
-              v-else-if="rerankTest.result && !rerankTest.result.ok"
-              type="error" :closable="false" show-icon style="margin-top: 8px"
-              :title="rerankTest.result.message || '连接失败'"
-            />
-          </el-form-item>
-
 
           <el-divider content-position="left">文档解析</el-divider>
           <el-form-item label="MinerU API Key">
@@ -1069,6 +1160,40 @@ const usage = [
         <el-button :loading="profileTest.testing" @click="runProfileTest">测试连通性</el-button>
         <el-button @click="profileDialogVisible = false">取消</el-button>
         <el-button type="primary" :loading="savingProfile" @click="saveProfile">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- Rerank 重排配置编辑弹窗 -->
+    <el-dialog v-model="rrDlg.visible" :title="rrDlg.editingId ? '编辑重排配置' : '新增重排配置'" width="560px" destroy-on-close>
+      <el-form label-position="top" @submit.prevent>
+        <el-form-item required label="配置名称">
+          <el-input v-model="rrDlg.name" placeholder="如：BGE-reranker 生产环境" />
+        </el-form-item>
+        <el-form-item required label="服务地址">
+          <el-input v-model="rrDlg.api_url" placeholder="http://10.10.166.81:7775/v1/rerank（需含完整 /rerank 路径）" />
+        </el-form-item>
+        <el-form-item required label="模型名">
+          <el-input v-model="rrDlg.model" placeholder="如 BAAI/bge-reranker-v2-m3" />
+        </el-form-item>
+        <el-form-item label="API Key（非必填）">
+          <el-input v-model="rrDlg.api_key" show-password :placeholder="rrDlg.has_key ? '••••••••（留空保持不变）' : '内网/自建服务常免鉴权，可留空'" />
+          <div v-if="rrDlg.editingId && rrDlg.has_key" class="field-hint">留空表示不修改已保存的 Key</div>
+        </el-form-item>
+        <el-alert
+          v-if="rrDlg.testResult?.ok"
+          type="success" :closable="false" show-icon style="margin-top: 8px"
+          :title="`连接成功 · ${rrDlg.testResult.latency_ms}ms · ${rrDlg.testResult.message}`"
+        />
+        <el-alert
+          v-else-if="rrDlg.testResult && !rrDlg.testResult.ok"
+          type="error" :closable="false" show-icon style="margin-top: 8px"
+          :title="rrDlg.testResult.message || '连接失败'"
+        />
+      </el-form>
+      <template #footer>
+        <el-button :loading="rrDlg.testing" @click="runRrTest">测试连通性</el-button>
+        <el-button @click="rrDlg.visible = false">取消</el-button>
+        <el-button type="primary" :loading="rrDlg.saving" @click="saveRrProfile">保存</el-button>
       </template>
     </el-dialog>
 
