@@ -6,6 +6,7 @@ lru_cached settings，供 kb_common.clients.ragflow_client 使用。未配置时
 """
 from __future__ import annotations
 
+import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -123,15 +124,28 @@ async def create_ragflow_dataset(body: DatasetIn,
 class TestRagflowIn(BaseModel):
     base_url: str = ""
     api_key: str = ""
+    profile_id: str = ""   # 编辑态 Key 为掩码/留空时，回退该 profile 已存 Key
 
 
 @router.post("/test")
 async def test_ragflow(body: TestRagflowIn,
                        u=Depends(require_role("super_admin", "admin")),
                        s: AsyncSession = Depends(get_session)):
-    """RAGFlow 连通性测试：编辑弹窗留空 Key 时回退已保存值。"""
+    """RAGFlow 连通性测试：编辑弹窗留空 Key 时回退已保存值（profile 或旧版单值）。"""
     base_url = body.base_url.strip()
     api_key = body.api_key.strip()
+    if body.profile_id:
+        from kb_common.models import RagflowProfile
+        try:
+            pid = uuid.UUID(body.profile_id.strip())
+            row = (await s.execute(select(RagflowProfile).where(RagflowProfile.id == pid))).scalar_one_or_none()
+        except ValueError:
+            row = None
+        if row:
+            if not base_url:
+                base_url = row.base_url
+            if not api_key or "****" in api_key:
+                api_key = row.api_key
     if not api_key or "****" in api_key:
         api_key = await _effective(s, "ragflow_api_key")
     if not base_url:

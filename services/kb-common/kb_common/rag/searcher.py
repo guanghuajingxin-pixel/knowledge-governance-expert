@@ -1,100 +1,107 @@
+import asyncio
 from kb_common.clients import es_client
 from kb_common.rag import embedder, reranker
 from elasticsearch import AsyncElasticsearch
 
-K_RRF = 60
+from kb_common.rag.scoring import cosine, prepare_query, document_tokens, term_scores, blend
 
 
 async def _knn(es: AsyncElasticsearch, index: str, vector, top_k: int, filters: dict):
     q = {"field": "vector", "query_vector": vector, "k": top_k, "num_candidates": top_k * 5}
+    knn_filter = []
     if filters.get("directory_ids"):
-        q["filter"] = {"terms": {"directory_id": filters["directory_ids"]}}
+        knn_filter.append({"terms": {"directory_id": filters["directory_ids"]}})
+    if filters.get("document_ids"):
+        knn_filter.append({"terms": {"document_id": filters["document_ids"]}})
+    if knn_filter:
+        q["filter"] = {"bool": {"must": knn_filter}} if len(knn_filter) > 1 else knn_filter[0]
     r = await es.search(
         index=index,
         knn=[q],
         size=top_k,
         source=["text", "document_id", "document_title", "chunk_index",
                 "page_number", "source_path", "file_type", "content_hash",
-                "directory_id", "kb_type", "faq_entry_id", "faq_answer"],
+                "directory_id", "kb_type", "faq_entry_id", "faq_answer", "vector"],
     )
     return [(h["_id"], h["_score"], h["_source"]) for h in r["hits"]["hits"]]
 
 
 async def _bm25(es: AsyncElasticsearch, index: str, query: str, top_k: int, filters: dict):
-    must = [{"match": {"text": query}}]
+    prepared = await asyncio.to_thread(prepare_query, query)
+    if not prepared.expression:
+        return []
+    must = [{"query_string": {"query": prepared.expression, "fields": ["text^2", "document_title^10"],
+                               "type": "best_fields", "minimum_should_match": "30%"}}]
     if filters.get("directory_ids"):
         must.append({"terms": {"directory_id": filters["directory_ids"]}})
+    if filters.get("document_ids"):
+        must.append({"terms": {"document_id": filters["document_ids"]}})
     r = await es.search(index=index, query={"bool": {"must": must}}, size=top_k,
                         source=True)
     return [(h["_id"], h["_score"], h["_source"]) for h in r["hits"]["hits"]]
 
 
-def _rrf(ranklists: list[list[tuple]], top_k: int) -> list[tuple]:
-    """多路结果 RRF 融合。ranklists: 每路 [(id, score, src)]，按出现顺序即排名。"""
-    scores = {}
-    src_map = {}
-    for rl in ranklists:
-        for rank, (hid, _score, src) in enumerate(rl):
-            scores[hid] = scores.get(hid, 0.0) + 1.0 / (K_RRF + rank + 1)
-            src_map[hid] = src
-    ordered = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:top_k]
-    return [(hid, sc, src_map[hid]) for hid, sc in ordered]
+async def _search(kb_ids, query, top_k, filters, rerank, mode):
+    if not query.strip() or not kb_ids:
+        return []
+    if not 1 <= top_k <= 100:
+        raise ValueError("top_k 必须介于 1 和 100 之间")
+    filters = filters or {}
+    count = max(100, top_k * 5)
+    qvec = (await asyncio.to_thread(embedder.embed, [query]))[0] if mode != 'keyword' else None
+    es = es_client.es
+    candidates = {}
+    for kb_id in dict.fromkeys(kb_ids):
+        index = f"kb_{kb_id.replace('-', '')}"
+        if not await es.indices.exists(index=index):
+            continue
+        knn = await _knn(es, index, qvec, count, filters) if qvec is not None else []
+        lexical = await _bm25(es, index, query, count, filters) if mode != 'semantic' else []
+        knn_scores = {hid: score for hid, score, _ in knn}
+        for hid, raw, src in knn + lexical:
+            key = (index, hid)
+            if key not in candidates:
+                candidates[key] = {**src, 'id': hid}
+            if hid in knn_scores:
+                candidates[key]['es_vector_score'] = knn_scores[hid]
+    docs = []
+    prepared = await asyncio.to_thread(prepare_query, query)
+    fields = [document_tokens(h.get('text', ''), h.get('document_title', '')) for h in candidates.values()]
+    lexical_scores = await asyncio.to_thread(term_scores, prepared, fields)
+    for hit, token in zip(candidates.values(), lexical_scores):
+        vector = hit.pop('vector', None)
+        similarity = None
+        if qvec is not None:
+            # ES cosine scores are (1 + cosine) / 2, not raw cosine.
+            if vector is not None:
+                similarity = cosine(qvec, vector)
+            elif 'es_vector_score' in hit:
+                similarity = max(-1.0, min(1.0, 2 * hit['es_vector_score'] - 1))
+            else:
+                raise ValueError('候选分段缺少向量，无法计算混合分数，请重建索引')
+        hit['token_similarity'] = token
+        hit['vector_similarity'] = similarity
+        hit['score_type'] = {'keyword': 'ragflow_token', 'semantic': 'cosine', 'hybrid': 'ragflow_hybrid'}[mode]
+        hit['semantic_weight'] = 1.0 if mode == 'semantic' else 0.7
+        hit['score'] = token if mode == 'keyword' else (similarity if mode == 'semantic' else blend(token, similarity, 0.7))
+        if hit['score'] > 0:
+            docs.append(hit)
+    docs.sort(key=lambda h: -h['score'])
+    if rerank and docs:
+        docs = await asyncio.to_thread(reranker.rerank, query, docs[:count], top_n=top_k)
+    return docs[:top_k]
 
 
 async def hybrid(kb_ids: list[str], query: str, top_k: int = 10,
                  filters: dict | None = None, rerank: bool = True) -> list[dict]:
-    filters = filters or {}
-    qvec = embedder.embed([query])[0]
-    es = es_client.es
-    merged = []
-    for kb_id in kb_ids:
-        index = f"kb_{kb_id.replace('-', '')}"
-        if not await es.indices.exists(index=index):
-            continue
-        knn = await _knn(es, index, qvec, top_k, filters)
-        bm25 = await _bm25(es, index, query, top_k, filters)
-        merged.append(knn)
-        merged.append(bm25)
-    fused = _rrf(merged, top_k * 5 if rerank else top_k)
-    docs = [{"id": hid, "score": sc, **src} for hid, sc, src in fused]
-    if rerank and docs:
-        docs = reranker.rerank(query, docs, top_n=top_k)
-        # rerank 后补回原始 score
-    return docs[:top_k]
+    return await _search(kb_ids, query, top_k, filters, rerank, 'hybrid')
 
 
 async def semantic(kb_ids: list[str], query: str, top_k: int = 10,
                    filters: dict | None = None, rerank: bool = True) -> list[dict]:
-    """仅向量检索（kNN）+ 可选 rerank。返回与 hybrid 同形的 hit dict 列表。"""
-    filters = filters or {}
-    qvec = embedder.embed([query])[0]
-    es = es_client.es
-    flat: list[tuple] = []
-    for kb_id in kb_ids:
-        index = f"kb_{kb_id.replace('-', '')}"
-        if not await es.indices.exists(index=index):
-            continue
-        flat.extend(await _knn(es, index, qvec, top_k, filters))
-    # 单路无需 RRF；按 ES score 排序，rerank 时多取候选
-    flat.sort(key=lambda x: x[1], reverse=True)
-    cand = flat[: top_k * 5 if rerank else top_k]
-    docs = [{"id": hid, "score": sc, **src} for hid, sc, src in cand]
-    if rerank and docs:
-        docs = reranker.rerank(query, docs, top_n=top_k)
-    return docs[:top_k]
+    return await _search(kb_ids, query, top_k, filters, rerank, 'semantic')
 
 
 async def keyword(kb_ids: list[str], query: str, top_k: int = 10,
                   filters: dict | None = None, rerank: bool = False) -> list[dict]:
-    """仅关键字检索（BM25），不做 rerank。返回与 hybrid 同形的 hit dict 列表。"""
-    filters = filters or {}
-    es = es_client.es
-    flat: list[tuple] = []
-    for kb_id in kb_ids:
-        index = f"kb_{kb_id.replace('-', '')}"
-        if not await es.indices.exists(index=index):
-            continue
-        flat.extend(await _bm25(es, index, query, top_k, filters))
-    flat.sort(key=lambda x: x[1], reverse=True)
-    docs = [{"id": hid, "score": sc, **src} for hid, sc, src in flat[:top_k]]
-    return docs
+    return await _search(kb_ids, query, top_k, filters, rerank, 'keyword')

@@ -153,7 +153,7 @@ export interface TestEmbeddingResult {
   message?: string
 }
 
-export const testEmbedding = (data: { base_url?: string; api_key?: string; model?: string }) =>
+export const testEmbedding = (data: { base_url?: string; api_key?: string; model?: string; profile_id?: string }) =>
   request.post<unknown, TestEmbeddingResult>('/settings/test-embedding', data)
 
 export interface TestRerankResult {
@@ -192,6 +192,68 @@ export const deleteRerankProfile = (id: string) =>
 
 export const enableRerankProfile = (id: string) =>
   request.put<unknown, { ok: boolean }>(`/settings/rerank-profiles/${id}/enable`)
+
+// ============ Embedding 向量模型多配置 ============
+
+export interface EmbeddingProfile {
+  id: string
+  name: string
+  api_url: string
+  api_key: string          // 脱敏回显
+  has_key: boolean
+  model: string
+  enabled: boolean
+  created_at: string | null
+}
+
+export const listEmbeddingProfiles = () =>
+  request.get<unknown, EmbeddingProfile[]>('/settings/embedding-profiles')
+
+export const createEmbeddingProfile = (data: { name: string; api_url: string; api_key: string; model: string }) =>
+  request.post<unknown, EmbeddingProfile>('/settings/embedding-profiles', data)
+
+export const updateEmbeddingProfile = (id: string, data: { name: string; api_url: string; api_key: string; model: string }) =>
+  request.put<unknown, EmbeddingProfile>(`/settings/embedding-profiles/${id}`, data)
+
+export const deleteEmbeddingProfile = (id: string) =>
+  request.delete<unknown, void>(`/settings/embedding-profiles/${id}`)
+
+export const enableEmbeddingProfile = (id: string) =>
+  request.put<unknown, { ok: boolean }>(`/settings/embedding-profiles/${id}/enable`)
+
+// ============ OpenAI 兼容服务模型列表拉取（不过滤，供 Embedding/Rerank 弹窗） ============
+
+export const fetchExternalModels = (baseUrl: string, apiKey: string, extra?: { kind?: string; profile_id?: string }) =>
+  request.get<unknown, { ok: boolean; models: string[]; message?: string }>('/settings/external-models', {
+    params: { base_url: baseUrl, api_key: apiKey, ...(extra || {}) },
+  })
+
+// ============ RAGFlow 知识库多配置（多环境切换） ============
+
+export interface RagflowProfile {
+  id: string
+  name: string
+  base_url: string
+  api_key: string          // 脱敏回显
+  has_key: boolean
+  enabled: boolean
+  created_at: string | null
+}
+
+export const listRagflowProfiles = () =>
+  request.get<unknown, RagflowProfile[]>('/settings/ragflow-profiles')
+
+export const createRagflowProfile = (data: { name: string; base_url: string; api_key: string }) =>
+  request.post<unknown, RagflowProfile>('/settings/ragflow-profiles', data)
+
+export const updateRagflowProfile = (id: string, data: { name: string; base_url: string; api_key: string }) =>
+  request.put<unknown, RagflowProfile>(`/settings/ragflow-profiles/${id}`, data)
+
+export const deleteRagflowProfile = (id: string) =>
+  request.delete<unknown, void>(`/settings/ragflow-profiles/${id}`)
+
+export const enableRagflowProfile = (id: string) =>
+  request.put<unknown, { ok: boolean }>(`/settings/ragflow-profiles/${id}/enable`)
 
 // ============ 菜单显示配置（侧边栏功能区菜单显隐） ============
 

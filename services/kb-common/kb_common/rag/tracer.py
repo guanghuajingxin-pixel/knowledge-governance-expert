@@ -26,7 +26,9 @@ def trace(hit: dict, doc_map: dict) -> dict:
     return {
         "chunk_id": hit.get("id"),
         "text": hit.get("text"),
-        "score": hit.get("rerank_score", hit.get("score")),
+        "score": hit.get("score"),
+        "score_type": hit.get("score_type"),
+        "rerank_score": hit.get("rerank_score"),
         "source_type": hit.get("kb_type") or "DOCUMENT",
         "document_id": doc_id,
         "document_title": fname,

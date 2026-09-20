@@ -76,10 +76,11 @@ async def preview(doc_id: uuid.UUID, u=Depends(get_current_user), s: AsyncSessio
     d = await s.get(Document, doc_id) or (_ for _ in ()).throw(HTTPException(404))
     kb = await s.get(KnowledgeBase, d.kb_id)
     # MinIO 生成临时下载 URL，base64 编码给 kkFileView
+    # fullfilename 拼在 kkFileView URL 层（不进 base64），避免破坏 MinIO 签名
     from datetime import timedelta
     url = minio_client.minio.presigned_get_object(minio_client.RAW, d.storage_path, expires=timedelta(hours=1))
     encoded = base64.b64encode(url.encode()).decode()
-    return {"preview_url": f"{get_settings().kkfv_url}/onlinePreview?url={urllib.parse.quote(encoded)}",
+    return {"preview_url": f"{get_settings().kkfv_url}/onlinePreview?url={urllib.parse.quote(encoded)}&fullfilename={urllib.parse.quote(d.filename)}",
             "preview_type": "pdf" if d.file_type == "pdf" else "office"}
 
 

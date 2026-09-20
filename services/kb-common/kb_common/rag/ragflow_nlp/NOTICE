@@ -1,0 +1,30 @@
+RAGFlow retrieval NLP port for knowledge-governance-expert
+
+Contains software developed by The InfiniFlow Authors:
+Copyright 2024, 2025, 2026 The InfiniFlow Authors. All Rights Reserved.
+Licensed under the Apache License, Version 2.0; see LICENSE.
+
+Sources: the repository's ragflow/ checkout, revision and SHA-256 digests in
+sources.json. The tokenizer delegates upstream to infinity-sdk 0.7.3; its
+rag_tokenizer.py and huqie.txt dictionary are vendored here under the same
+Apache-2.0 license. No Infinity server or SDK runtime is required.
+
+Modified files and integration behavior (2026-09-21):
+- query.py, term_weight.py: package-local imports/resources; remove Redis
+  initialization; numpy cosine replaces sklearn; empty/no-overlap scores
+  return zero rather than epsilon/empty-query=1.
+- query_base.py: copied unchanged. expression.py: extracted MatchTextExpr.
+- synonym.py: local immutable synonym.json lookup, no Redis or WordNet corpus.
+- rag_tokenizer.py: lazy initialization; gzip-packaged original dictionary;
+  no runtime writes/downloads, Snowball stemming without WordNet lemmatization;
+  preserve_line word tokenization avoids a Punkt model requirement.
+- ../scoring.py: query expansion is used for recall; final term scoring uses
+  cleaned original query token order, to avoid expanded phrases and reordered
+  terms reducing exact-match scores. Token pair weights and normalized term
+  weights are retained. Document field assembly and blended scoring are ported
+  from RAGFlow search.Dealer.rerank_with_knn and rerank_by_model.
+
+The SQL candidate backend implements BM25 with RAGFlow field boosts; it is a
+project adapter, not the upstream Elasticsearch/Infinity implementation.
+The project omits graph/PageRank, generated-question fields (not in its schema),
+and RAGFlow server/auth/storage integrations.

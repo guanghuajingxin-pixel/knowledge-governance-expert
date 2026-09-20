@@ -7,5 +7,9 @@ COPY services/kb-common/ ./services/kb-common/
 COPY services/faq-service/ ./services/faq-service/
 WORKDIR /app/services/faq-service
 # Cache mount lets parallel builds (kb-api) reuse downloaded wheels.
-RUN --mount=type=cache,target=/root/.cache/uv uv sync
+# datrie (the RAGFlow tokenizer trie) builds a C extension on platforms without wheels.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    apt-get update && apt-get install -y --no-install-recommends build-essential && \
+    uv sync && apt-get purge -y --auto-remove build-essential && \
+    rm -rf /var/lib/apt/lists/*
 CMD ["uv", "run", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8004"]

@@ -18,6 +18,11 @@ import {
 import {
   listRerankProfiles, createRerankProfile, updateRerankProfile, deleteRerankProfile, enableRerankProfile,
   type RerankProfile,
+  listRagflowProfiles, createRagflowProfile, updateRagflowProfile, deleteRagflowProfile, enableRagflowProfile,
+  type RagflowProfile,
+  listEmbeddingProfiles, createEmbeddingProfile, updateEmbeddingProfile, deleteEmbeddingProfile, enableEmbeddingProfile,
+  type EmbeddingProfile,
+  fetchExternalModels,
 } from '@/api/settings'
 import { testRagflow, type TestRagflowResult } from '@/api/ragflow'
 import { getMenuVisibility, setMenuVisibility } from '@/api/settings'
@@ -201,8 +206,103 @@ async function removeLlmProfile(p: LlmProfile) {
   await loadLlmProfiles()
 }
 
-// RAGFlow 连通性测试（编辑未保存时可用当前表单值测试；留空则后端回退已保存值）
-const ragflowTest = ref({ testing: false, result: null as TestRagflowResult | null })
+// ============ RAGFlow 知识库多配置（多环境切换，多条只能生效一条） ============
+const ragflowProfiles = ref<RagflowProfile[]>([])
+const ragflowLoading = ref(false)
+
+const rfDlg = ref({
+  visible: false,
+  editingId: '',
+  name: '',
+  base_url: '',
+  api_key: '',
+  has_key: false,
+  testing: false,
+  saving: false,
+  testResult: null as TestRagflowResult | null,
+})
+
+async function loadRagflowProfiles() {
+  ragflowLoading.value = true
+  try {
+    ragflowProfiles.value = await listRagflowProfiles()
+  } finally {
+    ragflowLoading.value = false
+  }
+}
+
+function openRfCreate() {
+  rfDlg.value = {
+    visible: true, editingId: '', name: '', base_url: '',
+    api_key: '', has_key: false,
+    testing: false, saving: false, testResult: null,
+  }
+}
+
+function openRfEdit(p: RagflowProfile) {
+  rfDlg.value = {
+    visible: true, editingId: p.id, name: p.name, base_url: p.base_url,
+    api_key: '', has_key: p.has_key,
+    testing: false, saving: false, testResult: null,
+  }
+}
+
+async function runRfTest() {
+  const d = rfDlg.value
+  if (!d.base_url.trim()) {
+    ElMessage.warning('请先填写服务地址')
+    return
+  }
+  d.testResult = null
+  d.testing = true
+  try {
+    d.testResult = await testRagflow({
+      base_url: d.base_url,
+      api_key: d.api_key,
+      profile_id: d.editingId,
+    })
+  } catch (e: any) {
+    d.testResult = { ok: false, message: e?.message || '请求失败' }
+  } finally {
+    d.testing = false
+  }
+}
+
+async function saveRfProfile() {
+  const d = rfDlg.value
+  if (!d.name.trim()) return ElMessage.warning('请填写配置名称')
+  if (!d.base_url.trim()) return ElMessage.warning('请填写服务地址')
+  if (!d.editingId && !d.api_key.trim()) return ElMessage.warning('请填写 API Key（RAGFlow 接口均需认证）')
+  d.saving = true
+  try {
+    // 编辑态：留空且原有 Key → 不修改
+    const payload = { name: d.name.trim(), base_url: d.base_url.trim(), api_key: d.api_key }
+    if (d.editingId) {
+      await updateRagflowProfile(d.editingId, payload)
+      ElMessage.success('RAGFlow 配置已更新')
+    } else {
+      await createRagflowProfile(payload)
+      ElMessage.success('RAGFlow 配置已创建，点击「生效」切换当前使用的环境')
+    }
+    d.visible = false
+    await loadRagflowProfiles()
+  } finally {
+    d.saving = false
+  }
+}
+
+async function removeRfProfile(p: RagflowProfile) {
+  await ElMessageBox.confirm(`确定删除 RAGFlow 配置「${p.name}」？`, '删除确认', { type: 'warning' })
+  await deleteRagflowProfile(p.id)
+  ElMessage.success('已删除')
+  await loadRagflowProfiles()
+}
+
+async function enableRfProfile(p: RagflowProfile) {
+  await enableRagflowProfile(p.id)
+  ElMessage.success(`已切换生效：${p.name}`)
+  await loadRagflowProfiles()
+}
 
 // ============ Rerank 重排模型多配置（多条只能生效一条） ============
 const rerankProfiles = ref<RerankProfile[]>([])
@@ -216,6 +316,8 @@ const rrDlg = ref({
   api_key: '',
   has_key: false,
   model: '',
+  models: [] as string[],        // 拉取的候选模型列表
+  fetching: false,
   testing: false,
   saving: false,
   testResult: null as TestRerankResult | null,
@@ -233,16 +335,16 @@ async function loadRerankProfiles() {
 function openRrCreate() {
   rrDlg.value = {
     visible: true, editingId: '', name: '', api_url: '',
-    api_key: '', has_key: false, model: '',
-    testing: false, saving: false, testResult: null,
+    api_key: '', has_key: false, model: '', models: [],
+    fetching: false, testing: false, saving: false, testResult: null,
   }
 }
 
 function openRrEdit(p: RerankProfile) {
   rrDlg.value = {
     visible: true, editingId: p.id, name: p.name, api_url: p.api_url,
-    api_key: '', has_key: p.has_key, model: p.model,
-    testing: false, saving: false, testResult: null,
+    api_key: '', has_key: p.has_key, model: p.model, models: [],
+    fetching: false, testing: false, saving: false, testResult: null,
   }
 }
 
@@ -306,42 +408,153 @@ async function enableRrProfile(p: RerankProfile) {
   await loadRerankProfiles()
 }
 
-async function runRagflowTest() {
-  ragflowTest.value.result = null
-  ragflowTest.value.testing = true
+// ============ Embedding 向量模型多配置（多条只能生效一条） ============
+const embeddingProfiles = ref<EmbeddingProfile[]>([])
+const embeddingLoading = ref(false)
+
+const emDlg = ref({
+  visible: false,
+  editingId: '',
+  name: '',
+  api_url: '',
+  api_key: '',
+  has_key: false,
+  model: '',
+  models: [] as string[],        // 拉取的候选模型列表
+  fetching: false,
+  testing: false,
+  saving: false,
+  testResult: null as TestEmbeddingResult | null,
+})
+
+async function loadEmbeddingProfiles() {
+  embeddingLoading.value = true
   try {
-    ragflowTest.value.result = await testRagflow({
-      base_url: form.value.ragflow_base_url?.value || '',
-      api_key: form.value.ragflow_api_key?.value || '',
-    })
-  } catch (e: any) {
-    ragflowTest.value.result = { ok: false, message: e?.message || '请求失败' }
+    embeddingProfiles.value = await listEmbeddingProfiles()
   } finally {
-    ragflowTest.value.testing = false
+    embeddingLoading.value = false
   }
 }
 
-// Embedding 连通性测试
-const embeddingTest = ref({ testing: false, result: null as TestEmbeddingResult | null })
+function openEmCreate() {
+  emDlg.value = {
+    visible: true, editingId: '', name: '', api_url: '',
+    api_key: '', has_key: false, model: '', models: [],
+    fetching: false, testing: false, saving: false, testResult: null,
+  }
+}
 
-async function runEmbeddingTest() {
-  embeddingTest.value.result = null
-  embeddingTest.value.testing = true
+function openEmEdit(p: EmbeddingProfile) {
+  emDlg.value = {
+    visible: true, editingId: p.id, name: p.name, api_url: p.api_url,
+    api_key: '', has_key: p.has_key, model: p.model, models: [],
+    fetching: false, testing: false, saving: false, testResult: null,
+  }
+}
+
+/** 拉取模型列表：Embedding 的服务地址就是 OpenAI 兼容 base（含 /v1） */
+async function fetchEmModels() {
+  const d = emDlg.value
+  if (!d.api_url.trim()) return ElMessage.warning('请先填写服务地址')
+  d.fetching = true
   try {
-    embeddingTest.value.result = await testEmbedding({
-      base_url: form.value.embedding_base_url?.value || '',
-      api_key: form.value.embedding_api_key?.value || '',
-      model: form.value.embedding_model?.value || '',
+    const res = await fetchExternalModels(d.api_url.trim(), d.api_key.trim(), { kind: 'embedding', profile_id: d.editingId })
+    if (!res.ok) {
+      ElMessage.error(res.message || '拉取失败')
+      return
+    }
+    d.models = res.models
+    if (!res.models.length) ElMessage.warning('服务未返回任何模型')
+    else ElMessage.success(`已拉取 ${res.models.length} 个模型`)
+  } catch (e: any) {
+    ElMessage.error(e?.message || '拉取失败')
+  } finally {
+    d.fetching = false
+  }
+}
+
+async function runEmTest() {
+  const d = emDlg.value
+  if (!d.api_url.trim() || !d.model.trim()) return ElMessage.warning('请先填写服务地址与模型名')
+  d.testResult = null
+  d.testing = true
+  try {
+    d.testResult = await testEmbedding({
+      base_url: d.api_url,
+      api_key: d.api_key,
+      model: d.model,
+      profile_id: d.editingId,
     })
   } catch (e: any) {
-    embeddingTest.value.result = { ok: false, message: e?.message || '请求失败' }
+    d.testResult = { ok: false, message: e?.message || '请求失败' }
   } finally {
-    embeddingTest.value.testing = false
+    d.testing = false
+  }
+}
+
+async function saveEmProfile() {
+  const d = emDlg.value
+  if (!d.name.trim()) return ElMessage.warning('请填写配置名称')
+  if (!d.api_url.trim()) return ElMessage.warning('请填写服务地址')
+  if (!d.model.trim()) return ElMessage.warning('请填写模型名')
+  d.saving = true
+  try {
+    const payload = { name: d.name.trim(), api_url: d.api_url.trim(), api_key: d.api_key, model: d.model.trim() }
+    if (d.editingId) {
+      await updateEmbeddingProfile(d.editingId, payload)
+      ElMessage.success('Embedding 配置已更新')
+    } else {
+      await createEmbeddingProfile(payload)
+      ElMessage.success('配置已创建，点击「生效」切换当前使用的模型')
+    }
+    d.visible = false
+    await loadEmbeddingProfiles()
+  } finally {
+    d.saving = false
+  }
+}
+
+async function removeEmProfile(p: EmbeddingProfile) {
+  await ElMessageBox.confirm(`确定删除 Embedding 配置「${p.name}」？`, '删除确认', { type: 'warning' })
+  await deleteEmbeddingProfile(p.id)
+  ElMessage.success('已删除')
+  await loadEmbeddingProfiles()
+}
+
+async function enableEmProfile(p: EmbeddingProfile) {
+  await enableEmbeddingProfile(p.id)
+  ElMessage.success(`已切换生效：${p.name}`)
+  await loadEmbeddingProfiles()
+}
+
+/** Rerank 拉取模型列表：api_url 为完整 /rerank 路径，去掉尾部得到模型列表 base */
+async function fetchRrModels() {
+  const d = rrDlg.value
+  if (!d.api_url.trim()) return ElMessage.warning('请先填写服务地址')
+  const base = d.api_url.trim().replace(/\/rerank\/?$/i, '')
+  if (base === d.api_url.trim() && !/\/v\d+$/i.test(base)) {
+    ElMessage.warning('服务地址需为完整 /rerank 路径或以 /v1 结尾的 base')
+    return
+  }
+  d.fetching = true
+  try {
+    const res = await fetchExternalModels(base, d.api_key.trim(), { kind: 'rerank', profile_id: d.editingId })
+    if (!res.ok) {
+      ElMessage.error(res.message || '拉取失败')
+      return
+    }
+    d.models = res.models
+    if (!res.models.length) ElMessage.warning('服务未返回任何模型')
+    else ElMessage.success(`已拉取 ${res.models.length} 个模型`)
+  } catch (e: any) {
+    ElMessage.error(e?.message || '拉取失败')
+  } finally {
+    d.fetching = false
   }
 }
 
 onMounted(async () => {
-  // 5 个互不依赖的请求并发拉取：原来逐个 await，首屏耗时等于 5 次往返相加
+  // 互不依赖的请求并发拉取：原来逐个 await，首屏耗时等于多次往返相加
   const [settings] = await Promise.all([
     getSettings(),
     loadProfiles(),
@@ -349,6 +562,8 @@ onMounted(async () => {
     loadMenuConfig(),
     loadBotSection(),
     loadRerankProfiles(),
+    loadRagflowProfiles(),
+    loadEmbeddingProfiles(),
   ])
   form.value = settings
 })
@@ -641,7 +856,7 @@ async function loadMenuConfig() {
         visible: !hidden.includes(r.path),
       }))
     // 保持路由定义顺序
-    const orderedPaths = ['/chat', '/hiagent', '/collection', '/knowledge-sources', '/collection/dingtalk', '/collection/upload', '/process', '/process/tagging', '/process/engine', '/apply', '/operate', '/govern']
+    const orderedPaths = ['/chat', '/deap-agent', '/hiagent', '/collection', '/knowledge-sources', '/collection/dingtalk', '/collection/upload', '/process', '/process/tagging', '/process/engine', '/apply', '/operate', '/govern']
     items.sort((a, b) => {
       const ia = orderedPaths.indexOf(a.path)
       const ib = orderedPaths.indexOf(b.path)
@@ -673,12 +888,6 @@ async function onMenuToggle(item: MenuConfigItem) {
 }
 
 const visibleMenuCount = computed(() => menuConfigItems.value.filter((x) => x.visible).length)
-
-const usage = [
-  { model: '千问-Max', calls: '4.2 万次', purpose: '问答 · 摘要 · 分诊', trend: '+12%（随问答量增长）', type: 'up' },
-  { model: 'GLM-4（网关）', calls: '1.8 万次', purpose: '打标 · 元数据', trend: '0（自部署）', type: '' },
-  { model: 'DeepSeek-V3', calls: '0.9 万次', purpose: '命名校验 · 巡检建议', trend: '稳定', type: '' },
-]
 </script>
 
 <template>
@@ -705,9 +914,11 @@ const usage = [
                 <el-icon v-else :size="22" color="#fff"><i class="el-icon-stamp" /></el-icon>
               </div>
               <div class="site-logo-actions">
-                <el-button size="small" @click="siteLogoInput?.click()">上传图片</el-button>
-                <el-button v-if="form.site_logo.value" size="small" text type="danger" @click="clearSiteLogo">恢复默认图标</el-button>
-                <el-button size="small" type="primary" :loading="saving === 'site_logo'" @click="save('site_logo')">保存图标</el-button>
+                <div class="site-logo-btns">
+                  <el-button size="small" @click="siteLogoInput?.click()">上传图片</el-button>
+                  <el-button v-if="form.site_logo.value" size="small" text type="danger" @click="clearSiteLogo">恢复默认图标</el-button>
+                  <el-button size="small" type="primary" :loading="saving === 'site_logo'" @click="save('site_logo')">保存图标</el-button>
+                </div>
                 <div class="field-hint">侧边栏 Logo 图标；自动裁剪压缩为 128×128，留空使用默认印章图标。</div>
               </div>
             </div>
@@ -763,7 +974,7 @@ const usage = [
             </div>
           </el-form-item>
 
-          <el-divider content-position="left">Dify 知识库（智能问答 Agent）</el-divider>
+          <el-divider content-position="left">Dify 知识库</el-divider>
           <el-form-item label="文件上传上限">
             <div>
               <div style="display:flex;align-items:center;gap:10px">
@@ -805,68 +1016,79 @@ const usage = [
             </div>
           </el-form-item>
 
-          <el-divider content-position="left">RAGFlow 知识库（第二个检索引擎）</el-divider>
-          <el-form-item label="服务地址">
-            <div class="field-row">
-              <el-input v-model="form.ragflow_base_url.value" placeholder="如 http://127.0.0.1:9380/api/v1（需含 /api/v1）" />
-              <el-button type="primary" :loading="saving === 'ragflow_base_url'" @click="save('ragflow_base_url')">保存</el-button>
+          <el-divider content-position="left">RAGFlow 知识库</el-divider>
+          <el-form-item label="配置列表">
+            <div class="profile-box">
+              <div class="profile-toolbar">
+                <el-button size="small" type="primary" @click="openRfCreate">+ 新增配置</el-button>
+              </div>
+              <el-table v-if="ragflowProfiles.length" :data="ragflowProfiles" size="small" v-loading="ragflowLoading" style="margin-top: 8px">
+                <el-table-column label="生效" width="70">
+                  <template #default="{ row }">
+                    <el-radio :model-value="!!row.enabled" :value="true" :aria-label="`启用 ${row.name}`" @change="enableRfProfile(row as RagflowProfile)">&nbsp;</el-radio>
+                  </template>
+                </el-table-column>
+                <el-table-column prop="name" label="名称" min-width="140">
+                  <template #default="{ row }">
+                    <b>{{ row.name }}</b>
+                    <el-tag v-if="row.enabled" size="small" type="success" effect="light" style="margin-left: 6px">生效中</el-tag>
+                  </template>
+                </el-table-column>
+                <el-table-column prop="base_url" label="服务地址" min-width="220" show-overflow-tooltip />
+                <el-table-column label="API Key" min-width="110">
+                  <template #default="{ row }">
+                    <span v-if="row.has_key" class="mono">{{ row.api_key }}</span>
+                    <span v-else class="muted">未设置</span>
+                  </template>
+                </el-table-column>
+                <el-table-column label="操作" width="110">
+                  <template #default="{ row }">
+                    <el-button size="small" link type="primary" @click="openRfEdit(row as RagflowProfile)">编辑</el-button>
+                    <el-button size="small" link type="danger" @click="removeRfProfile(row as RagflowProfile)">删除</el-button>
+                  </template>
+                </el-table-column>
+              </el-table>
+              <div v-else class="empty">尚无 RAGFlow 配置，点击「新增 RAGFlow 配置」添加环境连接。</div>
+              <div class="field-hint" style="margin-top: 6px">RAGFlow 与 Dify 并列作为外部知识库引擎，可配置多条连接（如测试/生产环境），单选切换生效；服务地址需含端口与 /api/v1 后缀。具体哪些库可用请到「知识源管理」以 RAGFlow 类型登记。</div>
             </div>
-            <div class="field-hint">RAGFlow HTTP API 端点，需含端口与 /api/v1 后缀。</div>
-          </el-form-item>
-          <el-form-item label="API Key">
-            <div class="field-row">
-              <el-input v-model="form.ragflow_api_key.value" show-password placeholder="未设置" />
-              <el-button type="primary" :loading="saving === 'ragflow_api_key'" @click="save('ragflow_api_key')">保存</el-button>
-            </div>
-            <div class="field-row" style="margin-top: 8px">
-              <el-button :loading="ragflowTest.testing" @click="runRagflowTest">测试连通性</el-button>
-            </div>
-            <el-alert
-              v-if="ragflowTest.result?.ok"
-              type="success" :closable="false" show-icon style="margin-top: 8px"
-              :title="ragflowTest.result.message || '连接成功'"
-            />
-            <el-alert
-              v-else-if="ragflowTest.result && !ragflowTest.result.ok"
-              type="error" :closable="false" show-icon style="margin-top: 8px"
-              :title="ragflowTest.result.message || '连接失败'"
-            />
-            <div class="field-hint">RAGFlow 与 Dify 并列作为外部知识库引擎；此处只配「连接」，具体哪些库可用请到「知识源管理」以 RAGFlow 类型登记（登记时动态拉取库列表选择）。</div>
           </el-form-item>
 
-          <el-divider content-position="left">Embedding 向量模型（本地 RAG 检索/入库）</el-divider>
-          <el-form-item label="服务地址">
-            <div class="field-row">
-              <el-input v-model="form.embedding_base_url.value" placeholder="如 https://api.siliconflow.cn/v1（需含 /v1）" />
-              <el-button type="primary" :loading="saving === 'embedding_base_url'" @click="save('embedding_base_url')">保存</el-button>
+          <el-divider content-position="left">Embedding 向量模型</el-divider>
+          <el-form-item label="配置列表">
+            <div class="profile-box">
+              <div class="profile-toolbar">
+                <el-button size="small" type="primary" @click="openEmCreate">+ 新增配置</el-button>
+              </div>
+              <el-table v-if="embeddingProfiles.length" :data="embeddingProfiles" size="small" v-loading="embeddingLoading" style="margin-top: 8px">
+                <el-table-column label="生效" width="70">
+                  <template #default="{ row }">
+                    <el-radio :model-value="!!row.enabled" :value="true" :aria-label="`启用 ${row.name}`" @change="enableEmProfile(row as EmbeddingProfile)">&nbsp;</el-radio>
+                  </template>
+                </el-table-column>
+                <el-table-column prop="name" label="名称" min-width="140">
+                  <template #default="{ row }">
+                    <b>{{ row.name }}</b>
+                    <el-tag v-if="row.enabled" size="small" type="success" effect="light" style="margin-left: 6px">生效中</el-tag>
+                  </template>
+                </el-table-column>
+                <el-table-column prop="api_url" label="服务地址" min-width="200" show-overflow-tooltip />
+                <el-table-column prop="model" label="模型名" min-width="180" show-overflow-tooltip />
+                <el-table-column label="API Key" min-width="110">
+                  <template #default="{ row }">
+                    <span v-if="row.has_key" class="mono">{{ row.api_key }}</span>
+                    <span v-else class="muted">免鉴权</span>
+                  </template>
+                </el-table-column>
+                <el-table-column label="操作" width="110">
+                  <template #default="{ row }">
+                    <el-button size="small" link type="primary" @click="openEmEdit(row as EmbeddingProfile)">编辑</el-button>
+                    <el-button size="small" link type="danger" @click="removeEmProfile(row as EmbeddingProfile)">删除</el-button>
+                  </template>
+                </el-table-column>
+              </el-table>
+              <div v-else class="empty">尚无 Embedding 配置，点击「新增配置」添加；未配置时本地 RAG 检索/入库不可用（Dify/RAGFlow 检索不受影响）。</div>
+              <div class="field-hint" style="margin-top: 6px">OpenAI 兼容 /embeddings 端点，可配置多条、单选切换生效；向量维度须与既有 ES 索引一致（当前 1024 维），切换模型需重建索引。</div>
             </div>
-            <div class="field-hint">OpenAI 兼容 /embeddings 端点；留空时本地 RAG 检索/入库不可用（Dify/RAGFlow 检索不受影响）。</div>
-          </el-form-item>
-          <el-form-item label="API Key">
-            <div class="field-row">
-              <el-input v-model="form.embedding_api_key.value" show-password placeholder="未设置" />
-              <el-button type="primary" :loading="saving === 'embedding_api_key'" @click="save('embedding_api_key')">保存</el-button>
-            </div>
-          </el-form-item>
-          <el-form-item label="模型名">
-            <div class="field-row">
-              <el-input v-model="form.embedding_model.value" placeholder="如 BAAI/bge-m3" />
-              <el-button type="primary" :loading="saving === 'embedding_model'" @click="save('embedding_model')">保存</el-button>
-            </div>
-            <div class="field-row" style="margin-top: 8px">
-              <el-button :loading="embeddingTest.testing" @click="runEmbeddingTest">测试连通性</el-button>
-            </div>
-            <el-alert
-              v-if="embeddingTest.result?.ok"
-              type="success" :closable="false" show-icon style="margin-top: 8px"
-              :title="`连接成功 · ${embeddingTest.result.latency_ms}ms · ${embeddingTest.result.message}`"
-            />
-            <el-alert
-              v-else-if="embeddingTest.result && !embeddingTest.result.ok"
-              type="error" :closable="false" show-icon style="margin-top: 8px"
-              :title="embeddingTest.result.message || '连接失败'"
-            />
-            <div class="field-hint">向量维度须与既有 ES 索引一致（当前 1024 维）；切换模型需重建索引。</div>
           </el-form-item>
 
           <el-divider content-position="left">Rerank 重排模型（检索结果重排序）</el-divider>
@@ -1046,28 +1268,6 @@ const usage = [
           </div>
         </el-card>
       </el-tab-pane>
-
-      <!-- ============ 用量与成本（原型展示） ============ -->
-      <el-tab-pane label="用量与成本" name="usage">
-        <el-card shadow="never">
-          <template #header>
-            <div class="card-header">
-              <span>用量与成本（本月）</span>
-              <el-button size="small" @click="ElMessage.success('已刷新')">🔄 刷新</el-button>
-            </div>
-          </template>
-          <el-table :data="usage" style="width: 100%">
-            <el-table-column prop="model" label="模型" width="140" />
-            <el-table-column prop="calls" label="调用量" width="120" />
-            <el-table-column prop="purpose" label="主要用途" min-width="200">
-              <template #default="{ row }"><span class="small">{{ row.purpose }}</span></template>
-            </el-table-column>
-            <el-table-column label="成本趋势" min-width="200">
-              <template #default="{ row }"><span class="small" :class="row.type">{{ row.trend }}</span></template>
-            </el-table-column>
-          </el-table>
-        </el-card>
-      </el-tab-pane>
     </el-tabs>
 
     <!-- LLM 模型配置弹窗：供应商 → Key → 拉取模型 → 复选框勾选生效/默认 -->
@@ -1173,7 +1373,16 @@ const usage = [
           <el-input v-model="rrDlg.api_url" placeholder="http://10.10.166.81:7775/v1/rerank（需含完整 /rerank 路径）" />
         </el-form-item>
         <el-form-item required label="模型名">
-          <el-input v-model="rrDlg.model" placeholder="如 BAAI/bge-reranker-v2-m3" />
+          <div class="model-pick-row">
+            <el-select
+              v-model="rrDlg.model" filterable allow-create default-first-option
+              placeholder="拉取后选择，或直接输入模型名"
+              style="flex: 1"
+            >
+              <el-option v-for="m in rrDlg.models" :key="m" :label="m" :value="m" />
+            </el-select>
+            <el-button :loading="rrDlg.fetching" @click="fetchRrModels">拉取模型列表</el-button>
+          </div>
         </el-form-item>
         <el-form-item label="API Key（非必填）">
           <el-input v-model="rrDlg.api_key" show-password :placeholder="rrDlg.has_key ? '••••••••（留空保持不变）' : '内网/自建服务常免鉴权，可留空'" />
@@ -1194,6 +1403,80 @@ const usage = [
         <el-button :loading="rrDlg.testing" @click="runRrTest">测试连通性</el-button>
         <el-button @click="rrDlg.visible = false">取消</el-button>
         <el-button type="primary" :loading="rrDlg.saving" @click="saveRrProfile">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- Embedding 向量模型配置编辑弹窗 -->
+    <el-dialog v-model="emDlg.visible" :title="emDlg.editingId ? '编辑 Embedding 配置' : '新增 Embedding 配置'" width="560px" destroy-on-close>
+      <el-form label-position="top" @submit.prevent>
+        <el-form-item required label="配置名称">
+          <el-input v-model="emDlg.name" placeholder="如：Qwen3-Embedding 生产 / bge-m3 测试" />
+        </el-form-item>
+        <el-form-item required label="服务地址">
+          <el-input v-model="emDlg.api_url" placeholder="如 http://10.10.166.81:8987/v1（OpenAI 兼容，需含 /v1）" />
+        </el-form-item>
+        <el-form-item required label="模型名">
+          <div class="model-pick-row">
+            <el-select
+              v-model="emDlg.model" filterable allow-create default-first-option
+              placeholder="拉取后选择，或直接输入模型名"
+              style="flex: 1"
+            >
+              <el-option v-for="m in emDlg.models" :key="m" :label="m" :value="m" />
+            </el-select>
+            <el-button :loading="emDlg.fetching" @click="fetchEmModels">拉取模型列表</el-button>
+          </div>
+        </el-form-item>
+        <el-form-item label="API Key（非必填）">
+          <el-input v-model="emDlg.api_key" show-password :placeholder="emDlg.has_key ? '••••••••（留空保持不变）' : '内网/自建服务常免鉴权，可留空'" />
+          <div v-if="emDlg.editingId && emDlg.has_key" class="field-hint">留空表示不修改已保存的 Key</div>
+        </el-form-item>
+        <el-alert
+          v-if="emDlg.testResult?.ok"
+          type="success" :closable="false" show-icon style="margin-top: 8px"
+          :title="`连接成功 · ${emDlg.testResult.latency_ms}ms · ${emDlg.testResult.message}`"
+        />
+        <el-alert
+          v-else-if="emDlg.testResult && !emDlg.testResult.ok"
+          type="error" :closable="false" show-icon style="margin-top: 8px"
+          :title="emDlg.testResult.message || '连接失败'"
+        />
+      </el-form>
+      <template #footer>
+        <el-button :loading="emDlg.testing" @click="runEmTest">测试连通性</el-button>
+        <el-button @click="emDlg.visible = false">取消</el-button>
+        <el-button type="primary" :loading="emDlg.saving" @click="saveEmProfile">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- RAGFlow 配置编辑弹窗 -->
+    <el-dialog v-model="rfDlg.visible" :title="rfDlg.editingId ? '编辑 RAGFlow 配置' : '新增 RAGFlow 配置'" width="560px" destroy-on-close>
+      <el-form label-position="top" @submit.prevent>
+        <el-form-item required label="配置名称">
+          <el-input v-model="rfDlg.name" placeholder="如：RAGFlow 测试环境 / 生产环境" />
+        </el-form-item>
+        <el-form-item required label="服务地址">
+          <el-input v-model="rfDlg.base_url" placeholder="http://127.0.0.1:9380/api/v1（需含端口与 /api/v1 后缀）" />
+        </el-form-item>
+        <el-form-item required label="API Key">
+          <el-input v-model="rfDlg.api_key" show-password :placeholder="rfDlg.has_key ? '••••••••（留空保持不变）' : 'RAGFlow API Key（RAGFlow 接口均需认证）'" />
+          <div v-if="rfDlg.editingId && rfDlg.has_key" class="field-hint">留空表示不修改已保存的 Key</div>
+        </el-form-item>
+        <el-alert
+          v-if="rfDlg.testResult?.ok"
+          type="success" :closable="false" show-icon style="margin-top: 8px"
+          :title="rfDlg.testResult.message || '连接成功'"
+        />
+        <el-alert
+          v-else-if="rfDlg.testResult && !rfDlg.testResult.ok"
+          type="error" :closable="false" show-icon style="margin-top: 8px"
+          :title="rfDlg.testResult.message || '连接失败'"
+        />
+      </el-form>
+      <template #footer>
+        <el-button :loading="rfDlg.testing" @click="runRfTest">测试连通性</el-button>
+        <el-button @click="rfDlg.visible = false">取消</el-button>
+        <el-button type="primary" :loading="rfDlg.saving" @click="saveRfProfile">保存</el-button>
       </template>
     </el-dialog>
 
@@ -1246,14 +1529,16 @@ const usage = [
 .field-row .el-input { flex: 1; }
 .field-hint { font-size: 12px; color: #909399; margin-top: 4px; }
 /* 站点图标配置 */
-.site-logo-row { display: flex; align-items: center; gap: 20px; }
+.site-logo-row { display: flex; align-items: center; gap: 16px; }
 .site-logo-preview {
   width: 48px; height: 48px; border-radius: 8px; flex-shrink: 0;
   display: grid; place-items: center; overflow: hidden;
   background: linear-gradient(135deg, #2b6bff, #6d28d9);
 }
 .site-logo-preview img { width: 100%; height: 100%; object-fit: cover; }
-.site-logo-actions { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+.site-logo-actions { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
+.site-logo-btns { display: flex; align-items: center; gap: 8px; }
+.model-pick-row { display: flex; align-items: center; gap: 8px; width: 100%; }
 .dataset-box { width: 100%; }
 .dlg-actions { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
 .model-pick-list { width: 100%; border: 1px solid #e4e7ed; border-radius: 8px; padding: 6px 12px; max-height: 240px; overflow-y: auto; }

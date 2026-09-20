@@ -6,6 +6,25 @@ export function formatDate(value: string | null | undefined): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 
+export function formatDateTime(value: string | null | undefined): string {
+  if (!value) return '-'
+  const d = new Date(value)
+  if (isNaN(d.getTime())) return '-'
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+}
+
+export const SOURCE_LABELS: Record<string, string> = {
+  local: '本地上传',
+  dingtalk: '钉钉知识',
+  dify: 'Dify',
+  ragflow: 'RAGFlow',
+}
+export function formatSource(source: string | null | undefined): string {
+  if (!source) return '-'
+  return SOURCE_LABELS[source] || source
+}
+
 export function formatFileSize(bytes: number | null | undefined): string {
   if (bytes == null) return '-'
   if (bytes < 1024) return `${bytes} B`

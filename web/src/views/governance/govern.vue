@@ -6,37 +6,6 @@ import { getStandards, type StandardDoc } from '@/api/governance'
 
 const activeTab = ref('gaps')
 
-// 工单分诊
-interface Ticket {
-  id: number
-  feedback: string
-  rootCause: string
-  rootCauseType: string
-  action: string
-  owner: string
-  confidence: number
-  status: 'pending' | 'confirmed' | 'reassigned'
-}
-const tickets = ref<Ticket[]>([
-  { id: 1, feedback: '针距参数答错（答成 JK-5890 规格）', rootCause: '版本冲突', rootCauseType: 'warning', action: '下线 V2 残留分段 → 重加工', owner: '王品控', confidence: 0.94, status: 'pending' },
-  { id: 2, feedback: '阶梯返利政策检索不到', rootCause: '知识缺口', rootCauseType: 'primary', action: '发起征集 → 销售运营', owner: '销售运营', confidence: 0.91, status: 'pending' },
-  { id: 3, feedback: '规程截图匹配差', rootCause: '分段劣化', rootCauseType: 'success', action: '补图注 → 回流重索引', owner: '王品控', confidence: 0.88, status: 'pending' },
-  { id: 4, feedback: '引用了已废止的 2024 版制度', rootCause: '不确定', rootCauseType: 'info', action: '版本治理 · 需人核实', owner: '—', confidence: 0.62, status: 'pending' },
-])
-
-function adjudicate(row: any, mode: 'confirmed' | 'reassigned') {
-  const t = row as Ticket
-  t.status = mode
-  ElMessage.success(mode === 'confirmed' ? '工单进入处置流：钉钉待办已通知 Owner，完成后 AI 自动回归评测' : '已改派')
-}
-
-const rootCauseTag: Record<string, string> = {
-  '版本冲突': 'warning',
-  '知识缺口': 'primary',
-  '分段劣化': 'success',
-  '不确定': 'info',
-}
-
 // 质检台账
 const qualityLedger = [
   { doc: '《高速绷缝机检验规程V3.docx》', rule: '命名不规范', ruleType: 'warning', suggestion: '改名 JK-8669D_检验规程_金加工过程_V3', owner: '王品控', status: '待人判断' },
@@ -98,59 +67,6 @@ const statusTag: Record<string, string> = {
   <div class="kge-page">
     <el-tabs v-model="activeTab">
       <el-tab-pane label="知识缺口" name="gaps" lazy><KnowledgeGaps /></el-tab-pane>
-      <!-- 工单智能分诊 -->
-      <el-tab-pane label="工单智能分诊" name="triage">
-        <div class="hl">
-          🤖 <span><b>AI 分诊 · 人裁决：</b>应用端反馈进来后，AI 判定根因（知识缺口/版本冲突/分段劣化/权限/模型错误）、建议严重级与 Owner，并给出处置动作；置信度 <0.7 自动转人工。人在下表逐单确认或改派。</span>
-        </div>
-        <el-card class="card" shadow="never">
-          <template #header>
-            <div class="card-header">
-              <span>待人工确认（AI 已分诊）</span>
-              <div class="src">
-                <span class="srcinfo">源：<b>多维表《知识纠错工单》</b></span>
-                <el-button size="small" @click="ElMessage.success('已从数据源刷新')">🔄 刷新</el-button>
-              </div>
-            </div>
-          </template>
-          <el-table :data="tickets" style="width: 100%">
-            <el-table-column prop="feedback" label="反馈" min-width="200">
-              <template #default="{ row }"><span class="small">{{ row.feedback }}</span></template>
-            </el-table-column>
-            <el-table-column label="AI 根因判定" width="120">
-              <template #default="{ row }">
-                <el-tag :type="rootCauseTag[row.rootCause] as any">{{ row.rootCause }}</el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column label="AI 建议处置" min-width="200">
-              <template #default="{ row }">
-                <div class="small">{{ row.action }} · Owner：{{ row.owner }}</div>
-              </template>
-            </el-table-column>
-            <el-table-column label="置信度" width="90">
-              <template #default="{ row }">
-                <el-tag :type="row.confidence >= 0.7 ? 'success' : 'warning'">{{ row.confidence.toFixed(2) }}</el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column label="人裁决" width="180">
-              <template #default="{ row }">
-                <template v-if="row.status === 'pending'">
-                  <el-button size="small" type="primary" @click="adjudicate(row, 'confirmed')">✓ 确认执行</el-button>
-                  <el-button size="small" @click="adjudicate(row, 'reassigned')">改派</el-button>
-                </template>
-                <el-tag v-else :type="row.status === 'confirmed' ? 'success' : 'info'">
-                  {{ row.status === 'confirmed' ? '已确认' : '已改派' }}
-                </el-tag>
-              </template>
-            </el-table-column>
-          </el-table>
-        </el-card>
-        <el-row :gutter="16" class="kpi-row">
-          <el-col :span="8"><div class="kpi"><div class="l">今日 AI 分诊 / 人确认</div><div class="v">18/15</div><div class="d">采纳率 83% · 3 单改派</div></div></el-col>
-          <el-col :span="8"><div class="kpi"><div class="l">本周回流加工</div><div class="v">7 项</div><div class="d">重分段 3 · 重索引 2 · 转写重跑 2</div></div></el-col>
-          <el-col :span="8"><div class="kpi"><div class="l">验证关单率</div><div class="v">78%</div><div class="d up">回归评测通过才关单</div></div></el-col>
-        </el-row>
-      </el-tab-pane>
 
       <!-- 质检台账 -->
       <el-tab-pane label="质检台账" name="quality">
@@ -247,12 +163,5 @@ const statusTag: Record<string, string> = {
 .src { display: flex; align-items: center; gap: 8px; }
 .srcinfo { font-size: 11px; color: #9ca3af; }
 .srcinfo b { color: #64748b; font-weight: 500; }
-.hl { border: 1px solid #fde68a; background: #fffbeb; border-radius: 8px; padding: 10px 14px; font-size: 12.5px; color: #92400e; margin-bottom: 14px; display: flex; gap: 8px; line-height: 1.7; }
 .small { font-size: 12.5px; color: #475569; line-height: 1.8; }
-.kpi-row { margin-top: 16px; }
-.kpi { background: #fff; border: 1px solid #e5e8ee; border-radius: 12px; padding: 14px 16px; box-shadow: 0 1px 3px rgba(16,24,40,.06); }
-.kpi .l { font-size: 12px; color: #6b7280; margin-bottom: 6px; }
-.kpi .v { font-size: 24px; font-weight: 700; }
-.kpi .d { font-size: 11.5px; margin-top: 4px; color: #6b7280; }
-.kpi .d.up { color: #16a34a; }
 </style>

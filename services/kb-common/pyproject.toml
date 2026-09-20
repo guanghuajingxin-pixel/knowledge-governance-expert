@@ -14,6 +14,9 @@ dependencies = [
   "redis>=5.0",
   "celery>=5.4",
   # 向量/重排模型全部外接（OpenAI 兼容 /embeddings 与 /rerank HTTP API），不本地部署 BGE-M3/reranker
+  "datrie>=0.8.3,<0.9",
+  "hanziconv>=0.3.2,<0.4",
+  "nltk>=3.10,<4",
   "numpy<2",  # numpy 2.x 要求 x86-64-v2；内网服务器 CPU 仅 x86-64-v1，固定 1.26
   "openai>=1.30",          # GLM/DeepSeek 兼容客户端
   "langchain>=0.3",
@@ -30,3 +33,6 @@ dependencies = [
 dev = [
     "pytest>=9.1.1",
 ]
+
+[tool.setuptools.package-data]
+"kb_common.rag.ragflow_nlp" = ["LICENSE", "NOTICE", "sources.json", "res/*.json", "res/*.gz"]

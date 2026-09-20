@@ -238,10 +238,29 @@ async def retrieve(dataset_ids: list[str], query: str, top_k: int | None = None,
     return r["hits"]
 
 
+async def _binding_errors(dataset_ids: list[str], endpoint: str) -> list[dict[str, str]]:
+    """Do not send project library queries to a different configured engine."""
+    from sqlalchemy import select
+    from kb_common.database import short_session
+    from kb_common.models import KnowledgeLibrary
+
+    def normalized(url):
+        return url.rstrip("/").removesuffix("/api/v1")
+
+    async with short_session() as session:
+        rows = (await session.execute(select(KnowledgeLibrary).where(
+            KnowledgeLibrary.library_type == "document",
+            KnowledgeLibrary.dataset_id.in_(dataset_ids),
+        ))).scalars().all()
+    return [{"dataset_id": row.dataset_id, "error": "引擎连接已切换，请恢复建库连接或完成迁移"}
+            for row in rows if normalized(row.engine_config.get("endpoint", "")) != normalized(endpoint)]
+
+
 async def retrieve_with_report(dataset_ids: list[str], query: str, top_k: int | None = None,
                                similarity_threshold: float | None = None,
                                vector_similarity_weight: float | None = None,
-                               rerank_id: str | None = None) -> dict[str, Any]:
+                               rerank_id: str | None = None,
+                               document_ids: list[str] | None = None) -> dict[str, Any]:
     """跨多个 RAGFlow 数据集检索，归一化为与 dify_client.retrieve 一致的 hit 结构。
 
     与 retrieve 的差异：多库合并请求遇到「无权数据集」（code 102）时，降级为
@@ -270,6 +289,14 @@ async def retrieve_with_report(dataset_ids: list[str], query: str, top_k: int | 
     if rr:
         params["rerank_id"] = rr
 
+    # Snapshot credentials before awaits; concurrent settings changes must not retarget a request.
+    endpoint, headers = _base_url(), _headers()
+    skipped = await _binding_errors(ids, endpoint)
+    blocked = {item["dataset_id"] for item in skipped}
+    ids = [item for item in ids if item not in blocked]
+    if not ids:
+        return {"hits": [], "skipped": skipped, "params": params}
+
     async def _call(ds: list[str]) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "question": query,
@@ -280,14 +307,15 @@ async def retrieve_with_report(dataset_ids: list[str], query: str, top_k: int | 
             "vector_similarity_weight": params["vector_similarity_weight"],
             "top_k": top_k,
         }
+        if document_ids:
+            payload["document_ids"] = document_ids
         if "rerank_id" in params:
             payload["rerank_id"] = params["rerank_id"]
         async with httpx.AsyncClient(timeout=60.0) as c:
-            resp = await c.post(f"{_base_url()}/retrieval", json=payload, headers=_headers())
+            resp = await c.post(f"{endpoint}/retrieval", json=payload, headers=headers)
             return _unwrap(resp, "RAGFlow 检索") or {}
 
     data: dict[str, Any] = {}
-    skipped: list[dict[str, str]] = []
     try:
         data = await _call(ids)
     except RagflowError as e:
@@ -307,7 +335,10 @@ async def retrieve_with_report(dataset_ids: list[str], query: str, top_k: int | 
     hits: list[dict[str, Any]] = []
     for ch in chunks or []:
         hits.append({
-            "score": ch.get("similarity") or ch.get("vector_similarity") or 0.0,
+            "score": ch["similarity"] if ch.get("similarity") is not None else ch.get("vector_similarity", 0.0),
+            "score_type": "ragflow",
+            "token_similarity": ch.get("term_similarity"),
+            "vector_similarity": ch.get("vector_similarity"),
             "content": ch.get("content") or "",
             "document_title": ch.get("document_keyword") or ch.get("document_name") or "",
             "document_id": ch.get("document_id") or "",

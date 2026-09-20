@@ -168,6 +168,37 @@ class RerankProfile(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
+class RagflowProfile(Base):
+    """多条 RAGFlow 知识库连接配置（多环境切换），只能生效一条（enabled=true）。
+
+    生效配置回写旧版单值 settings（ragflow_base_url/ragflow_api_key），
+    ragflow_route / ragflow_client / 知识源同步链路保持不变。
+    """
+    __tablename__ = "ragflow_profiles"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(100))
+    base_url: Mapped[str] = mapped_column(String(500), default="")
+    api_key: Mapped[str] = mapped_column(Text, default="")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class EmbeddingProfile(Base):
+    """多条 Embedding 向量模型配置（多环境/多模型切换），只能生效一条（enabled=true）。
+
+    生效配置回写旧版单值 settings（embedding_base_url/embedding_api_key/embedding_model），
+    kb_common.rag.embedder（本地 RAG 入库/检索）链路保持不变。
+    """
+    __tablename__ = "embedding_profiles"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(100))
+    api_url: Mapped[str] = mapped_column(String(500), default="")
+    api_key: Mapped[str] = mapped_column(Text, default="")
+    model: Mapped[str] = mapped_column(String(200), default="")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
 class ChatSession(Base):
     """智能问答会话：每个会话独立隔离，拥有各自的记忆文档。"""
     __tablename__ = "chat_sessions"
@@ -288,6 +319,9 @@ class KnowledgeLibrary(Base):
     dataset_id: Mapped[str] = mapped_column(String(128), nullable=False)
     description: Mapped[str] = mapped_column(Text, server_default="", nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, server_default=sa_text('true'), nullable=False)
+    library_type: Mapped[str] = mapped_column(String(20), server_default="external", nullable=False)
+    creator: Mapped[str | None] = mapped_column(String(100))
+    engine_config: Mapped[dict] = mapped_column(JSON, default=dict, server_default='{}', nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
@@ -685,4 +719,48 @@ class StructuredWriteLog(Base):
     rows_written: Mapped[int] = mapped_column(Integer, default=0)
     status: Mapped[str] = mapped_column(String(32), default="success")
     error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class LibraryDocument(Base):
+    """Project-owned originals and metadata; engine identifiers stay behind the adapter."""
+    __tablename__ = "library_documents"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    library_id: Mapped[int] = mapped_column(ForeignKey("knowledge_libraries.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(500))
+    storage_path: Mapped[str] = mapped_column(String(1000))
+    size: Mapped[int] = mapped_column(BigInteger)
+    engine_document_id: Mapped[str | None] = mapped_column(String(128))
+    # MinerU 解析任务 ID（engine_document_id 存三步上传得到的 file_id）
+    engine_job_id: Mapped[str | None] = mapped_column(String(128))
+    status: Mapped[str] = mapped_column(String(20), default="UPLOADED")
+    progress: Mapped[float] = mapped_column(Float, default=0)
+    message: Mapped[str] = mapped_column(Text, default="")
+    chunk_count: Mapped[int] = mapped_column(Integer, default=0)
+    # 文档级检索开关：禁用时分段从检索通道摘除（数据保留，启用即恢复）
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    # 文档级索引设置覆盖：{processing, strategy, enhancements, type_rules}；缺省回退库级 engine_config
+    engine_config: Mapped[dict] = mapped_column(JSON, default=dict, server_default='{}', nullable=False)
+    source: Mapped[str] = mapped_column(String(32), default="local", server_default="local")
+    # 训练/解析完成时间（COMPLETED 时写入）
+    parsed_at: Mapped[datetime | None] = mapped_column(DateTime)
+    tags: Mapped[list] = mapped_column(ARRAY(String(64)), default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class LibraryChunk(Base):
+    """文档库分段：MinerU 解析产物按库分段规则本地切块的结果。
+
+    父子分段：parent_id 为空 = 父分段（列表/编辑入口）；指向父分段 = 子分段
+    （父子分段规则启用时由分段器生成，仅参与检索命中，不在分段列表展示）。
+    """
+    __tablename__ = "library_chunks"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    document_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("library_documents.id", ondelete="CASCADE"), index=True)
+    parent_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("library_chunks.id", ondelete="CASCADE"))
+    content: Mapped[str] = mapped_column(Text)
+    available: Mapped[bool] = mapped_column(Boolean, default=True)
+    important_keywords: Mapped[list] = mapped_column(JSON, default=list)
+    position: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

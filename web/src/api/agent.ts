@@ -27,7 +27,7 @@ export interface AgentConfig {
   max_tokens: number
   top_k: number
   max_retrieval_rounds: number
-  external_agents: Record<'hiagent' | 'dify', EmbedAgentConfig>  // 外部平台智能体嵌入配置
+  external_agents: Record<'hiagent' | 'dify' | 'deap', EmbedAgentConfig>  // 外部平台智能体嵌入配置
 }
 
 /** 智能问答可用工具 */

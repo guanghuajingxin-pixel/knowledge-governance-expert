@@ -36,14 +36,16 @@ const form = reactive<AgentConfig>({
   external_agents: {
     hiagent: { enabled: false, embed_code: '', url: '' },
     dify: { enabled: false, embed_code: '', url: '' },
+    deap: { enabled: false, embed_code: '', url: '' },
   },
 })
 
-// ============ 智能体类型页签（内置 / HiAgent / Dify） ============
-type AgentKind = 'builtin' | 'hiagent' | 'dify'
+// ============ 智能体类型页签（内置 / HiAgent / Dify / DEAP） ============
+type AgentKind = 'builtin' | 'hiagent' | 'dify' | 'deap'
+type ExternalKind = 'hiagent' | 'dify' | 'deap'
 const agentKind = ref<AgentKind>('builtin')
 
-const EXTERNAL_META: Record<'hiagent' | 'dify', { title: string; icon: string; cls: string; desc: string; placeholder: string }> = {
+const EXTERNAL_META: Record<ExternalKind, { title: string; icon: string; cls: string; desc: string; placeholder: string }> = {
   hiagent: {
     title: 'HiAgent 智能体',
     icon: '🤖',
@@ -58,13 +60,23 @@ const EXTERNAL_META: Record<'hiagent' | 'dify', { title: string; icon: string; c
     desc: '粘贴 Dify 平台「嵌入网站」处复制的 iframe 代码（或页面链接），将 Dify 应用接入本系统；更换智能体时只需替换嵌入代码。',
     placeholder: '<iframe\n src="http://127.0.0.1/agent/eDE91u43v5UPpbt0"\n style="width: 100%; height: 100%; min-height: 700px"\n frameborder="0"\n allow="microphone;clipboard-write">\n</iframe>',
   },
+  deap: {
+    title: 'DEAP 智能问答',
+    icon: '💬',
+    cls: 'ico-greet',
+    desc: '粘贴钉钉 DEAP 智能问答平台发布后的 H5 页面链接，将 DEAP 智能问答接入本系统；更换智能体时只需替换链接。DEAP 页面需要钉钉登录态，未登录时会跳转钉钉授权，建议在钉钉客户端或已登录钉钉的浏览器中使用。',
+    placeholder: 'https://deap-agent.dingtalk.com/h5/index.html?publish_h5=1&code=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx',
+  },
 }
 
-const currentExternal = computed(() =>
-  form.external_agents[agentKind.value === 'dify' ? 'dify' : 'hiagent']
-)
+// 页签 → 外部平台 key 映射（builtin 不展示嵌入面板，映射仅为类型兜底）
+const EXTERNAL_KINDS: Record<AgentKind, ExternalKind> = {
+  builtin: 'hiagent', hiagent: 'hiagent', dify: 'dify', deap: 'deap',
+}
 
-const externalMeta = computed(() => EXTERNAL_META[agentKind.value === 'dify' ? 'dify' : 'hiagent'])
+const currentExternal = computed(() => form.external_agents[EXTERNAL_KINDS[agentKind.value]])
+
+const externalMeta = computed(() => EXTERNAL_META[EXTERNAL_KINDS[agentKind.value]])
 
 // 从嵌入代码实时解析页面地址：iframe 片段取 src；直接粘贴 URL 亦可
 const parsedEmbedUrl = computed(() => {
@@ -97,7 +109,12 @@ async function load() {
     form.external_agents = {
       hiagent: { enabled: false, embed_code: '', url: '', ...ext.hiagent },
       dify: { enabled: false, embed_code: '', url: '', ...ext.dify },
+      deap: { enabled: false, embed_code: '', url: '', ...ext.deap },
     }
+    // 纯链接保存后后端将 URL 从 embed_code 归档到 url 字段；回填保证编辑框可见（DEAP 主场景为纯链接）
+    Object.values(form.external_agents).forEach((e) => {
+      if (!e.embed_code && e.url) e.embed_code = e.url
+    })
     toolCatalog.value = toolsRes?.tools || []
     // 目录补齐 form.tools_enabled 中缺失的 key（默认启用）
     toolCatalog.value.forEach((t) => {
@@ -441,7 +458,7 @@ async function onImportFile(e: Event) {
     <div class="page-head">
       <div>
         <h2 class="page-title">智能体配置</h2>
-        <p class="page-sub">内置智能体策略配置，或通过嵌入代码接入 HiAgent / Dify 平台智能体。</p>
+        <p class="page-sub">内置智能体策略配置，或通过嵌入代码 / H5 链接接入 HiAgent / Dify / DEAP 平台智能体。</p>
       </div>
       <el-button type="primary" :loading="saving" @click="save">保存配置</el-button>
     </div>
@@ -452,6 +469,7 @@ async function onImportFile(e: Event) {
         <el-radio-button value="builtin">内置智能体</el-radio-button>
         <el-radio-button value="hiagent">HiAgent智能体</el-radio-button>
         <el-radio-button value="dify">Dify智能体</el-radio-button>
+        <el-radio-button value="deap">DEAP智能问答</el-radio-button>
       </el-radio-group>
     </div>
 

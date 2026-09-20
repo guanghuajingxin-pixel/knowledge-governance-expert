@@ -37,5 +37,5 @@ export const createRagflowDataset = (data: {
   name: string; chunk_method?: string; embedding_model?: string; parser_config?: Record<string, unknown> | null
 }) => request.post<unknown, { id: string; name: string }>('/ragflow/datasets', data)
 
-export const testRagflow = (data: { base_url?: string; api_key?: string }) =>
+export const testRagflow = (data: { base_url?: string; api_key?: string; profile_id?: string }) =>
   request.post<unknown, TestRagflowResult>('/ragflow/test', data)

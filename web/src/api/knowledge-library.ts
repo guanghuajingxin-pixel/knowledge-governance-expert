@@ -11,6 +11,7 @@ export interface KnowledgeLibrary {
   name: string
   platform: LibraryPlatform
   dataset_id: string
+  library_type: 'document' | 'external'
   description: string
   enabled: boolean
   updated_at: string
@@ -47,6 +48,12 @@ export const deleteKnowledgeLibrary = (id: number) =>
 // ===== 检索测试：按知识库逐库执行与智能问答一致的底层检索 =====
 
 export interface RetrievalTestHit {
+  semantic_weight?: number
+  score_type?: string
+  token_similarity?: number
+  vector_similarity?: number
+  rerank_score?: number
+  matched_content?: string
   score: number
   content: string
   document_title: string
@@ -80,6 +87,9 @@ export interface RetrievalTestResult {
 }
 
 export interface RetrievalTestParams {
+  document_ids?: string[]
+  rerank?: boolean
+  rerank_model_id?: string
   query: string
   library_ids?: number[]
   top_k?: number
@@ -87,9 +97,9 @@ export interface RetrievalTestParams {
   mode?: 'hybrid' | 'vector' | 'fulltext'
   /** 混合检索 + Rerank 子策略时的 RAGFlow rerank 模型名 */
   rerank_id?: string
-  /** 仅 RagFlow 生效（与其自带检索测试参数对齐） */
+  /** 最终相关性分数阈值 */
   similarity_threshold?: number
-  /** 仅 RagFlow 生效：混合检索-权重设置子策略下显式指定向量权重 */
+  /** 本地与 RagFlow 混合检索的向量权重 */
   vector_similarity_weight?: number
 }
 

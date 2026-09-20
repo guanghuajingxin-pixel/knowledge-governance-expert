@@ -11,10 +11,17 @@
  *     故按「无前端源码 → iframe」接入；其后端调用（MinerU V1 API，--api-url）保持不变。
  *
  * iframe 地址可配置并持久化，便于指向其他实例；提供重新加载 / 新窗口打开。
+ *
+ * 页签行最右侧文档入口（均新窗口打开）：
+ *  1.【API 调用说明】→ /mineru-api-docs.html（web/public 自编文档页，含端到端示例，
+ *     页内自动读取同一份 Base URL 配置并联动 Swagger 链接）。
+ *  2.【OpenAPI】→ 解析引擎（MinerU V1）的 Swagger 调试台（{Base}/docs），
+ *     Base 跟随「自定义解析」页签的配置（localStorage 共享）。
  */
 import { computed, ref, watch } from 'vue'
-import { Link, Refresh, TopRight } from '@element-plus/icons-vue'
+import { Document, Link, Refresh, TopRight } from '@element-plus/icons-vue'
 import ParserCustomTab from './components/ParserCustomTab.vue'
+import { openParserEngineDocs } from '@/utils/api-docs'
 
 const activeTab = ref<'custom' | 'webui'>('custom')
 
@@ -53,43 +60,79 @@ function reloadWebui() {
 function openWebuiExternal() {
   window.open(webuiSrc.value, '_blank', 'noopener')
 }
+
+// ===== 解析引擎 OpenAPI 接口文档（页签行最右侧入口，新窗口打开）=====
+// 地址解析抽到 utils/api-docs，与侧边栏左下角「API文档」入口共用同一份
+// localStorage Base URL 配置（与「自定义解析」页签 ParserCustomTab 共享）。
+function openOpenApiDocs() {
+  openParserEngineDocs()
+}
+
+// ===== API 调用说明（页签行最右侧入口，新窗口打开自编文档页）=====
+// 静态页位于 web/public/mineru-api-docs.html，页面内自动读取同一份 Base URL 配置。
+function openApiDocPage() {
+  window.open('/mineru-api-docs.html', '_blank', 'noopener')
+}
 </script>
 
 <template>
   <div class="engine-shell">
-    <el-tabs v-model="activeTab" class="engine-tabs">
-      <!-- 页签一：自定义解析 -->
-      <el-tab-pane label="自定义解析" name="custom">
-        <ParserCustomTab />
-      </el-tab-pane>
+    <div class="engine-tabs-region">
+      <el-tabs v-model="activeTab" class="engine-tabs">
+        <!-- 页签一：自定义解析 -->
+        <el-tab-pane label="自定义解析" name="custom">
+          <ParserCustomTab />
+        </el-tab-pane>
 
-      <!-- 页签二：MinerU 官方 WebUI（iframe 原样接入，后端调用不变） -->
-      <el-tab-pane label="MinerU WebUI" name="webui" lazy>
-        <div class="webui-pane">
-          <div class="webui-toolbar">
-            <el-input
-              v-model="webuiUrl"
-              placeholder="WebUI 地址"
-              style="width: 320px"
-              :prefix-icon="Link"
-              clearable
+        <!-- 页签二：MinerU 官方 WebUI（iframe 原样接入，后端调用不变） -->
+        <el-tab-pane label="MinerU WebUI" name="webui" lazy>
+          <div class="webui-pane">
+            <div class="webui-toolbar">
+              <el-input
+                v-model="webuiUrl"
+                placeholder="WebUI 地址"
+                style="width: 320px"
+                :prefix-icon="Link"
+                clearable
+              />
+              <el-button plain :icon="Refresh" @click="reloadWebui">重新加载</el-button>
+              <el-button plain :icon="TopRight" @click="openWebuiExternal">新窗口打开</el-button>
+              <span class="webui-hint">
+                MinerU 官方 Gradio WebUI；UI 由 Gradio 运行时生成，无独立前端源码，故 iframe 原样接入，其后端调用（MinerU V1 API）不变。
+              </span>
+            </div>
+            <iframe
+              :key="frameNonce"
+              :src="webuiSrc"
+              class="webui-frame"
+              title="MinerU WebUI"
+              frameborder="0"
             />
-            <el-button plain :icon="Refresh" @click="reloadWebui">重新加载</el-button>
-            <el-button plain :icon="TopRight" @click="openWebuiExternal">新窗口打开</el-button>
-            <span class="webui-hint">
-              MinerU 官方 Gradio WebUI；UI 由 Gradio 运行时生成，无独立前端源码，故 iframe 原样接入，其后端调用（MinerU V1 API）不变。
-            </span>
           </div>
-          <iframe
-            :key="frameNonce"
-            :src="webuiSrc"
-            class="webui-frame"
-            title="MinerU WebUI"
-            frameborder="0"
-          />
-        </div>
-      </el-tab-pane>
-    </el-tabs>
+        </el-tab-pane>
+      </el-tabs>
+      <!-- 页签行最右侧：API 调用说明（自编文档）+ OpenAPI（Swagger 调试台），均新窗口打开 -->
+      <div class="header-extra">
+        <el-button
+          link
+          type="primary"
+          :icon="Document"
+          title="在新窗口打开解析引擎 API 调用文档（含端到端示例）"
+          @click="openApiDocPage"
+        >
+          API 调用说明
+        </el-button>
+        <el-button
+          link
+          type="primary"
+          :icon="TopRight"
+          title="在新窗口打开解析引擎 OpenAPI 接口文档（Swagger）"
+          @click="openOpenApiDocs"
+        >
+          OpenAPI
+        </el-button>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -115,6 +158,23 @@ function openWebuiExternal() {
 }
 .engine-tabs :deep(.el-tabs__content) {
   padding: 0;
+}
+
+/* 页签行区域：承载最右侧的 API 文档入口（页签头 46px，按钮 32px → 垂直居中 top 7px） */
+.engine-tabs-region {
+  position: relative;
+}
+.header-extra {
+  position: absolute;
+  top: 7px;
+  right: 24px;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.header-extra :deep(.el-button) {
+  font-weight: 600;
 }
 
 /* ===== MinerU WebUI 页签 ===== */

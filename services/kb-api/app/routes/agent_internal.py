@@ -182,8 +182,10 @@ async def internal_kb_retrieve(body: RetrieveIn, s: AsyncSession = Depends(get_s
             KnowledgeLibrary.enabled == True,  # noqa: E712
         ))).scalars().all()
         for r in libs:
+            if r.library_type == "document":
+                continue  # 项目文档库已本地化（MinerU 解析 + 本地分段），不参与外部引擎检索
             (dataset_ids if r.platform == "dify" else ragflow_ids).append(r.dataset_id)
-        if not libs:
+        if not dataset_ids and not ragflow_ids:
             rows = (await s.execute(select(KnowledgeSource).where(
                 KnowledgeSource.enabled == True,  # noqa: E712
                 KnowledgeSource.source_type.in_(["dify_dataset", "ragflow_dataset"]),

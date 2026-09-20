@@ -48,6 +48,13 @@ export const useTabsStore = defineStore('tabs', () => {
     }
   }
 
+  // 动态页签标题：详情页加载到实体名后更新（如文档分段页显示文件名）
+  function updateTabTitle(path: string, title: string) {
+    if (!title) return
+    const tab = tabs.value.find((t) => t.path === path)
+    if (tab) tab.title = title
+  }
+
   function removeTab(path: string) {
     const tab = tabs.value.find((t) => t.path === path)
     if (!tab) return
@@ -93,5 +100,5 @@ export const useTabsStore = defineStore('tabs', () => {
     { immediate: true },
   )
 
-  return { tabs, addTab, removeTab, closeOthers, closeAll }
+  return { tabs, addTab, updateTabTitle, removeTab, closeOthers, closeAll }
 })

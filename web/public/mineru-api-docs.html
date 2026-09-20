@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>解析引擎 API 调用文档 · MinerU V1</title>
+<style>
+  :root {
+    --primary: #409EFF;
+    --primary-dark: #2f6da8;
+    --heading: #1f3864;
+    --text: #2c3e50;
+    --muted: #909399;
+    --border: #d7e1ec;
+    --bg-soft: #eaf2fb;
+    --bg-page: #f5f7fa;
+    --success: #67c23a;
+    --warning: #e6a23c;
+    --danger: #f56c6c;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: "Helvetica Neue", Arial, "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: var(--bg-page);
+    color: var(--text);
+    font-size: 14px;
+    line-height: 1.75;
+  }
+  .topbar {
+    position: sticky; top: 0; z-index: 10;
+    background: #fff;
+    border-bottom: 1px solid var(--border);
+    padding: 14px 28px;
+    display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap;
+  }
+  .topbar h1 { margin: 0; font-size: 19px; color: var(--heading); }
+  .topbar .ver { font-size: 12px; color: var(--muted); }
+  .topbar .links { margin-left: auto; display: flex; gap: 14px; }
+  .topbar a { color: var(--primary); text-decoration: none; font-size: 13px; }
+  .topbar a:hover { text-decoration: underline; }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 20px 28px 60px; }
+  .toc {
+    background: #fff; border: 1px solid var(--border); border-radius: 10px;
+    padding: 12px 18px; margin-bottom: 20px;
+    display: flex; flex-wrap: wrap; gap: 4px 16px;
+  }
+  .toc a { color: var(--primary-dark); text-decoration: none; font-size: 13px; }
+  .toc a:hover { text-decoration: underline; }
+  .card {
+    background: #fff; border: 1px solid var(--border); border-radius: 10px;
+    padding: 18px 22px; margin-bottom: 18px;
+  }
+  h2 {
+    font-size: 17px; color: var(--heading); margin: 0 0 12px;
+    padding-bottom: 8px; border-bottom: 1px solid var(--bg-soft);
+    scroll-margin-top: 70px;
+  }
+  h3 { font-size: 14.5px; color: var(--heading); margin: 18px 0 8px; }
+  table { border-collapse: collapse; width: 100%; margin: 8px 0 14px; font-size: 13px; }
+  th, td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; vertical-align: top; }
+  th { background: var(--bg-soft); color: var(--heading); white-space: nowrap; }
+  code {
+    background: #f0f4f8; border-radius: 4px; padding: 1px 5px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12.5px; color: #b75000;
+  }
+  pre {
+    position: relative;
+    background: #f6f8fa; border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px 14px; overflow: auto; margin: 8px 0 14px;
+  }
+  pre code { background: none; padding: 0; color: var(--text); font-size: 12.5px; line-height: 1.65; }
+  .copy-btn {
+    position: absolute; top: 6px; right: 6px;
+    font-size: 11px; color: var(--muted);
+    background: #fff; border: 1px solid var(--border); border-radius: 4px;
+    padding: 2px 8px; cursor: pointer;
+  }
+  .copy-btn:hover { color: var(--primary); border-color: var(--primary); }
+  .method {
+    display: inline-block; font-size: 11.5px; font-weight: 700;
+    border-radius: 4px; padding: 1px 8px; margin-right: 8px;
+    color: #fff; letter-spacing: .5px; vertical-align: 1px;
+  }
+  .m-get { background: var(--success); }
+  .m-post { background: var(--primary); }
+  .m-put { background: var(--warning); }
+  .m-del { background: var(--danger); }
+  .path { font-family: ui-monospace, Menlo, monospace; font-size: 14px; font-weight: 700; color: var(--heading); }
+  .tag {
+    display: inline-block; font-size: 12px; border-radius: 4px; padding: 1px 8px; margin-left: 8px;
+    background: var(--bg-soft); color: var(--primary-dark); border: 1px solid var(--border);
+  }
+  .tip {
+    background: var(--bg-soft); border-left: 3px solid var(--primary);
+    border-radius: 0 6px 6px 0; padding: 8px 14px; margin: 10px 0; font-size: 13px;
+  }
+  .tip.warn { border-color: var(--warning); background: #fdf6ec; }
+  .meta-line { font-size: 13px; color: var(--muted); margin: 2px 0 10px; }
+  .meta-line b { color: var(--text); font-weight: 600; }
+  ul { margin: 6px 0 12px; padding-left: 22px; }
+  li { margin: 3px 0; }
+  .foot { text-align: center; color: var(--muted); font-size: 12px; margin-top: 30px; }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <h1>解析引擎 · API 调用文档</h1>
+  <span class="ver">MinerU V1 API · OpenAPI 风格 · 无鉴权</span>
+  <span class="links">
+    <a id="link-swagger" href="#" target="_blank" rel="noopener">Swagger 调试台 →</a>
+    <a href="https://opendatalab.github.io/MinerU/" target="_blank" rel="noopener">MinerU 官网 →</a>
+  </span>
+</div>
+
+<div class="wrap">
+  <div class="toc">
+    <a href="#quickstart">快速开始</a>
+    <a href="#global">全局约定</a>
+    <a href="#health">健康检查</a>
+    <a href="#tiers">解析档位</a>
+    <a href="#upload">上传（三步协议）</a>
+    <a href="#jobs">解析任务</a>
+    <a href="#files">文件与产物下载</a>
+    <a href="#usage">用量查询</a>
+    <a href="#states">状态机</a>
+    <a href="#pagerange">page_range 语法</a>
+    <a href="#e2e">端到端示例</a>
+    <a href="#frontend">前端集成</a>
+    <a href="#errors">错误排查</a>
+  </div>
+
+  <!-- ================= 快速开始 ================= -->
+  <div class="card">
+    <h2 id="quickstart">快速开始（60 秒跑通）</h2>
+    <p>一次完整的解析 = <b>三步上传</b> 拿到 <code>file_id</code> → <b>创建解析任务</b> → <b>轮询</b> 至终态 → <b>下载产物</b>：</p>
+<pre><code id="c-quick">BASE=http://127.0.0.1:8010
+
+# ① 创建上传会话（只声明文件元信息，不传内容）
+curl -s -X POST $BASE/v1/uploads -H 'Content-Type: application/json' \
+  -d '{"filename":"demo.pdf","bytes":123456,"mime_type":"application/pdf"}'
+# → {"id":"upload_xxx","status":"pending","upload_url":".../content",...}
+
+# ② PUT 原始字节（Content-Type 与 mime_type 保持一致）
+curl -s -X PUT $BASE/v1/uploads/upload_xxx/content \
+  -H 'Content-Type: application/pdf' --data-binary @demo.pdf
+
+# ③ 完成上传 → 得到 file_id
+curl -s -X POST $BASE/v1/uploads/upload_xxx/complete \
+  -H 'Content-Type: application/json' -d '{}'
+# → {"status":"completed","file":{"id":"file-yyy",...}}
+
+# ④ 创建解析任务（引用 file_id）
+curl -s -X POST $BASE/v1/parse/jobs -H 'Content-Type: application/json' \
+  -d '{"files":[{"source":{"type":"file_id","file_id":"file-yyy"}}],
+       "ocr_mode":"auto","output_formats":["markdown","middle_json"]}'
+# → {"job_id":"job_zzz","status":"queued",...}
+
+# ⑤ 轮询任务直至终态（completed / partial / failed / canceled）
+curl -s $BASE/v1/parse/jobs/job_zzz
+
+# ⑥ 按产物引用下载 markdown / middle_json
+curl -s $BASE/v1/files/file-mdout/content > result.md</code></pre>
+    <div class="tip">浏览器<b>无法直连</b>该服务（不带 CORS 头），前端请经 kb-api 同源代理调用，见 <a href="#frontend">前端集成</a>。</div>
+  </div>
+
+  <!-- ================= 全局约定 ================= -->
+  <div class="card">
+    <h2 id="global">全局约定</h2>
+    <table>
+      <tr><th style="width:140px">条目</th><th>说明</th></tr>
+      <tr><td>Base URL</td><td>默认 <code>http://127.0.0.1:8010</code>；可在「解析引擎 → 自定义解析」页签顶部配置（localStorage 持久化）</td></tr>
+      <tr><td>鉴权</td><td>本地服务<b>无鉴权</b>，任何请求不需 API Key</td></tr>
+      <tr><td>请求体</td><td>JSON 接口必须显式带 <code>Content-Type: application/json</code>；文件字节接口用 <code>application/octet-stream</code> / 具体 MIME</td></tr>
+      <tr><td>时间字段</td><td>Upload / File 对象的 <code>created_at</code>、<code>expires_at</code> 为 <b>Unix 秒</b>；Job 对象的 <code>created_at</code> 等为 <b>ISO 8601 字符串</b></td></tr>
+      <tr><td>错误结构</td><td>4xx/5xx 统一返回 <code>{"error":{"message":"具体原因","type":"...","param":null,"code":null}}</code>，取 <code>error.message</code> 展示</td></tr>
+      <tr><td>ID 前缀</td><td>上传会话 <code>upload_*</code>、文件 <code>file-*</code>、任务 <code>job_*</code></td></tr>
+      <tr><td>产物格式</td><td>本项目固定输出 <code>markdown</code> + <code>middle_json</code>（服务亦支持 html / latex / docx / zip 等）</td></tr>
+    </table>
+  </div>
+
+  <!-- ================= 健康检查 ================= -->
+  <div class="card">
+    <h2 id="health">健康检查 · <span class="method m-get">GET</span><span class="path">/v1/health</span></h2>
+    <p class="meta-line">用于连接测试：返回服务版本与支持的输出格式、文件来源。无请求参数。</p>
+<pre><code>curl -s http://127.0.0.1:8010/v1/health</code></pre>
+<pre><code>{
+  "status": "ok",
+  "version": "1.x.x",
+  "features": {
+    "output_formats": ["markdown", "middle_json", "html", "zip", "..."],
+    "sources": ["file_id", "url", "inline", "local"]
+  }
+}</code></pre>
+  </div>
+
+  <!-- ================= 解析档位 ================= -->
+  <div class="card">
+    <h2 id="tiers">解析档位 · <span class="method m-get">GET</span><span class="path">/v1/tiers</span></h2>
+    <p class="meta-line">返回可选档位及当前绑定的模型，建任务时作为 <code>tier</code> 传入；缺省 = 服务端默认。</p>
+    <table>
+      <tr><th>tier</th><th>含义</th></tr>
+      <tr><td><code>flash</code></td><td>快速本地文本抽取（最快，适合纯文本 PDF）</td></tr>
+      <tr><td><code>basic</code></td><td>轻量模型基础解析</td></tr>
+      <tr><td><code>standard</code></td><td>常规文档标准解析（MinerU2.5）</td></tr>
+      <tr><td><code>advanced</code></td><td>困难文档高精度解析（最慢）</td></tr>
+    </table>
+<pre><code>curl -s http://127.0.0.1:8010/v1/tiers
+# → {"object":"list","data":[{"id":"flash","description":"...","current_model":"..."},...]}
+</code></pre>
+  </div>
+
+  <!-- ================= 上传 ================= -->
+  <div class="card">
+    <h2 id="upload">文件上传（三步协议）</h2>
+    <p>与 OpenAI Files 一致的分步协议：<b>声明元信息 → 传原始字节 → 提交完成</b>。三步缺一不可。</p>
+
+    <h3><span class="method m-post">POST</span><span class="path">/v1/uploads</span><span class="tag">第 1 步 · 创建会话</span></h3>
+    <table>
+      <tr><th>字段</th><th>类型</th><th>必填</th><th>说明</th></tr>
+      <tr><td><code>filename</code></td><td>string</td><td>是</td><td>文件名（含扩展名，用于类型识别）</td></tr>
+      <tr><td><code>bytes</code></td><td>integer</td><td>是</td><td><b>文件精确字节数（&gt;0）</b>，第 2 步按此校验</td></tr>
+      <tr><td><code>mime_type</code></td><td>string</td><td>是</td><td>如 <code>application/pdf</code>、<code>image/png</code></td></tr>
+      <tr><td><code>purpose</code></td><td>string</td><td>否</td><td><code>parse</code>（默认，待解析）/ <code>input_image</code></td></tr>
+      <tr><td><code>sha256sum</code></td><td>string</td><td>否</td><td>64 位十六进制摘要，complete 时校验一致性</td></tr>
+      <tr><td><code>expires_after</code></td><td>object</td><td>否</td><td><code>{"anchor":"created_at","seconds":3600}</code>，3600–2592000 秒</td></tr>
+    </table>
+    <p class="meta-line"><b>响应关键字段：</b><code>id</code>（会话 ID）、<code>status:"pending"</code>、<code>upload_url</code>（第 2 步地址）、<code>upload_method:"PUT"</code>、<code>upload_headers</code>（应回传的头，含 Content-Type）、<code>expires_at</code>。</p>
+
+    <h3><span class="method m-put">PUT</span><span class="path">/v1/uploads/{upload_id}/content</span><span class="tag">第 2 步 · 传字节</span></h3>
+    <ul>
+      <li>请求体为<b>原始二进制</b>（curl 用 <code>--data-binary @file</code>），不是 multipart/form-data</li>
+      <li><code>Content-Type</code> 必须与第 1 步 <code>mime_type</code> 一致（直接照抄响应里的 <code>upload_headers</code> 最稳）</li>
+      <li>错误：<code>404</code> 会话不存在 · <code>409</code> 会话已完成/已取消 · <code>413</code> 字节数与 <code>bytes</code> 不符或超上限</li>
+    </ul>
+
+    <h3><span class="method m-post">POST</span><span class="path">/v1/uploads/{upload_id}/complete</span><span class="tag">第 3 步 · 完成</span></h3>
+    <p class="meta-line">请求体可为 <code>{}</code> 或 <code>{"sha256sum":"..."}</code>（服务端校验）。响应 <code>status:"completed"</code>，其中 <b><code>file.id</code> 即解析任务引用的 <code>file_id</code></b>。</p>
+
+    <h3>会话辅助接口</h3>
+    <ul>
+      <li><span class="method m-get">GET</span><span class="path">/v1/uploads/{upload_id}</span> — 查询会话状态（pending / completed / cancelled / expired）</li>
+      <li><span class="method m-post">POST</span><span class="path">/v1/uploads/{upload_id}/cancel</span> — 取消未完成会话</li>
+    </ul>
+    <div class="tip warn">会话默认 <b>1 小时过期</b>（<code>expires_at</code>）；complete 之后不可再 PUT；<code>bytes</code> 不准是最常见的 413 原因。</div>
+  </div>
+
+  <!-- ================= 解析任务 ================= -->
+  <div class="card">
+    <h2 id="jobs">解析任务</h2>
+
+    <h3><span class="method m-post">POST</span><span class="path">/v1/parse/jobs</span><span class="tag">创建任务（异步）</span></h3>
+    <table>
+      <tr><th>字段</th><th>类型</th><th>必填</th><th>说明</th></tr>
+      <tr><td><code>files</code></td><td>array</td><td>是</td><td>1–100 个 <code>{source, page_range?}</code>；多文件合并为一个任务</td></tr>
+      <tr><td><code>files[].source</code></td><td>object</td><td>是</td><td>四种来源（按 <code>type</code> 判别）：
+        <ul style="margin:4px 0 0">
+          <li><code>{"type":"file_id","file_id":"file-..."}</code> — 上传产物，<b>推荐</b></li>
+          <li><code>{"type":"url","url":"https://..."}</code> — 远程文件</li>
+          <li><code>{"type":"inline","name":"x.md","data":"..."}</code> — 内联文本</li>
+          <li><code>{"type":"local","path":"/data/x.pdf"}</code> — 服务端本地路径</li>
+        </ul></td></tr>
+      <tr><td><code>files[].page_range</code></td><td>string</td><td>否</td><td>页码选择，见 <a href="#pagerange">page_range 语法</a>，仅对 PDF 生效</td></tr>
+      <tr><td><code>ocr_mode</code></td><td>string</td><td>否</td><td><code>auto</code>（默认）/ <code>txt</code> 仅内嵌文字层 / <code>ocr</code> 强制 OCR（扫描件）</td></tr>
+      <tr><td><code>output_formats</code></td><td>array</td><td>否</td><td>默认 <code>["markdown"]</code>；本项目传 <code>["markdown","middle_json"]</code></td></tr>
+      <tr><td><code>tier</code></td><td>string</td><td>否</td><td>flash / basic / standard / advanced，缺省为服务端默认</td></tr>
+      <tr><td><code>callback</code></td><td>object</td><td>否</td><td>完成回调配置（可选）</td></tr>
+    </table>
+    <p class="meta-line"><b>响应（JobAsyncResponse）：</b><code>job_id</code>、<code>status</code>、<code>created_at</code>（ISO）、<code>tier</code>、<code>output_formats</code>、<code>progress:{completed,failed,total}</code>、<code>files[]</code>（含 <code>output_files</code> 产物引用）、<code>links:{self,cancel}</code>。</p>
+
+    <h3><span class="method m-get">GET</span><span class="path">/v1/parse/jobs</span><span class="tag">任务列表</span></h3>
+    <p class="meta-line">返回 <code>{object:"list", data:[{job_id,status,created_at,file_count}], has_more, first_id, last_id}</code>，用于把服务端历史任务合并进本地队列（仅列表级信息，详情需再查单个任务）。</p>
+
+    <h3><span class="method m-get">GET</span><span class="path">/v1/parse/jobs/{job_id}</span><span class="tag">轮询状态 / 进度 / 产物</span></h3>
+    <ul>
+      <li>建议 <b>2 秒</b>间隔轮询；<code>status</code> 进入 <code>completed / partial / failed / canceled</code> 即停止</li>
+      <li>进度按 <code>progress:{completed,failed,total}</code> 计算：已处理数 = completed + failed</li>
+      <li>每个文件的结果在 <code>files[].output_files</code>：<code>{markdown:{file_id,bytes}, middle_json:{file_id,bytes}, zip?...}</code>，凭 <code>file_id</code> 去下载</li>
+      <li>单文件失败原因在 <code>files[].error.message</code>；耗时与模型在 <code>files[].parse:{duration_ms,model_used,parser_version}</code></li>
+    </ul>
+
+    <h3><span class="method m-del">DELETE</span><span class="path">/v1/parse/jobs/{job_id}</span><span class="tag">取消任务</span></h3>
+    <p class="meta-line">仅 <code>queued / running</code> 可取消，返回 <code>{job_id, status:"canceled", canceled_at}</code>；终态任务返回 409。</p>
+  </div>
+
+  <!-- ================= 文件与产物 ================= -->
+  <div class="card">
+    <h2 id="files">文件与产物下载</h2>
+    <h3><span class="method m-get">GET</span><span class="path">/v1/files/{file_id}/content</span><span class="tag">下载产物内容</span></h3>
+    <p class="meta-line">直接返回<b>文件原文</b>（不是 JSON 包装）：markdown 产物为文本，middle_json 产物为 JSON。<code>file_id</code> 来自任务详情的 <code>output_files.*.file_id</code>。</p>
+<pre><code># 下载 markdown 产物
+curl -s http://127.0.0.1:8010/v1/files/file-mdout/content -o result.md
+# 下载结构化中间 JSON
+curl -s http://127.0.0.1:8010/v1/files/file-jsout/content -o middle.json</code></pre>
+    <h3>其他文件接口</h3>
+    <ul>
+      <li><span class="method m-get">GET</span><span class="path">/v1/files</span> — 文件列表（含源文件与产物文件）</li>
+      <li><span class="method m-get">GET</span><span class="path">/v1/files/{file_id}</span> — 文件元数据（bytes / filename / sha256sum）</li>
+      <li><span class="method m-del">DELETE</span><span class="path">/v1/files/{file_id}</span> — 删除文件资源</li>
+    </ul>
+    <div class="tip">markdown 内引用的图片通常打包在 <code>zip</code> 产物内（相对路径），仅下载 markdown 文本时图片不可见；base64 内联图则随文本返回。</div>
+  </div>
+
+  <!-- ================= 用量 ================= -->
+  <div class="card">
+    <h2 id="usage">用量查询 · <span class="method m-get">GET</span><span class="path">/v1/usage</span></h2>
+    <p class="meta-line">返回当前周期解析用量与限额（页数 / 文件数等），可用于页首配额提示。无请求参数。</p>
+  </div>
+
+  <!-- ================= 状态机 ================= -->
+  <div class="card">
+    <h2 id="states">状态机速查</h2>
+    <table>
+      <tr><th>对象</th><th>状态流转</th></tr>
+      <tr><td>解析任务 Job</td><td><code>queued</code> → <code>running</code> → <code>completed</code> / <code>partial</code>（部分文件失败）/ <code>failed</code> / <code>canceled</code></td></tr>
+      <tr><td>任务内文件</td><td><code>queued</code> → <code>running</code> → <code>completed</code> / <code>failed</code></td></tr>
+      <tr><td>上传会话 Upload</td><td><code>pending</code> → <code>completed</code> / <code>cancelled</code> / <code>expired</code></td></tr>
+    </table>
+  </div>
+
+  <!-- ================= page_range ================= -->
+  <div class="card">
+    <h2 id="pagerange">page_range 语法（PDF 页码选择）</h2>
+    <ul>
+      <li>1 起始、闭区间，逗号分隔多段：<code>"1-5,8"</code></li>
+      <li><code>r1</code> = 最后一页、<code>r3-r1</code> = 倒数第 3 到最后一页；<code>"all"</code> = 全部页</li>
+      <li>选择会自动<b>排序去重</b>，越界页忽略；空白 = 未指定（全部）</li>
+      <li>非法：倒序区间（<code>5-1</code>）、<code>~</code>、负数页码 → 400</li>
+    </ul>
+  </div>
+
+  <!-- ================= 端到端 ================= -->
+  <div class="card">
+    <h2 id="e2e">端到端脚本（可直接保存为 .sh）</h2>
+<pre><code id="c-e2e">#!/usr/bin/env bash
+set -e
+BASE=http://127.0.0.1:8010
+FILE=$1; NAME=$(basename "$FILE"); SIZE=$(stat -f%z "$FILE")
+MIME=$(file --brief --mime-type "$FILE")
+
+# 1) 会话
+UP=$(curl -s -X POST $BASE/v1/uploads -H 'Content-Type: application/json' \
+  -d "{\"filename\":\"$NAME\",\"bytes\":$SIZE,\"mime_type\":\"$MIME\"}")
+UID_=$(echo "$UP" | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
+
+# 2) 字节
+curl -s -X PUT "$BASE/v1/uploads/$UID_/content" -H "Content-Type: $MIME" --data-binary @"$FILE" &gt;/dev/null
+
+# 3) 完成 → file_id
+FID=$(curl -s -X POST "$BASE/v1/uploads/$UID_/complete" -H 'Content-Type: application/json' -d '{}' \
+  | python3 -c 'import json,sys;print(json.load(sys.stdin)["file"]["id"])')
+
+# 4) 建任务
+JOB=$(curl -s -X POST $BASE/v1/parse/jobs -H 'Content-Type: application/json' \
+  -d "{\"files\":[{\"source\":{\"type\":\"file_id\",\"file_id\":\"$FID\"}}],\"ocr_mode\":\"auto\",\"output_formats\":[\"markdown\",\"middle_json\"]}")
+JID=$(echo "$JOB" | python3 -c 'import json,sys;print(json.load(sys.stdin)["job_id"])')
+
+# 5) 轮询
+while :; do
+  ST=$(curl -s $BASE/v1/parse/jobs/$JID | python3 -c 'import json,sys;print(json.load(sys.stdin)["status"])')
+  echo "status: $ST"; case $ST in completed|partial|failed|canceled) break;; esac; sleep 2
+done
+
+# 6) 下载 markdown 产物
+MDID=$(curl -s $BASE/v1/parse/jobs/$JID \
+  | python3 -c 'import json,sys;print(json.load(sys.stdin)["files"][0]["output_files"]["markdown"]["file_id"])')
+curl -s $BASE/v1/files/$MDID/content -o "${NAME%.*}.md"
+echo "done → ${NAME%.*}.md"</code></pre>
+  </div>
+
+  <!-- ================= 前端集成 ================= -->
+  <div class="card">
+    <h2 id="frontend">前端集成（本项目）</h2>
+    <p>服务不带 CORS 头，浏览器直连会被拦截；本项目统一经 kb-api 同源代理 <code>/api/v1/mineru/*</code> 转发，目标地址由 <code>X-Mineru-Base</code> 请求头指定，代理需 <b>admin / super_admin</b> JWT。</p>
+<pre><code id="c-js">// 例：创建解析任务（axios 实例已带 Authorization: Bearer &lt;jwt&gt;）
+await request({
+  url: '/mineru/v1/parse/jobs',          // 实际命中 kb-api /api/v1/mineru/v1/parse/jobs
+  method: 'POST',
+  headers: { 'X-Mineru-Base': 'http://127.0.0.1:8010' },
+  data: {
+    files: [{ source: { type: 'file_id', file_id: 'file-...' } }],
+    ocr_mode: 'auto',
+    output_formats: ['markdown', 'middle_json'],
+  },
+})</code></pre>
+    <ul>
+      <li>代理路径：<code>/api/v1/mineru/{MinerU 原路径}</code>，方法 / 查询串 / 请求体原样透传</li>
+      <li>大文件上传 / 产物下载代理超时 300s；前端参考实现：<code>ParserCustomTab.vue → api() / uploadOne()</code></li>
+      <li>axios 对字符串 body 不会自动设 Content-Type，<b>必须显式加 <code>application/json</code></b>，否则 MinerU 返回 400</li>
+    </ul>
+  </div>
+
+  <!-- ================= 错误排查 ================= -->
+  <div class="card">
+    <h2 id="errors">常见错误排查</h2>
+    <table>
+      <tr><th style="width:90px">现象</th><th>原因与处理</th></tr>
+      <tr><td><code>400</code></td><td>JSON 请求未带 <code>Content-Type: application/json</code>（预序列化 body 最易踩）；或 page_range 语法非法</td></tr>
+      <tr><td><code>413</code></td><td>声明 <code>bytes</code> 与实际字节数不一致；或文件超过大小上限</td></tr>
+      <tr><td><code>409</code></td><td>会话已完成后再 PUT；或对终态任务执行 DELETE 取消</td></tr>
+      <tr><td><code>404</code></td><td>ID 拼写错误；或上传会话已过期（默认 1 小时）</td></tr>
+      <tr><td>CORS 报错</td><td>浏览器直连被拦截 → 改走 kb-api 代理 <code>/api/v1/mineru/*</code></td></tr>
+      <tr><td>轮询中断</td><td>网络抖动连续失败应熔断并提示「从服务端拉取」恢复，避免错误刷屏</td></tr>
+    </table>
+  </div>
+
+  <div class="foot">
+    解析引擎 API 调用文档 · 依据 <span id="foot-base">http://127.0.0.1:8010</span>/openapi.json 编写 · 产物格式固定 markdown + middle_json
+  </div>
+</div>
+
+<script>
+  // 与「自定义解析」页签共享同一份 Base URL 配置；打开时展示当前实例并联动 Swagger 链接
+  (function () {
+    var base = 'http://127.0.0.1:8010';
+    try {
+      var raw = localStorage.getItem('kge:mineru_config_v1');
+      if (raw) {
+        var cfg = JSON.parse(raw);
+        if (cfg && cfg.baseUrl && String(cfg.baseUrl).trim()) base = String(cfg.baseUrl).trim();
+      }
+    } catch (e) { /* 忽略损坏缓存 */ }
+    base = base.replace(/\/+$/, '');
+    var link = document.getElementById('link-swagger');
+    if (link) link.href = base + '/docs';
+    var foot = document.getElementById('foot-base');
+    if (foot) foot.textContent = base;
+
+    // 代码块一键复制
+    document.querySelectorAll('pre').forEach(function (pre) {
+      var btn = document.createElement('button');
+      btn.className = 'copy-btn';
+      btn.type = 'button';
+      btn.textContent = '复制';
+      btn.addEventListener('click', function () {
+        var code = pre.querySelector('code');
+        var text = code ? code.textContent : '';
+        navigator.clipboard.writeText(text).then(function () {
+          btn.textContent = '已复制';
+          setTimeout(function () { btn.textContent = '复制'; }, 1500);
+        });
+      });
+      pre.appendChild(btn);
+    });
+  })();
+</script>
+</body>
+</html>

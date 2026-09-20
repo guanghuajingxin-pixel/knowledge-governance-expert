@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
 from kb_common.database import get_session
-from kb_common.models import Setting, DifyProfile, LLMProfile, RerankProfile
+from kb_common.models import Setting, DifyProfile, LLMProfile, RerankProfile, RagflowProfile, EmbeddingProfile
 from app.deps import require_role, get_principal, get_current_user
 from kb_common.config import get_settings
 from kb_common.clients import llm_client
@@ -414,6 +414,49 @@ async def list_llm_models(base_url: str = "", api_key: str = "",
     return {"ok": True, "models": models}
 
 
+@router.get("/external-models")
+async def list_external_models(base_url: str = "", api_key: str = "",
+                               kind: str = "", profile_id: str = "",
+                               u=Depends(require_role("super_admin", "admin")),
+                               s: AsyncSession = Depends(get_session)):
+    """拉取 OpenAI 兼容服务的全部模型列表（不过滤）。
+
+    供 Embedding / Rerank 配置弹窗「拉取模型列表」使用——这两类模型名
+    （bge-m3、bge-reranker 等）恰在 llm-models 的排除词内，故单独提供。
+    编辑态传 kind+profile_id：Key 未重填时回退该 profile 已存 Key。
+    """
+    base_url = base_url.strip().rstrip("/")
+    api_key = api_key.strip()
+    if profile_id and (not api_key or "****" in api_key):
+        pid = _safe_uuid(profile_id)
+        if kind == "rerank":
+            row = (await s.execute(select(RerankProfile).where(RerankProfile.id == pid))).scalar_one_or_none()
+        elif kind == "embedding":
+            row = (await s.execute(select(EmbeddingProfile).where(EmbeddingProfile.id == pid))).scalar_one_or_none()
+        else:
+            row = None
+        if row and row.api_key:
+            api_key = row.api_key
+    if not base_url:
+        return {"ok": False, "models": [], "message": "请先填写服务地址"}
+    try:
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.get(f"{base_url}/models", headers=headers)
+    except Exception:
+        return {"ok": False, "models": [], "message": "无法连接到服务地址"}
+    if r.status_code in (401, 403):
+        return {"ok": False, "models": [], "message": "API Key 无效或已过期"}
+    if r.status_code != 200:
+        return {"ok": False, "models": [], "message": f"获取模型列表失败（{r.status_code}）"}
+    try:
+        data = r.json()
+        ids = [m.get("id") for m in (data.get("data") or []) if m.get("id")]
+    except Exception:
+        return {"ok": False, "models": [], "message": "响应格式异常"}
+    return {"ok": True, "models": sorted(ids)}
+
+
 @router.post("/test-mineru")
 async def test_mineru_api(body: TestMinerUIn, u=Depends(require_role("super_admin", "admin")),
                           s: AsyncSession = Depends(get_session)):
@@ -447,6 +490,7 @@ class TestEmbeddingIn(BaseModel):
     base_url: str = ""
     api_key: str = ""
     model: str = ""
+    profile_id: str = ""   # 编辑态 Key 为掩码/留空时，回退该 profile 已存值
 
 
 @router.post("/test-embedding")
@@ -454,11 +498,22 @@ async def test_embedding_api(body: TestEmbeddingIn, u=Depends(require_role("supe
                               s: AsyncSession = Depends(get_session)):
     """Embedding 连通性测试：用填写的参数发一次最小 embed 请求。
 
-    留空时回退已保存值（密钥不回显，测试无需重复输入）。
+    留空时回退已保存值（密钥不回显，测试无需重复输入）；编辑弹窗传 profile_id 时
+    优先回退该 profile。Key 可选——内网/自建服务（如 Xinference）常免鉴权。
     """
     base_url = body.base_url.strip().rstrip("/")
     api_key = body.api_key.strip()
     model = body.model.strip()
+    if body.profile_id:
+        pid = _safe_uuid(body.profile_id)
+        row = (await s.execute(select(EmbeddingProfile).where(EmbeddingProfile.id == pid))).scalar_one_or_none()
+        if row:
+            if not base_url:
+                base_url = row.api_url
+            if (not api_key or "****" in api_key) and row.api_key:
+                api_key = row.api_key
+            if not model:
+                model = row.model
     if not base_url:
         base_url = await _effective_setting(s, "embedding_base_url")
     if not api_key or "****" in api_key:
@@ -469,14 +524,13 @@ async def test_embedding_api(body: TestEmbeddingIn, u=Depends(require_role("supe
         return {"ok": False, "message": "请先填写服务地址"}
     if not model:
         return {"ok": False, "message": "请先填写模型名"}
-    if not api_key:
-        return {"ok": False, "message": "请先填写 API Key"}
     t0 = time.perf_counter()
     try:
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
         async with httpx.AsyncClient(timeout=20) as c:
             r = await c.post(
                 f"{base_url}/embeddings",
-                headers={"Authorization": f"Bearer {api_key}"},
+                headers=headers,
                 json={"model": model, "input": ["连通性测试"]},
             )
     except Exception:
@@ -1134,6 +1188,301 @@ async def enable_rerank_profile(profile_id: str,
     await s.execute(update(RerankProfile).values(enabled=False))
     row.enabled = True
     await _sync_rerank_settings(s)
+    await s.commit()
+    return {"ok": True}
+
+
+# ==================== RAGFlow 知识库多配置（多环境切换，只能生效一条） ====================
+
+def _ragflow_to_dict(p: RagflowProfile, mask: bool = True) -> dict:
+    return {
+        "id": str(p.id),
+        "name": p.name,
+        "base_url": p.base_url,
+        "api_key": _mask_api_key(p.api_key) if mask else p.api_key,
+        "has_key": bool(p.api_key),
+        "enabled": p.enabled,
+        "created_at": p.created_at.isoformat() if p.created_at else None,
+    }
+
+
+async def _seed_ragflow_profiles(s: AsyncSession) -> None:
+    """一次性迁移：ragflow_profiles 表为空且旧版单值已配置时，建档并标记生效。"""
+    if (await s.execute(select(RagflowProfile).limit(1))).scalar_one_or_none() is not None:
+        return
+    base_url = await _effective_setting(s, "ragflow_base_url")
+    if not base_url:
+        return
+    s.add(RagflowProfile(
+        name="默认·旧配置迁移",
+        base_url=base_url.strip(),
+        api_key=await _effective_setting(s, "ragflow_api_key"),
+        enabled=True,
+    ))
+    await s.commit()
+
+
+async def _sync_ragflow_settings(s: AsyncSession) -> None:
+    """生效配置回写旧版单值 settings，ragflow_route / ragflow_client / 知识源同步链路保持兼容。
+
+    无生效配置时清空旧键：RAGFlow 检索/同步提示未配置。
+    """
+    row = (await s.execute(select(RagflowProfile).where(RagflowProfile.enabled == True))).scalar_one_or_none()  # noqa: E712
+    values = ([("ragflow_base_url", row.base_url), ("ragflow_api_key", row.api_key)] if row
+              else [("ragflow_base_url", ""), ("ragflow_api_key", "")])
+    for k, v in values:
+        setting = (await s.execute(select(Setting).where(Setting.key == k))).scalar_one_or_none()
+        if setting:
+            setting.value = v
+        else:
+            s.add(Setting(key=k, value=v, is_secret=(k == "ragflow_api_key")))
+
+
+class RagflowProfileIn(BaseModel):
+    name: str
+    base_url: str = ""
+    api_key: str = ""
+
+
+@router.get("/ragflow-profiles")
+async def list_ragflow_profiles(u=Depends(require_role("super_admin", "admin")),
+                                s: AsyncSession = Depends(get_session)):
+    await _seed_ragflow_profiles(s)
+    rows = (await s.execute(select(RagflowProfile).order_by(RagflowProfile.created_at))).scalars().all()
+    return [_ragflow_to_dict(r) for r in rows]
+
+
+@router.post("/ragflow-profiles")
+async def create_ragflow_profile(body: RagflowProfileIn,
+                                 u=Depends(require_role("super_admin", "admin")),
+                                 s: AsyncSession = Depends(get_session)):
+    if not body.name.strip():
+        raise HTTPException(400, "配置名称不能为空")
+    if not body.base_url.strip():
+        raise HTTPException(400, "服务地址不能为空")
+    if not body.api_key.strip() or "****" in body.api_key:
+        raise HTTPException(400, "API Key 不能为空（RAGFlow 接口均需 Bearer 认证）")
+    profile = RagflowProfile(
+        name=body.name.strip(),
+        base_url=body.base_url.strip(),
+        api_key=body.api_key.strip(),
+        enabled=False,
+    )
+    s.add(profile)
+    await s.commit()
+    await s.refresh(profile)
+    return _ragflow_to_dict(profile)
+
+
+@router.put("/ragflow-profiles/{profile_id}")
+async def update_ragflow_profile(profile_id: str, body: RagflowProfileIn,
+                                 u=Depends(require_role("super_admin", "admin")),
+                                 s: AsyncSession = Depends(get_session)):
+    pid = _safe_uuid(profile_id)
+    row = (await s.execute(select(RagflowProfile).where(RagflowProfile.id == pid))).scalar_one_or_none()
+    if not row:
+        raise HTTPException(404, "配置不存在")
+    if not body.name.strip():
+        raise HTTPException(400, "配置名称不能为空")
+    if not body.base_url.strip():
+        raise HTTPException(400, "服务地址不能为空")
+    row.name = body.name.strip()
+    row.base_url = body.base_url.strip()
+    # Key 语义：新值非掩码 → 覆盖；留空/掩码 → 保留原值
+    new_key = body.api_key.strip()
+    if new_key and "****" not in new_key:
+        row.api_key = new_key
+    if row.enabled:
+        await _sync_ragflow_settings(s)
+    await s.commit()
+    await s.refresh(row)
+    return _ragflow_to_dict(row)
+
+
+@router.delete("/ragflow-profiles/{profile_id}")
+async def delete_ragflow_profile(profile_id: str,
+                                 u=Depends(require_role("super_admin", "admin")),
+                                 s: AsyncSession = Depends(get_session)):
+    pid = _safe_uuid(profile_id)
+    row = (await s.execute(select(RagflowProfile).where(RagflowProfile.id == pid))).scalar_one_or_none()
+    if not row:
+        raise HTTPException(404, "配置不存在")
+    was_enabled = row.enabled
+    await s.delete(row)
+    await s.commit()
+    if was_enabled:
+        # 删除生效配置后自动切到最早一条，避免知识源同步突然失联
+        first = (await s.execute(select(RagflowProfile).order_by(RagflowProfile.created_at).limit(1))).scalar_one_or_none()
+        if first:
+            first.enabled = True
+        await _sync_ragflow_settings(s)
+        await s.commit()
+    return {"ok": True}
+
+
+@router.put("/ragflow-profiles/{profile_id}/enable")
+async def enable_ragflow_profile(profile_id: str,
+                                 u=Depends(require_role("super_admin", "admin")),
+                                 s: AsyncSession = Depends(get_session)):
+    """启用指定配置（切换环境），同时禁用其他所有配置。"""
+    pid = _safe_uuid(profile_id)
+    row = (await s.execute(select(RagflowProfile).where(RagflowProfile.id == pid))).scalar_one_or_none()
+    if not row:
+        raise HTTPException(404, "配置不存在")
+    await s.execute(update(RagflowProfile).values(enabled=False))
+    row.enabled = True
+    await _sync_ragflow_settings(s)
+    await s.commit()
+    return {"ok": True}
+
+
+# ==================== Embedding 向量模型多配置（多环境/多模型切换，只能生效一条） ====================
+
+def _embedding_to_dict(p: EmbeddingProfile, mask: bool = True) -> dict:
+    return {
+        "id": str(p.id),
+        "name": p.name,
+        "api_url": p.api_url,
+        "api_key": _mask_api_key(p.api_key) if mask else p.api_key,
+        "has_key": bool(p.api_key),
+        "model": p.model,
+        "enabled": p.enabled,
+        "created_at": p.created_at.isoformat() if p.created_at else None,
+    }
+
+
+async def _seed_embedding_profiles(s: AsyncSession) -> None:
+    """一次性迁移：embedding_profiles 表为空且旧版单值已配置时，建档并标记生效。"""
+    if (await s.execute(select(EmbeddingProfile).limit(1))).scalar_one_or_none() is not None:
+        return
+    api_url = await _effective_setting(s, "embedding_base_url")
+    if not api_url:
+        return
+    s.add(EmbeddingProfile(
+        name="默认·旧配置迁移",
+        api_url=api_url.strip(),
+        api_key=await _effective_setting(s, "embedding_api_key"),
+        model=await _effective_setting(s, "embedding_model"),
+        enabled=True,
+    ))
+    await s.commit()
+
+
+async def _sync_embedding_settings(s: AsyncSession) -> None:
+    """生效配置回写旧版单值 settings，kb_common.rag.embedder（本地 RAG 入库/检索）链路保持兼容。
+
+    无生效配置时清空旧键：本地 RAG 检索/入库提示未配置。
+    """
+    row = (await s.execute(select(EmbeddingProfile).where(EmbeddingProfile.enabled == True))).scalar_one_or_none()  # noqa: E712
+    values = ([("embedding_base_url", row.api_url), ("embedding_api_key", row.api_key), ("embedding_model", row.model)] if row
+              else [("embedding_base_url", ""), ("embedding_api_key", ""), ("embedding_model", "")])
+    for k, v in values:
+        setting = (await s.execute(select(Setting).where(Setting.key == k))).scalar_one_or_none()
+        if setting:
+            setting.value = v
+        else:
+            s.add(Setting(key=k, value=v, is_secret=(k == "embedding_api_key")))
+
+
+class EmbeddingProfileIn(BaseModel):
+    name: str
+    api_url: str = ""
+    api_key: str = ""
+    model: str = ""
+
+
+@router.get("/embedding-profiles")
+async def list_embedding_profiles(u=Depends(require_role("super_admin", "admin")),
+                                  s: AsyncSession = Depends(get_session)):
+    await _seed_embedding_profiles(s)
+    rows = (await s.execute(select(EmbeddingProfile).order_by(EmbeddingProfile.created_at))).scalars().all()
+    return [_embedding_to_dict(r) for r in rows]
+
+
+@router.post("/embedding-profiles")
+async def create_embedding_profile(body: EmbeddingProfileIn,
+                                   u=Depends(require_role("super_admin", "admin")),
+                                   s: AsyncSession = Depends(get_session)):
+    if not body.name.strip():
+        raise HTTPException(400, "配置名称不能为空")
+    if not body.api_url.strip():
+        raise HTTPException(400, "服务地址不能为空")
+    if not body.model.strip():
+        raise HTTPException(400, "模型名不能为空")
+    profile = EmbeddingProfile(
+        name=body.name.strip(),
+        api_url=body.api_url.strip(),
+        api_key=body.api_key.strip(),
+        model=body.model.strip(),
+        enabled=False,
+    )
+    s.add(profile)
+    await s.commit()
+    await s.refresh(profile)
+    return _embedding_to_dict(profile)
+
+
+@router.put("/embedding-profiles/{profile_id}")
+async def update_embedding_profile(profile_id: str, body: EmbeddingProfileIn,
+                                   u=Depends(require_role("super_admin", "admin")),
+                                   s: AsyncSession = Depends(get_session)):
+    pid = _safe_uuid(profile_id)
+    row = (await s.execute(select(EmbeddingProfile).where(EmbeddingProfile.id == pid))).scalar_one_or_none()
+    if not row:
+        raise HTTPException(404, "配置不存在")
+    if not body.name.strip():
+        raise HTTPException(400, "配置名称不能为空")
+    if not body.api_url.strip():
+        raise HTTPException(400, "服务地址不能为空")
+    if not body.model.strip():
+        raise HTTPException(400, "模型名不能为空")
+    row.name = body.name.strip()
+    row.api_url = body.api_url.strip()
+    row.model = body.model.strip()
+    # Key 语义：新值非掩码 → 覆盖；留空/掩码 → 保留原值（内网免鉴权服务可无 Key）
+    new_key = body.api_key.strip()
+    if new_key and "****" not in new_key:
+        row.api_key = new_key
+    if row.enabled:
+        await _sync_embedding_settings(s)
+    await s.commit()
+    await s.refresh(row)
+    return _embedding_to_dict(row)
+
+
+@router.delete("/embedding-profiles/{profile_id}")
+async def delete_embedding_profile(profile_id: str,
+                                   u=Depends(require_role("super_admin", "admin")),
+                                   s: AsyncSession = Depends(get_session)):
+    pid = _safe_uuid(profile_id)
+    row = (await s.execute(select(EmbeddingProfile).where(EmbeddingProfile.id == pid))).scalar_one_or_none()
+    if not row:
+        raise HTTPException(404, "配置不存在")
+    was_enabled = row.enabled
+    await s.delete(row)
+    await s.commit()
+    if was_enabled:
+        # 删除生效配置后自动切到最早一条，避免本地 RAG 检索突然失联
+        first = (await s.execute(select(EmbeddingProfile).order_by(EmbeddingProfile.created_at).limit(1))).scalar_one_or_none()
+        if first:
+            first.enabled = True
+        await _sync_embedding_settings(s)
+        await s.commit()
+    return {"ok": True}
+
+
+@router.put("/embedding-profiles/{profile_id}/enable")
+async def enable_embedding_profile(profile_id: str,
+                                   u=Depends(require_role("super_admin", "admin")),
+                                   s: AsyncSession = Depends(get_session)):
+    """启用指定配置（切换环境/模型），同时禁用其他所有配置。"""
+    pid = _safe_uuid(profile_id)
+    row = (await s.execute(select(EmbeddingProfile).where(EmbeddingProfile.id == pid))).scalar_one_or_none()
+    if not row:
+        raise HTTPException(404, "配置不存在")
+    await s.execute(update(EmbeddingProfile).values(enabled=False))
+    row.enabled = True
+    await _sync_embedding_settings(s)
     await s.commit()
     return {"ok": True}
 

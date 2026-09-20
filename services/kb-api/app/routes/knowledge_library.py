@@ -5,6 +5,7 @@
 检索时按 platform 由抽象层（dify/ragflow 客户端）决定各自检索策略。
 """
 from datetime import datetime
+from uuid import UUID
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -28,6 +29,7 @@ class KnowledgeLibraryOut(BaseModel):
     dataset_id: str
     description: str
     enabled: bool
+    library_type: str
     updated_at: datetime
 
     class Config:
@@ -108,6 +110,8 @@ async def update_knowledge_library(
     if lib is None:
         raise HTTPException(404, "知识库不存在")
     data = payload.model_dump(exclude_unset=True)
+    if lib.library_type == "document" and set(data) - {"enabled"}:
+        raise HTTPException(409, "项目文档库的名称和设置请通过文档库设置接口修改")
     if "name" in data:
         if not (data["name"] or "").strip():
             raise HTTPException(422, "知识库名称不能为空")
@@ -130,6 +134,8 @@ async def delete_knowledge_library(
     lib = await s.get(KnowledgeLibrary, library_id)
     if lib is None:
         raise HTTPException(404, "知识库不存在")
+    if lib.library_type == "document":
+        raise HTTPException(409, "项目文档库请先停用并导出归档，不能通过外部镜像接口移除")
     await s.delete(lib)
     await s.commit()
     return {"ok": True}
@@ -145,7 +151,10 @@ class RetrievalTestIn(BaseModel):
     mode: Literal["hybrid", "vector", "fulltext"] = "hybrid"
     # 混合检索 + Rerank 子策略时的 RAGFlow rerank 模型名（如 bge--reranker-v2–m3）
     rerank_id: str | None = Field(default=None, max_length=200)
-    # 以下三项仅对 RagFlow 生效（与其自带检索测试参数对齐，便于断层排查）
+    document_ids: list[str] = Field(default_factory=list, max_length=100)
+    rerank: bool = False
+    rerank_model_id: UUID | None = None
+    # 阈值作用于最终分数；向量权重作用于本地和 RAGFlow 的混合检索。
     similarity_threshold: float | None = Field(default=None, ge=0, le=1)
     vector_similarity_weight: float | None = Field(default=None, ge=0, le=1)
 
@@ -159,11 +168,17 @@ async def _eff_setting(s: AsyncSession, key: str) -> str:
     return (row.value if row else None) or getattr(get_settings(), key, "") or ""
 
 
+async def _search_document_library(s: AsyncSession, lib, query: str, top_k: int,
+                                    mode: str = "hybrid", **options) -> list[dict]:
+    from app.services.library_retrieval import search
+    return await search(s, lib, query, top_k, mode, **options)
+
+
 @router.post("/retrieval-test", dependencies=[Depends(require_role("super_admin", "admin"))])
 async def retrieval_test(body: RetrievalTestIn,
                          u=Depends(get_current_user),
                          s: AsyncSession = Depends(get_session)):
-    """检索测试：按知识库抽象层逐库执行与智能问答一致的底层检索。
+    """检索测试：本地文档库执行 RAGFlow NLP 检索核，外部库调用各自引擎。
 
     用于排查「引擎自带检索能搜到、智能问答检索不到」的断层：逐库返回
     ok/失败原因（如 RAGFlow code 102 无权数据集）与命中分段，
@@ -208,16 +223,39 @@ async def retrieval_test(body: RetrievalTestIn,
                  "dataset_id": lib.dataset_id, "enabled": lib.enabled,
                  "ok": False, "count": 0, "error": ""}
         try:
-            if lib.platform == "ragflow":
+            if lib.library_type == "document":
+                # 项目文档库：真实向量与词项评分，过滤后排序、父段去重。
+                lib_hits = await _search_document_library(
+                    s, lib, body.query, body.top_k, body.mode,
+                    document_ids=[str(d) for d in body.document_ids],
+                    threshold=body.similarity_threshold or 0.0,
+                    vector_weight=body.vector_similarity_weight if body.vector_similarity_weight is not None else 0.7,
+                    rerank=body.rerank,
+                    rerank_model_id=str(body.rerank_model_id) if body.rerank_model_id else None)
+            elif lib.platform == "ragflow":
                 r = await ragflow_client.retrieve_with_report(
-                    [lib.dataset_id], body.query, top_k=body.top_k,
-                    similarity_threshold=body.similarity_threshold,
+                    [lib.dataset_id], body.query, top_k=max(100, body.top_k * 5) if body.rerank else body.top_k,
+                    similarity_threshold=0 if body.rerank else body.similarity_threshold,
                     vector_similarity_weight=ragflow_weight,
-                    rerank_id=ragflow_rerank)
+                    rerank_id=ragflow_rerank or "",
+                    document_ids=[str(d) for d in body.document_ids])
+                if r.get("skipped"):
+                    raise ValueError(r["skipped"][0]["error"])
                 lib_hits = r["hits"]
             else:
-                lib_hits = await dify_client.retrieve([lib.dataset_id], body.query, top_k=body.top_k,
-                                                      search_method=dify_method)
+                lib_hits = await dify_client.retrieve([lib.dataset_id], body.query, top_k=max(100, body.top_k * 5) if body.rerank else body.top_k,
+                                                      search_method=dify_method, rerank=False, score_threshold=0)
+            if lib.library_type != "document":
+                if body.document_ids and lib.platform != "ragflow":
+                    raise ValueError("该外部引擎暂不支持文档范围检索")
+                if body.rerank and lib_hits:
+                    from app.services.library_retrieval import rerank_hits
+                    for hit in lib_hits:
+                        hit['matched_content'] = hit['content']
+                    await rerank_hits(s, body.query, lib_hits,
+                                      str(body.rerank_model_id) if body.rerank_model_id else None)
+                lib_hits = sorted((h for h in lib_hits if h['score'] >= (body.similarity_threshold or 0)),
+                                  key=lambda h: h['score'], reverse=True)[:body.top_k]
             for h in lib_hits:
                 hits.append({**h, "library_id": lib.id, "library_name": lib.name})
             entry["ok"] = True
@@ -227,6 +265,7 @@ async def retrieval_test(body: RetrievalTestIn,
         lib_report.append(entry)
 
     hits.sort(key=lambda x: x.get("score") or 0.0, reverse=True)
+    hits = hits[:body.top_k]
     return {
         "query": body.query,
         "top_k": body.top_k,

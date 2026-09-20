@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { useTabsStore } from '@/stores/tabs'
+import { useAppStore } from '@/stores/app'
 import { useRoute, useRouter } from 'vue-router'
-import { Close } from '@element-plus/icons-vue'
+import { Close, Expand, Fold } from '@element-plus/icons-vue'
 import { ref, onMounted, onUnmounted } from 'vue'
 
 const tabsStore = useTabsStore()
+const appStore = useAppStore()
 const route = useRoute()
 const router = useRouter()
 
@@ -72,6 +74,11 @@ onUnmounted(() => {
 
 <template>
   <div class="tab-bar">
+    <!-- 侧边栏折叠按钮（原顶栏功能，顶栏移除后迁至此处） -->
+    <el-icon class="collapse-btn" size="18" role="button" aria-label="收起或展开侧边栏" @click="appStore.toggleSidebar()">
+      <Fold v-if="!appStore.sidebarCollapsed" />
+      <Expand v-else />
+    </el-icon>
     <div class="tab-list">
       <div
         v-for="tab in tabsStore.tabs"
@@ -113,6 +120,14 @@ onUnmounted(() => {
   padding: 0 8px;
   flex-shrink: 0;
   user-select: none;
+  gap: 10px;
+}
+
+.collapse-btn {
+  align-self: center;
+  cursor: pointer;
+  flex-shrink: 0;
+  color: #606266;
 }
 
 .tab-list {

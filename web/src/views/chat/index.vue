@@ -132,13 +132,11 @@ let abortCurrent: (() => void) | null = null
 
 // 按平台分组（DIFY / RagFlow）；空分组不展示
 const kbGroups = computed(() => {
-  const defs: Array<{ engine: string; label: string; platform: KnowledgeLibrary['platform'] }> = [
-    { engine: 'dify', label: 'DIFY 知识库', platform: 'dify' },
-    { engine: 'ragflow', label: 'RagFlow 知识库', platform: 'ragflow' },
-  ]
-  return defs
-    .map((d) => ({ ...d, items: kbSources.value.filter((s) => s.platform === d.platform) }))
-    .filter((g) => g.items.length > 0)
+  return [
+    { engine: 'document', label: '文档库', items: kbSources.value.filter(s => s.library_type === 'document') },
+    { engine: 'dify', label: 'DIFY库', items: kbSources.value.filter(s => s.library_type !== 'document' && s.platform === 'dify') },
+    { engine: 'ragflow', label: 'RAGFLOW库', items: kbSources.value.filter(s => s.library_type !== 'document' && s.platform === 'ragflow') },
+  ].filter(g => g.items.length > 0)
 })
 
 // 全选 / 半选状态（跨全部已登记检索库）

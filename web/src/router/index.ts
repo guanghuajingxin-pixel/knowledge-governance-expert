@@ -29,6 +29,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '智能问答', icon: 'ChatLineRound', group: 'feature' },
       },
       {
+        path: 'deap-agent',
+        name: 'DeapAgent',
+        component: () => import('@/views/deap-agent/index.vue'),
+        meta: { title: 'DEAP智能问答', icon: 'Monitor', group: 'feature' },
+      },
+      {
         path: 'hiagent',
         name: 'HiAgent',
         component: () => import('@/views/embed-agent/index.vue'),
@@ -92,11 +98,32 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '脱敏策略', icon: 'Hide', group: 'feature', parent: '/apply', menuOrder: 1, roles: ['super_admin', 'admin'] },
       },
       {
-        // 知识库：检索抽象层镜像（RAGFlow / DIFY），仅供智能体检索选库，不支持导入解析
+        // 知识库：项目文档库 / 问答库 / DIFY 外部库 / RAGFLOW 外部库
         path: 'apply/knowledge-libraries',
         name: 'KnowledgeLibraries',
         component: () => import('@/views/knowledge-libraries/index.vue'),
         meta: { title: '知识库', icon: 'Collection', group: 'feature', parent: '/apply', menuOrder: 2, roles: ['super_admin', 'admin', 'editor'] },
+      },
+      {
+        // 文档分段详情：文档库内点击文件名进入，门户页签独立打开
+        path: 'apply/knowledge-libraries/:libId/documents/:docId',
+        name: 'LibraryDocumentSegments',
+        component: () => import('@/views/knowledge-libraries/DocumentSegments.vue'),
+        meta: { title: '分段详情', hidden: true, roles: ['super_admin', 'admin', 'editor'] },
+      },
+      {
+        // 检索测试（知识库级）：门户页签独立打开
+        path: 'apply/knowledge-libraries/:libId/retrieval-test',
+        name: 'LibraryRetrievalTest',
+        component: () => import('@/views/knowledge-libraries/RetrievalTestPage.vue'),
+        meta: { title: '检索测试', hidden: true, roles: ['super_admin', 'admin', 'editor'] },
+      },
+      {
+        // 检索测试（文档级）：门户页签独立打开
+        path: 'apply/knowledge-libraries/:libId/documents/:docId/retrieval-test',
+        name: 'DocumentRetrievalTest',
+        component: () => import('@/views/knowledge-libraries/RetrievalTestPage.vue'),
+        meta: { title: '检索测试', hidden: true, roles: ['super_admin', 'admin', 'editor'] },
       },
       {
         path: 'operate',

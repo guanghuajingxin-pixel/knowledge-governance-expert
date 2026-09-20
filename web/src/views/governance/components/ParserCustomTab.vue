@@ -18,7 +18,7 @@
  * 故全部请求经 kb-api 同源代理 /api/v1/mineru/*，目标地址由 X-Mineru-Base 头指定。
  * 作为子组件被 ProcessEngine.vue（页签外壳）引用；页签二为 MinerU 官方 WebUI（iframe）。
  */
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox, type UploadInstance } from 'element-plus'
 import { marked } from 'marked'
 import request from '@/api/request'
@@ -28,6 +28,7 @@ import {
   DocumentCopy,
   Download,
   Refresh,
+  Search,
   Upload,
   UploadFilled,
 } from '@element-plus/icons-vue'
@@ -149,6 +150,9 @@ function saveConfig() {
     /* 存储失败不影响使用 */
   }
 }
+
+// Base URL 变更即时持久化：页签外壳的【OpenAPI】入口读取同一份配置，需保持最新
+watch(() => config.baseUrl, saveConfig)
 
 const normalizedBase = computed(() => config.baseUrl.trim().replace(/\/+$/, ''))
 
@@ -409,6 +413,7 @@ async function submitParse() {
     })
     startPoll(d.job_id)
     setBanner('success', `已提交任务，共 ${fileIds.length} 个文件，进入解析队列`)
+    activeInnerTab.value = 'queue' // 提交后自动切到队列页签跟踪进度
     clearFiles()
   } catch (e) {
     setBanner('error', `提交失败：${errText(e)}`)
@@ -436,6 +441,56 @@ const queueStats = computed(() => {
     failed: rows.filter((j) => j.status === 'failed' || j.status === 'canceled').length,
   }
 })
+
+/** 内部页签：解析测试 / 解析队列 */
+const activeInnerTab = ref<'test' | 'queue'>('test')
+
+/** 队列筛选：状态 + 文档名称 / 任务 ID 关键字 */
+const queueFilter = reactive({ status: '' as string, keyword: '' })
+
+/** 任务内全部文档名（多文件顿号连接，供筛选与列显示） */
+function jobFileNames(j: QueueJob): string {
+  return (j.files || []).map((f) => f.name).filter(Boolean).join('，')
+}
+
+const EXT_TYPE: Record<string, string> = {
+  pdf: 'PDF', png: 'PNG', jpg: 'JPG', jpeg: 'JPG', jpe: 'JPG',
+  doc: 'DOC', docx: 'DOCX', xls: 'XLS', xlsx: 'XLSX', ppt: 'PPT', pptx: 'PPTX',
+  html: 'HTML', htm: 'HTML', txt: 'TXT', md: 'MD', csv: 'CSV',
+}
+
+/** 文档类型（扩展名映射，多文件去重） */
+function jobFileTypes(j: QueueJob): string[] {
+  const s = new Set<string>()
+  for (const f of j.files || []) {
+    const m = /\.([a-z0-9]+)$/i.exec(f.name || '')
+    if (m) s.add(EXT_TYPE[m[1].toLowerCase()] || m[1].toUpperCase())
+  }
+  return Array.from(s)
+}
+
+/** 任务内各文档的产物文件 ID（markdown 优先；GET /v1/files/{id}/content 可下载。
+ *  注：MinerU 无鉴权模式下源文件禁止下载（403），仅产物可下载） */
+function jobFileIds(j: QueueJob): Array<{ id: string; name: string }> {
+  return (j.files || [])
+    .map((f) => ({
+      id: f.output_files?.markdown?.file_id || f.output_files?.middle_json?.file_id || '',
+      name: f.name || '',
+    }))
+    .filter((x) => x.id)
+}
+
+const filteredQueue = computed(() =>
+  jobRows.value.filter((j) => {
+    if (queueFilter.status && j.status !== queueFilter.status) return false
+    const kw = queueFilter.keyword.trim().toLowerCase()
+    if (kw) {
+      const hay = `${jobFileNames(j)} ${j.job_id}`.toLowerCase()
+      if (!hay.includes(kw)) return false
+    }
+    return true
+  }),
+)
 
 function isTerminal(st: string): boolean {
   return st === 'completed' || st === 'partial' || st === 'failed' || st === 'canceled'
@@ -494,7 +549,7 @@ async function pollJob(id: string) {
   }
 }
 
-/** 从服务端拉取最近任务列表（合并进本地视图，仅列表级信息） */
+/** 从服务端拉取最近任务列表（合并进本地视图；已结束任务补拉详情以显示文档名称/类型） */
 async function syncServerJobs(silent = false) {
   if (!normalizedBase.value) {
     if (!silent) setBanner('warning', '请先配置 MinerU 服务地址')
@@ -503,18 +558,38 @@ async function syncServerJobs(silent = false) {
   try {
     const d = await api<{ data?: JobListItem[] } | JobListItem[]>('/v1/parse/jobs')
     const list = Array.isArray(d) ? d : d?.data || []
+    const needDetail: QueueJob[] = []
     list.forEach((it) => {
       if (!jobs.value.has(it.job_id)) {
-        addJob({
+        const j: QueueJob = {
           job_id: it.job_id,
           status: it.status,
           created_at: it.created_at,
           file_count: it.file_count,
           contents: {},
-        })
-        if (!isTerminal(it.status)) startPoll(it.job_id)
+        }
+        addJob(j)
+        if (!isTerminal(it.status)) {
+          startPoll(it.job_id) // 轮询首轮即拉详情
+        } else {
+          needDetail.push(j) // 列表接口无 files，补拉一次详情
+        }
       }
     })
+    // 已结束任务批量拉详情（6 并发一批，单个失败不影响列表）
+    for (let i = 0; i < needDetail.length; i += 6) {
+      await Promise.all(
+        needDetail.slice(i, i + 6).map(async (j) => {
+          try {
+            const det = await api<JobAsyncResponse>(`/v1/parse/jobs/${encodeURIComponent(j.job_id)}`)
+            Object.assign(j, { status: det.status, tier: det.tier, files: det.files, progress: det.progress })
+          } catch {
+            /* 详情拉取失败：文档名称/类型列显示占位 */
+          }
+        }),
+      )
+    }
+    if (needDetail.length) jobs.value = new Map(jobs.value)
     if (!silent) ElMessage.success(`已从服务端合并 ${list.length} 条任务`)
   } catch (e) {
     if (!silent) {
@@ -672,6 +747,7 @@ async function ensureContents(j: QueueJob, fileIdx: number) {
 async function openResult(id: string) {
   const j = jobs.value.get(id)
   if (!j) return
+  activeInnerTab.value = 'test' // 结果区在解析测试页签，点查看自动切回
   currentJobId.value = id
   currentFileIdx.value = 0
   // 列表合并的任务没有 files 详情，先拉一次详情
@@ -881,13 +957,15 @@ onBeforeUnmount(() => {
       />
     </el-card>
 
+    <el-tabs v-model="activeInnerTab" class="inner-tabs">
+      <el-tab-pane label="解析测试" name="test">
     <el-row :gutter="16" class="main-row">
       <!-- 左列：上传 + 参数 -->
       <el-col :xs="24" :sm="24" :md="10" :lg="9" :xl="8">
         <el-card shadow="never" class="section-card">
           <template #header>
             <div class="card-header">
-              <span>1 · 文件上传</span>
+              <span>文件上传</span>
               <span class="hint">PDF / PNG / JPG · 单文件 ≤ {{ MAX_FILE_MB }} MB · 可多选</span>
             </div>
           </template>
@@ -978,7 +1056,7 @@ onBeforeUnmount(() => {
         <el-card shadow="never" class="section-card result-card">
           <template #header>
             <div class="card-header">
-              <span>2 · 解析结果</span>
+              <span>解析结果</span>
               <span class="muted small">{{ resultMetaText }}</span>
             </div>
           </template>
@@ -1036,87 +1114,142 @@ onBeforeUnmount(() => {
         </el-card>
       </el-col>
     </el-row>
+      </el-tab-pane>
 
-    <!-- 全宽：任务队列 -->
-    <el-card shadow="never" class="section-card queue-card">
-      <template #header>
-        <div class="card-header">
-          <span>3 · 解析队列</span>
-          <div class="header-actions">
-            <el-tag size="small" type="info" effect="plain">
-              共 {{ queueStats.total }} · 进行 {{ queueStats.running }} · 完成 {{ queueStats.completed }} · 失败 {{ queueStats.failed }}
-            </el-tag>
-            <el-button link type="primary" size="small" :icon="Refresh" @click="syncServerJobs(false)">
-              从服务端拉取
-            </el-button>
-          </div>
+      <!-- 页签二：解析队列（筛选 + 全量任务表） -->
+      <el-tab-pane label="解析队列" name="queue">
+        <div class="queue-toolbar">
+          <el-select v-model="queueFilter.status" clearable placeholder="全部状态" style="width: 132px">
+            <el-option v-for="(text, st) in STATUS_TEXT" :key="st" :label="text" :value="st" />
+          </el-select>
+          <el-input
+            v-model="queueFilter.keyword"
+            clearable
+            placeholder="按文档名称 / 任务 ID 筛选"
+            :prefix-icon="Search"
+            style="width: 240px"
+          />
+          <el-tag size="small" type="info" effect="plain">
+            共 {{ queueStats.total }} · 进行 {{ queueStats.running }} · 完成 {{ queueStats.completed }} · 失败 {{ queueStats.failed }}
+          </el-tag>
+          <span class="muted small">{{ filteredQueue.length }} / {{ jobRows.length }} 条</span>
+          <span class="toolbar-spacer" />
+          <el-button link type="primary" size="small" :icon="Refresh" @click="syncServerJobs(false)">
+            从服务端拉取
+          </el-button>
         </div>
-      </template>
 
-      <el-table
-        :data="jobRows"
-        size="small"
-        empty-text="队列为空：上传文件提交解析任务"
-        max-height="380"
-      >
-        <el-table-column label="任务" min-width="280" show-overflow-tooltip>
-          <template #default="{ row }">
-            <div class="mono small">{{ shortId(row.job_id) }}</div>
-            <div class="muted small">{{ fmtTime(row.created_at) }}</div>
-          </template>
-        </el-table-column>
-        <el-table-column label="文件数" width="80" align="center">
-          <template #default="{ row }">
-            <span class="small">{{ row.file_count }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="档位" width="100">
-          <template #default="{ row }">
-            <span class="small muted">{{ row.tier || '默认' }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="状态" width="110">
-          <template #default="{ row }">
-            <el-tag :type="statusTagType(row.status)" size="small" effect="light">
-              {{ statusText(row.status) }}
-            </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="进度" width="160">
-          <template #default="{ row }">
-            <el-progress
-              :percentage="progressPct(row as QueueJob)"
-              :stroke-width="8"
-              :status="row.status === 'failed' || row.status === 'canceled' ? 'exception' : row.status === 'completed' ? 'success' : undefined"
-            />
-          </template>
-        </el-table-column>
-        <el-table-column label="耗时" width="90">
-          <template #default="{ row }">
-            <span class="small muted">{{ isTerminal(row.status) ? jobDuration(row as QueueJob) : '—' }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="操作" width="170" fixed="right">
-          <template #default="{ row }">
-            <el-button
-              link
-              type="primary"
-              size="small"
-              :disabled="!isTerminal(row.status)"
-              @click="openResult(row.job_id)"
-            >查看</el-button>
-            <el-button
-              v-if="row.status === 'queued' || row.status === 'running'"
-              link
-              type="warning"
-              size="small"
-              @click="handleCancelJob(row.job_id)"
-            >取消</el-button>
-            <el-button link type="danger" size="small" @click="handleRemoveJob(row.job_id)">移除</el-button>
-          </template>
-        </el-table-column>
-      </el-table>
-    </el-card>
+        <el-table
+          :data="filteredQueue"
+          size="small"
+          :empty-text="jobRows.length ? '无匹配任务：调整筛选条件' : '队列为空：到「解析测试」上传文件提交任务'"
+          max-height="520"
+        >
+          <el-table-column label="任务" width="225">
+            <template #default="{ row }">
+              <div class="mono small">{{ shortId(row.job_id) }}</div>
+              <div class="muted small">{{ fmtTime(row.created_at) }}</div>
+            </template>
+          </el-table-column>
+          <el-table-column label="文档名称" min-width="200">
+            <template #default="{ row }">
+              <span
+                v-if="jobFileNames(row as QueueJob)"
+                class="small doc-name"
+                :title="jobFileNames(row as QueueJob)"
+              >{{ jobFileNames(row as QueueJob) }}</span>
+              <span v-else class="muted small">{{ row.file_count }} 个文件（详情未加载）</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="产物ID" width="165">
+            <template #default="{ row }">
+              <template v-if="jobFileIds(row as QueueJob).length">
+                <div
+                  v-for="f in jobFileIds(row as QueueJob)"
+                  :key="f.id"
+                  class="file-id-row"
+                  :title="`${f.name}\nGET /v1/files/${f.id}/content（markdown 产物）`"
+                >
+                  <span class="mono small">{{ shortId(f.id) }}</span>
+                  <el-button
+                    link
+                    size="small"
+                    :icon="DocumentCopy"
+                    :aria-label="`复制 ${f.name} 的产物文件ID`"
+                    @click="copyText(f.id, '产物文件 ID 已复制：GET /v1/files/{id}/content 可下载')"
+                  />
+                </div>
+              </template>
+              <span v-else class="muted small">—</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="类型" width="90" align="center">
+            <template #default="{ row }">
+              <template v-if="jobFileTypes(row as QueueJob).length">
+                <el-tag
+                  v-for="t in jobFileTypes(row as QueueJob)"
+                  :key="t"
+                  size="small"
+                  effect="plain"
+                  class="type-tag"
+                >{{ t }}</el-tag>
+              </template>
+              <span v-else class="muted small">—</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="文件数" width="80" align="center">
+            <template #default="{ row }">
+              <span class="small">{{ row.file_count }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="档位" width="100">
+            <template #default="{ row }">
+              <span class="small muted">{{ row.tier || '默认' }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="状态" width="110">
+            <template #default="{ row }">
+              <el-tag :type="statusTagType(row.status)" size="small" effect="light">
+                {{ statusText(row.status) }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="进度" width="160">
+            <template #default="{ row }">
+              <el-progress
+                :percentage="progressPct(row as QueueJob)"
+                :stroke-width="8"
+                :status="row.status === 'failed' || row.status === 'canceled' ? 'exception' : row.status === 'completed' ? 'success' : undefined"
+              />
+            </template>
+          </el-table-column>
+          <el-table-column label="耗时" width="90">
+            <template #default="{ row }">
+              <span class="small muted">{{ isTerminal(row.status) ? jobDuration(row as QueueJob) : '—' }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="170" fixed="right">
+            <template #default="{ row }">
+              <el-button
+                link
+                type="primary"
+                size="small"
+                :disabled="!isTerminal(row.status)"
+                @click="openResult(row.job_id)"
+              >查看</el-button>
+              <el-button
+                v-if="row.status === 'queued' || row.status === 'running'"
+                link
+                type="warning"
+                size="small"
+                @click="handleCancelJob(row.job_id)"
+              >取消</el-button>
+              <el-button link type="danger" size="small" @click="handleRemoveJob(row.job_id)">移除</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+      </el-tab-pane>
+    </el-tabs>
   </div>
 </template>
 
@@ -1159,6 +1292,33 @@ onBeforeUnmount(() => {
 
 /* ===== 通用区块 ===== */
 .main-row { margin-bottom: 0; }
+
+/* 内部页签：解析测试 / 解析队列 */
+.inner-tabs :deep(.el-tabs__header) { margin-bottom: 14px; }
+
+/* 队列页签工具行：筛选 + 统计 + 拉取 */
+.queue-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.queue-toolbar .toolbar-spacer { flex: 1; }
+.type-tag + .type-tag { margin-left: 4px; }
+.doc-name { color: #2c3e50; }
+
+/* 文件ID 行：截断 ID + 复制按钮 同行 */
+.file-id-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.file-id-row .mono {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .section-card {
   margin-bottom: 14px;
   border-radius: 10px;
@@ -1370,5 +1530,4 @@ onBeforeUnmount(() => {
 .json-view :deep(.j-null) { color: #909399; }
 
 /* ===== 队列表格 ===== */
-.queue-card { margin-bottom: 0; }
 </style>

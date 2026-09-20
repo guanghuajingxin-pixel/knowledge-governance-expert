@@ -4,6 +4,8 @@
 
 ## 架构
 
+> 完整的分层架构图、进程交互视图、关键链路时序图、数据架构与架构决策说明见 [docs/architecture.md](docs/architecture.md)（与代码实际实现同步维护）。
+
 ```
                      ┌─────────────────────────────────────────┐
    Web (Vue3)        │  本地原生进程（开发模式）                │
@@ -81,6 +83,8 @@
 - **运行中可中断（停止按钮 + 后端真正停止 Agent）**：回答进行中发送按钮变为深色实心方块（停止按钮），点击即中断；中断后按钮恢复发送态，末条 AI 消息标记「⏹ 已中断 · {model}」（无正文时补「（已中断本次回答）」）。中断采用**双保险**：前端除 `abort` 断开 SSE 外，额外 `POST /api/v1/search/chat/cancel`（[chat.ts](web/src/api/chat.ts) `cancelChat`），kb-api 按同一规则拼 `thread_id` 调 sidecar `POST /v1/chat/cancel`（[deerflow_runner.py](services/kb-api/app/services/agent/deerflow_runner.py) `cancel_deerflow_stream`），确保取消信号确定性到达、不依赖断连检测时机。后端确定性停止：① [exploration_timeout_middleware.py](services/deerflow/backend/packages/harness/deerflow/agents/middlewares/exploration_timeout_middleware.py) 的 `cancelled` 标志在每个模型节点边界由 `wrap_model_call` 短路（**不再调用模型、不耗 token**），`_due_action` 中 cancelled 优先级最高；② sidecar 收到取消后在**驱动 agent 的同一线程** `gen.close()` 注入 `GeneratorExit`，关闭同步图迭代器，中断进行中的模型流并释放资源。sidecar `/v1/chat/stream` 用**专属 worker 线程 + `asyncio.Queue` 泵**驱动**同步** `agent.stream()`（DeerFlow harness 用同步 `SqliteSaver`，不支持 `astream`/`AsyncSqliteSaver`）：worker 线程在 loop 外迭代同步生成器、把帧 `call_soon_threadsafe` 入队，async 泵端出帧下发；泵每 0.2s 轮询 `is_cancelled(thread_id) or request.is_disconnected()`，使取消发生在「等帧间隙」（无帧可触发）或**纯断连**（不调 cancel 直接关页/杀连接）时也能被检测并停图。`gen.close()` 始终在同一 worker 线程的 finally 中执行，保证 checkpointer 串行锁必被释放（多会话并发后 `_stream_lock` 退化为 `_NullLock`，sqlite 串行由 `_serialize_checkpointer` 的方法级 RLock 承担，见「多会话并行问答」）——中断后立即发新问答不卡锁、不回退内置工作流。sidecar 下发 `{"type":"cancelled"}` 帧，runner 收到即 `return`（跳过追问生成/`final`），kb-api `_gen` 的 finally 兜底再 cancel 一次（正常结束为 no-op）。注意 anyio 的 `CancelScope` 是**同步**上下文管理器，收尾时必须用 `with anyio.CancelScope(shield=True):`（`async with` 会抛 `TypeError` 导致 close 不执行、图被遗弃在后台继续跑空转耗 token）。同步工具（`@tool` 知识库/钉钉检索，httpx 同步、在 executor 线程跑）无法即时取消但会自然结束且不再驱动图；模型调用是 async httpx（token 消耗源），由中间件短路 + close 迭代器在「下一个图事件」粒度（通常 1～数秒）停止。
 
 **HiAgent 智能问答（外链嵌入）**：侧边栏「HiAgent智能问答」页通过火山引擎 HiAgent WebSDK（`embedFull.js`）以 iframe 方式内嵌官方智能体对话界面，见 [hiagent/index.vue](web/src/views/hiagent/index.vue)。SDK 以初始化内联脚本的父节点作为挂载容器，前端在 `onMounted` 时把 SDK 脚本与 init 脚本动态注入页面宿主 div，离开页面时清理 iframe；appKey/baseUrl 常量定义在该视图文件顶部。
+
+**钉钉 DEAP 智能问答（外链嵌入）**：侧边栏「DEAP智能问答」页（位于「智能问答」下方）以 iframe 直接嵌入钉钉 DEAP 平台发布的智能体 H5。**嵌入链接在「智能体配置 → DEAP智能问答」页签维护**（粘贴发布后的 H5 链接，与 HiAgent / Dify 嵌入配置同结构，存 settings 表 `agent_config.external_agents.deap`，见 [deap-agent/index.vue](web/src/views/deap-agent/index.vue)；未配置时回退内置默认链接）。**需钉钉登录态**：未登录时 DEAP 会 302 到钉钉 OAuth（`login.dingtalk.com`），部分浏览器会在 iframe 内拦截跳转/扫码，页面工具栏提供「在钉钉中打开 ↗」按钮新页签打开完成登录。显隐由「系统配置 → 菜单配置」开关控制。
 
 **菜单显示配置**：「系统配置 → 菜单配置」以列表形式管理侧边栏「功能区」全部菜单的显示/隐藏（开关即存，整体覆盖式更新）。「智能问答」为默认首页固定显示。存储：settings 表 `menu_visibility`（JSON `{"hidden":[路径]}`），接口 `GET/PUT /api/v1/settings/menu-visibility`（GET 所有登录用户可读、PUT 管理员），见 [settings_route.py](services/kb-api/app/routes/settings_route.py) 与 [model.vue](web/src/views/governance/model.vue)「菜单配置」Tab；[Sidebar.vue](web/src/components/layout/Sidebar.vue) 加载配置过滤功能区菜单（含二级子菜单），读取失败或未配置时默认全部显示，隐藏仅作用于导航（路由仍可直接访问）。
 
@@ -314,6 +318,8 @@ KB_API_INTERNAL_URL=http://kb-api:8000
 | 检索报「未配置外接向量模型」 | 本地 RAG 检索/入库需在 `.env` 配 `EMBEDDING_BASE_URL` / `EMBEDDING_API_KEY` / `EMBEDDING_MODEL`（OpenAI 兼容端点，维度须与既有 ES 索引一致）；Dify/RAGFlow 知识库检索不受影响 |
 | 问答提示「尚未配置 LLM API Key」 | 智能问答依赖 LLM；在「系统配置 → 接入配置」填 LLM API Key 并保存，或在 `.env` 配 `LLM_API_KEY`。Agent 未配置时返回 `config_error=llm_not_configured`（不再 500），前端在对话气泡给出跳转按钮 |
 | Rerank 重排配置与切换 | 「系统配置 → 接入配置 → Rerank 重排模型」支持**多条配置 + 单选生效**：`+ 新增重排配置` 弹窗填写服务地址（含完整 `/rerank` 路径）/模型名，API Key **非必填**（内网/自建服务如 Xinference 常免鉴权，测试连通性不再强制 Key）；编辑时 Key 留空保持不变。点行首 radio 切换生效（同名「生效中」标记），生效配置自动回写 `rerank_api_url` / `rerank_api_key` / `rerank_model` 运行值；删除生效配置时自动回退到最早一条，全部删除则清空（检索跳过重排，RRF/BM25 兜底）。首次升级后旧单值配置自动迁移为「默认·旧配置迁移」并标记生效 |
+| RAGFlow 多环境配置与切换 | 「系统配置 → 接入配置 → RAGFlow 知识库」支持**多条连接 + 单选生效**（与 Dify/Rerank 同模式，迁移 0032 `ragflow_profiles`）：`+ 新增 RAGFlow 配置` 弹窗填写名称/服务地址（含端口与 `/api/v1` 后缀）/API Key（必填，RAGFlow 接口均需 Bearer 认证），弹窗内可「测试连通性」（编辑态 Key 留空自动回退已存值）；点行首 radio 切换环境（如测试/生产），生效配置自动回写 `ragflow_base_url` / `ragflow_api_key` 运行值，知识源管理与检索/同步链路无需改动；删除生效配置自动回退最早一条。首次升级后旧单值配置自动迁移为「默认·旧配置迁移」并标记生效 |
+| Embedding 多模型/多环境配置 | 「系统配置 → 接入配置 → Embedding 向量模型」支持**多条配置 + 单选生效**（迁移 0034 `embedding_profiles`，与 LLM/Rerank 同模式）：`+ 新增配置` 弹窗填写名称/服务地址（OpenAI 兼容，需含 `/v1`）/模型名/API Key（非必填，内网/自建服务常免鉴权），**「拉取模型列表」**可直接从服务拉取候选模型下拉选择（也可手输）；弹窗内「测试连通性」发最小 embed 请求（编辑态 Key 留空回退已存值）；点行首 radio 切换生效，生效配置自动回写 `embedding_base_url` / `embedding_api_key` / `embedding_model` 运行值，本地 RAG 入库/检索链路无需改动；删除生效配置自动回退最早一条。首次升级后旧单值配置自动迁移为「默认·旧配置迁移」并标记生效。注意切换模型须保持向量维度与既有 ES 索引一致（1024 维），否则需重建索引 |
 | PDF/DOCX 解析失败 | 配置 `MINERU_API_KEY` 后支持 PDF/DOCX/PPTX/XLSX/HTML 云解析；留空则仅 txt/md/csv 本地解析，二进制格式抛「需配置 MINERU_API_KEY」 |
 | `uv sync` 报 `kb-common` 找不到 | 在 `services/kb-common` 先 `uv sync`；Docker 构建已通过 repo-root context 解决 |
 | 端口 8000/8004 被占用 | `lsof -i :8000` 找到进程；或改 uvicorn `--port` |
@@ -347,6 +353,17 @@ KB_API_INTERNAL_URL=http://kb-api:8000
 **知识库（检索抽象层）**：「知识应用 → 知识库」（路由 `/apply/knowledge-libraries`，[knowledge-libraries/index.vue](web/src/views/knowledge-libraries/index.vue)）统一登记 **RAGFlow / DIFY 知识库镜像**，供智能体检索选库。仅登记 `platform + dataset_id` 引用（**只做镜像，不支持导入/解析新文档**，文档与解析仍在原平台维护），与「知识源管理」（推送路径定义）相互独立。后端 CRUD 见 [knowledge_library.py](services/kb-api/app/routes/knowledge_library.py)（`/api/v1/knowledge-libraries`，同平台同 dataset_id 不可重复，写操作限管理员），数据模型 `KnowledgeLibrary`（[models.py](services/kb-common/kb_common/models.py)，迁移 0025）。检索真相源切换：问答请求首选 `library_ids`（[search.py](services/kb-api/app/routes/search.py) `_resolve_retrieval_targets` 按 platform 解析为 dify/ragflow 两组 dataset，兼容旧 `knowledge_source_ids`/`dify_dataset_ids`；都不传时默认全部启用的知识库），sidecar 兜底（[agent_internal.py](services/kb-api/app/routes/agent_internal.py) `/internal/kb/retrieve`）同样优先抽象层、为空时回退旧知识源注册表；**检索策略由抽象层按 platform 内部决定**（Dify 走数据集自身检索配置含 rerank，RAGFlow 走引擎检索参数），提示词与工具描述统一为「知识库检索」，不再写死 Dify。
 
 - **检索测试**：知识库页工具栏「检索测试」按钮（管理员）打开**双栏测试工作台**（参考终端检索测试台布局）——左栏为大输入卡（模式标签 + 知识库范围弹层多选，全选时显示「全部知识」+ 200 字检索词 + Enter/按钮执行）与**最近测试**（localStorage 仅保留 60 天，点击单条记录自动重新执行查询）；右栏为检索设置表格（检索模式/TopK/Score 阈值/向量权重，后两项仅 RagFlow 生效，默认 0.2/0.3 与智能问答链路一致）与测试结果（耗时、逐库状态 chips：命中 N 段/失败原因悬浮/已停用，命中分段卡片：排名徽标 + 所属库 + 文档名 + Score 分数条 + 正文 5 行截断可展开 + 字数/页码/分段 ID）。调用 `POST /api/v1/knowledge-libraries/retrieval-test` **逐库执行与智能问答一致的底层检索**，每库返回 ok/命中数/失败原因（如 RAGFlow `code 102` 无权数据集）。用于排查「RAGFlow 自带检索能搜到、智能问答搜不到」的断层——库级权限/配置问题一眼可见。
+
+**项目文档库（知识应用 → 知识库 → 文档库页签，[DocumentLibraries.vue](web/src/views/knowledge-libraries/DocumentLibraries.vue)）**：项目自有文档库，上传 → 解析 → 分段 → 检索测试全链路**本地化，不依赖 RAGFlow**。
+
+- **解析引擎**：本地 MinerU（mineru-kit V1 API，env `STRUCTURED_KIT_BASE_URL`，默认 `http://127.0.0.1:8010`）。pdf/docx/pptx/xlsx/html 走 MinerU 三步上传 + 异步解析 job（前端轮询 `POST /documents/{id}/refresh`，job 完成时下载 markdown 并落地分段）；**txt/md/csv 纯文本类型直通本地分段**（MinerU 不支持纯文本，原文即分段输入）。解析引擎实现 [mineru.py](services/kb-api/app/services/knowledge_engines/mineru.py)，路由 [managed_library.py](services/kb-api/app/routes/managed_library.py)（`/api/v1/document-libraries`，迁移 0035：`library_documents.engine_job_id` + `library_chunks` 表）。
+- **分段规则全部保留**（RAGFlow 时代配置项不变）：`chunk_method=one` 整篇单段；`chunk_method=auto` **【自动】分层瀑布分段**（无大模型，三级逐级兜底：① 结构切分——fence 感知扫描 markdown 标题树切节，节内保留标题行，超长节续块补「标题路径」行便于溯源；② 递归长度修正——超长节按 段落（围栏代码块整体为一块）→ 原子行（连续表格行/图片行不拆）→ 句子（`delimiter`）→ 字符滑窗（重叠 1/8）逐级递归，目标长度 `chunk_token_num`，过短邻块同节内合并；③ 统计兜底——全文无标题时 TextTiling-lite：滑动窗口间隙评分（每间隙取左右各 2 句的字符 1/2-gram 余弦），有自然段时仅以段落边界为候选（避免窗口骑跨边界与段内噪声谷值），谷值深度 ≥ max(μ+σ/2, 0.1) 且间隙相似度 ≤ 0.5 且局部极小处判为主题边界，产出仍走②）；naive 等其他策略按 `delimiter` 切句 + `chunk_token_num` 滚动窗口聚合（单句不硬拆）；父子分段 `enable_children` + `children_delimiter`（子分段存 `parent_id`，仅参与检索命中，分段列表只展示父分段，仅 naive 生效）；`auto_keywords`/`auto_questions` 保留配置但本地解析不生成；`layout_recognize` 保留配置（MinerU 恒做版面识别）。分段器 [local_chunker.py](services/kb-api/app/services/knowledge_engines/local_chunker.py)（剔除 data:image 内联图防存储膨胀）。
+- **分段管理**：点击文档名称在**门户页签独立打开分段详情页**（路由 `/apply/knowledge-libraries/:libId/documents/:docId`，[DocumentSegments.vue](web/src/views/knowledge-libraries/DocumentSegments.vue)，页签标题动态显示文档名）；本地 `library_chunks` 表 CRUD（**每张分段卡片右上角操作区**：向前插入分段/向后插入分段/编辑/删除/启用停用开关，开关直接作用于卡片不入编辑窗；插入按 `position` 整体后移腾位，接口 `ChunkIn.insert_before/insert_after` 二选一；关键词过滤分页），导出 zip 含原件 + 全量分段 JSON + manifest；重新解析会清除旧分段（含人工修改）并按库当前规则重建。分段详情页工具栏「检索测试」按钮**新页签打开**文档级检索测试（路由 `/apply/knowledge-libraries/:libId/documents/:docId/retrieval-test`），知识库级同样新页签打开（路由 `/apply/knowledge-libraries/:libId/retrieval-test`）；两级共用公共组件 [RetrievalTestPanel.vue](web/src/components/common/RetrievalTestPanel.vue)（`scope=document` 时按当前文档过滤命中结果），检索方式点击弹出 [RetrievalSettingsDialog.vue](web/src/components/common/RetrievalSettingsDialog.vue) 配置检索方案（混合/向量/全文三选一，混合模式下配 Rerank 模型/TopK/Score 阈值）。
+- **文档级检索状态**：文档列表「状态」列开关（启用/禁用，[managed_library.py](services/kb-api/app/routes/managed_library.py) `POST /documents/{id}/enabled`，迁移 0036：`library_documents.enabled`）。**禁用需二次确认**；禁用后该文档分段从检索通道摘除（检索测试/知识问答的本地包含匹配按 `enabled` 过滤，等效"删除检索索引"）；重新启用即恢复检索（分段数据保留在本地库，人工修改不丢，等效"重建索引"即时完成，无需重新解析）。解析中的文档不可切换。
+- **文档级索引设置**：操作列「设置」按钮弹窗（公共组件 [IndexSettingsDialog.vue](web/src/components/library/IndexSettingsDialog.vue) + 策略转换 [index-settings.ts](web/src/components/library/index-settings.ts)，文档/知识库整体设置共用）：分段策略（自动/自定义/父子分段，知识库级另有按文件类型；【自动】映射 `chunk_method=auto`，走分段器内置分层瀑布，512/默认分隔符作为长度修正参数）+ 检索内容增强四开关（加入文件名/模型补充摘要/模型补充用户问题/模型补充图片描述，持久化暂不生效）。保存走 `PUT /documents/{id}/config`（迁移 0037：`library_documents.engine_config`，结构 `{processing, strategy, enhancements, type_rules}`）；解析时文档级 `processing` 逐键覆盖库级（空值不覆盖），**下次重新解析生效**，当前分段不变。
+- **检索**：检索测试对文档库走本地包含匹配（命中子分段返回父分段内容）；智能问答外部检索兜底（`/internal/kb/retrieve`）**已排除文档库**（其 dataset_id 为本地标识，不参与 Dify/RAGFlow 通道）。
+- **创建归属**：库列表展示创建人/创建时间（迁移 0038：`knowledge_libraries.creator`，创建时记录当前用户 username；存量库创建人显示 `-`）。迁移 0039 为并行分叉合并点（0038_library_creator + 0038_library_document_timestamps）。
+- **旧 RAGFlow 文档**：保留原状态展示；原 PARSING 文档刷新后标记「解析引擎已切换为 MinerU，请重新解析」，重新解析即走新链路（pdf/docx/pptx/xlsx/html 经 MinerU，txt/md/csv 直通）。
 
 ## 智能体配置（DeerFlow 2.0 底座）
 
@@ -529,8 +546,9 @@ docker compose down -v        # 同时删除卷（清空 Dify 数据库与知识
 
 - **知识打标**（`/process/tagging`，原「知识加工」页内容）：对已进入 Dify 知识库的文档进行 **AI 打标 + 摘要生成 + 知识关系构建**，为智能问答提供结构化上下文工程能力。
 - **解析引擎**（`/process/engine`，双页签）：
-  - **自定义解析**（[ParserCustomTab.vue](web/src/views/governance/components/ParserCustomTab.vue)）：对接 MinerU V1 API（本地 `http://127.0.0.1:8010`，无鉴权，地址可在页面配置并持久化 localStorage）。流程：三步上传（`POST /v1/uploads` → `PUT content` → `complete` 得 `file_id`）→ 建解析任务（`POST /v1/parse/jobs`，支持档位 flash/basic/standard/advanced 动态拉取 `/v1/tiers`、OCR 模式 auto/txt/ocr、页码范围）→ 2s 自动轮询进度 → 懒加载产物。**输出格式仅 markdown + middle_json 双视图**（marked 渲染 / 语法高亮），HTML、TXT 等已按服务实际能力裁剪；支持复制、下载（`.md` / `_middle.json`）、取消任务。队列为本地任务 + 服务端历史合并（`GET /v1/parse/jobs`），查看历史任务时按需拉详情。结果区限高 60vh 窗口内滚动；base64 内联图缩略展示（≤220px 居中带边框），zip 内相对路径图片以占位提示代替。
+  - **自定义解析**（[ParserCustomTab.vue](web/src/views/governance/components/ParserCustomTab.vue)）：对接 MinerU V1 API（本地 `http://127.0.0.1:8010`，无鉴权，地址可在页面配置并持久化 localStorage）。内部含两个页签：**解析测试**（三步上传 `POST /v1/uploads` → `PUT content` → `complete` 得 `file_id` → 建解析任务 `POST /v1/parse/jobs`，支持档位 flash/basic/standard/advanced 动态拉取 `/v1/tiers`、OCR 模式 auto/txt/ocr、页码范围 → 2s 自动轮询进度 → 懒加载产物；提交后自动跳转队列页签）与**解析队列**（任务表含文档名称、类型、**产物ID** 列——产物 file_id 可经 `GET /v1/files/{id}/content` 直接下载，行内一键复制，MinerU 无鉴权模式下源文件禁止下载仅产物可下载；历史任务自动补拉详情填充；支持状态/文档名称筛选、统计汇总、取消任务；点「查看」自动切回解析测试页签）。**输出格式仅 markdown + middle_json 双视图**（marked 渲染 / 语法高亮），HTML、TXT 等已按服务实际能力裁剪；支持复制、下载（`.md` / `_middle.json`）。结果区限高 60vh 窗口内滚动；base64 内联图缩略展示（≤220px 居中带边框），zip 内相对路径图片以占位提示代替。
   - **MinerU WebUI**：iframe 嵌入官方 WebUI（同源部署直连）。
+  - **API 文档入口**（页签行最右侧，均新窗口打开）：【API 调用说明】打开自编文档页 [mineru-api-docs.html](web/public/mineru-api-docs.html)（三步上传协议 / 任务轮询 / 产物下载全端点说明 + page_range 语法 + 端到端 bash 脚本 + 前端代理集成 + 错误排查，页内自动跟随配置的 Base URL）；【OpenAPI】打开引擎 Swagger 调试台（`{Base}/docs`）。同一入口也放在侧边栏左下角用户菜单「API文档」（关于我下方，新浏览器页签打开），两处地址解析共用 [api-docs.ts](web/src/utils/api-docs.ts)（读取同一份 Base URL 配置）；后续新增其他 OpenAPI 服务在该工具与菜单中追加。
   - **CORS 代理**：浏览器直连 MinerU 会被 CORS 拦截（服务不带跨域头），全部请求经 kb-api 同源透传代理（[mineru_route.py](services/kb-api/app/routes/mineru_route.py)）`/api/v1/mineru/*`，目标地址由 `X-Mineru-Base` 请求头指定，仅 super_admin/admin 可用。
 
 ### 核心能力
@@ -619,7 +637,7 @@ knowledge-governance-expert/
 │   │   └── app/services/sync/   # 钉钉知识库 → Dify 定时增量同步（engine/scheduler/clients）
 │   └── faq-service/             # FAQ KB + 精准匹配（FastAPI）
 └── web/                         # Vue3 + Element Plus 前端（七大治理模块）
-    ├── public/about.html        # 「关于我」产品介绍页（侧边栏左下角新页签打开）
+    ├── public/about.html        # 「关于我」产品介绍页（侧边栏左下角用户菜单新页签打开；同菜单「API文档」打开解析引擎 Swagger，见 src/utils/api-docs.ts）
     └── src/views/
         ├── chat/                # 智能问答（Dify 数据集多选 + Agent）
         ├── hiagent/             # HiAgent智能问答（火山 HiAgent WebSDK iframe 嵌入）

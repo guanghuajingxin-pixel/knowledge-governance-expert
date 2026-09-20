@@ -71,6 +71,7 @@ async def retrieve(
     top_k: int | None = None,
     score_threshold: float | None = None,
     search_method: str | None = None,
+    rerank: bool | None = None,
 ) -> list[dict[str, Any]]:
     """跨多个 Dify 数据集检索，合并并按 score 降序返回。
 
@@ -86,6 +87,7 @@ async def retrieve(
     """
     s = get_settings()
     top_k = top_k or s.dify_retrieval_top_k
+    threshold_override = score_threshold is not None
     score_threshold = score_threshold if score_threshold is not None else s.dify_score_threshold
     method = (s.dify_search_method or "semantic_search").strip()
 
@@ -110,6 +112,13 @@ async def retrieve(
                     "reranking_provider_name": "langgenius/openai_api_compatible/openai_api_compatible",
                     "reranking_model_name": "BAAI/bge-reranker-v2-m3",
                 }
+        model = dict(model)
+        if threshold_override:
+            model.update(score_threshold=score_threshold, score_threshold_enabled=score_threshold > 0)
+        if rerank is not None:
+            model['reranking_enable'] = rerank
+            if not rerank:
+                model.pop('reranking_model', None)
         return {"query": query, "retrieval_model": model}
 
     merged: list[dict[str, Any]] = []
@@ -132,6 +141,9 @@ async def retrieve(
             # 知识库配置请求均失败时，最终回退到环境变量配置
             fallbacks = [method, "full_text_search"] if method != "full_text_search" else [method]
             attempts.extend(_payload(search_method=m) for m in fallbacks)
+            if search_method:
+                # Explicit test modes must never silently fall back to another mode.
+                attempts = [p for p in attempts if p.get('retrieval_model', {}).get('search_method') == search_method]
             data = None
             for payload in attempts:
                 try:
@@ -146,6 +158,8 @@ async def retrieve(
                 except Exception as e:
                     logger.warning("Dify retrieve failed for dataset %s: %s", did, e)
             if not data:
+                if search_method:
+                    raise RuntimeError("Dify 未能按指定检索模式返回结果")
                 continue
             for record in data.get("records", []) or []:
                 seg = record.get("segment") or {}

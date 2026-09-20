@@ -5,6 +5,7 @@ import { useUserStore } from '@/stores/user'
 import * as Icons from '@element-plus/icons-vue'
 import { computed, ref, onMounted, onUnmounted } from 'vue'
 import { getMenuVisibility, getSiteBranding } from '@/api/settings'
+import { openParserEngineDocs } from '@/utils/api-docs'
 
 const route = useRoute()
 const router = useRouter()
@@ -183,6 +184,19 @@ function navigate(path: string) {
 
 // 「关于我」产品介绍页
 const aboutUrl = `${import.meta.env.BASE_URL}about.html`
+
+// 左下角用户区菜单：关于我（新窗口）/ API文档（新页签）/ 退出登录
+function handleUserCommand(command: string | number | object) {
+  if (command === 'about') {
+    window.open(aboutUrl, '_blank', 'noopener')
+  } else if (command === 'api-docs') {
+    // 当前为解析引擎（MinerU）的 Swagger 文档，Base 跟随解析引擎配置
+    openParserEngineDocs()
+  } else if (command === 'logout') {
+    userStore.logout()
+    router.push('/login')
+  }
+}
 </script>
 
 <template>
@@ -308,14 +322,29 @@ const aboutUrl = `${import.meta.env.BASE_URL}about.html`
       </template>
     </nav>
 
-    <!-- 左下角：关于我 -->
+    <!-- 左下角：用户区（关于我 / API文档 / 退出登录） -->
     <div class="sidebar-footer">
-      <a class="menu-item about-item" :href="aboutUrl" target="_blank" rel="noopener" title="关于我">
-        <span class="menu-icon about-icon">
-          <el-icon :size="16"><Icons.InfoFilled /></el-icon>
+      <el-dropdown class="user-dropdown" trigger="click" @command="handleUserCommand">
+        <span
+          class="menu-item user-item"
+          :title="userStore.userInfo?.username || '用户'"
+          role="button"
+          :aria-label="`用户菜单：${userStore.userInfo?.username || '用户'}`"
+        >
+          <el-avatar :size="28" icon="UserFilled" class="user-avatar" />
+          <span v-show="!appStore.sidebarCollapsed" class="menu-title username">
+            {{ userStore.userInfo?.username || '用户' }}
+          </span>
+          <el-icon v-show="!appStore.sidebarCollapsed" class="menu-expand"><Icons.ArrowDown /></el-icon>
         </span>
-        <span v-show="!appStore.sidebarCollapsed" class="menu-title">关于我</span>
-      </a>
+        <template #dropdown>
+          <el-dropdown-menu>
+            <el-dropdown-item command="about">关于我</el-dropdown-item>
+            <el-dropdown-item command="api-docs">API文档</el-dropdown-item>
+            <el-dropdown-item command="logout" divided>退出登录</el-dropdown-item>
+          </el-dropdown-menu>
+        </template>
+      </el-dropdown>
     </div>
   </aside>
 </template>
@@ -522,24 +551,32 @@ const aboutUrl = `${import.meta.env.BASE_URL}about.html`
   background: transparent;
 }
 
-/* 左下角「关于我」 */
+/* 左下角用户区：关于我 / 退出登录 */
 .sidebar-footer {
   flex-shrink: 0;
   padding: 8px;
   border-top: 1px solid #f0f0f0;
 }
 
-.about-icon {
-  background: linear-gradient(135deg, #6157ff, #8b7bff);
-  color: #fff;
+.user-dropdown {
+  display: block;
+  width: 100%;
 }
 
-.about-item {
-  text-decoration: none;
+.user-item {
+  width: 100%;
+  outline: none;
 }
 
-.about-item .menu-title {
-  color: #6157ff;
-  font-weight: 600;
+.user-avatar {
+  flex-shrink: 0;
+}
+
+.username {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 </style>

@@ -64,6 +64,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "external_agents": {
         "hiagent": {"enabled": False, "embed_code": "", "url": ""},
         "dify": {"enabled": False, "embed_code": "", "url": ""},
+        "deap": {"enabled": False, "embed_code": "", "url": ""},
     },
 }
 
@@ -78,7 +79,7 @@ def resolve_agent_model(agent_cfg: dict[str, Any], fallback: str) -> str:
 
 
 # 外部智能体平台白名单（key 与前端页签一一对应）
-EXTERNAL_PLATFORMS = ("hiagent", "dify")
+EXTERNAL_PLATFORMS = ("hiagent", "dify", "deap")
 
 _IFRAME_SRC_RE = re.compile(r'src\s*=\s*["\']([^"\']+)["\']', re.IGNORECASE)
 

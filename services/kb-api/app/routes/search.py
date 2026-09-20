@@ -24,9 +24,12 @@ _TURN_THREADS: dict[tuple[str, str], tuple[float, str]] = {}
 class SearchIn(BaseModel):
     query: str
     kb_ids: list[str]
-    top_k: int = 10
+    top_k: int = Field(default=10, ge=1, le=100)
     search_type: str = "hybrid"   # hybrid | semantic | keyword
     filters: dict | None = None
+    score_threshold: float = Field(default=0, ge=0, le=1)
+    rerank_model_id: UUID | None = None
+    rerank: bool | None = None     # None=按接口默认（正式检索开启、测试关闭）；显式指定则覆盖
 
 
 def _log_usage(user_id, scene: str, query: str,
@@ -52,7 +55,7 @@ def _log_usage(user_id, scene: str, query: str,
 @router.post("")
 async def search(body: SearchIn, u=Depends(get_principal), s: AsyncSession = Depends(get_session)):
     t0 = time.perf_counter()
-    hits = await _dispatch(body, rerank=True)
+    hits = await _dispatch(body, rerank=body.rerank if body.rerank is not None else True)
     doc_ids = {h.get("document_id") for h in hits if h.get("document_id")}
     docs = (await s.execute(select(Document).where(Document.id.in_(doc_ids)))).scalars().all()
     dmap = {str(d.id): (d.original_filename, d.storage_path, d.file_type) for d in docs}
@@ -71,12 +74,26 @@ async def search(body: SearchIn, u=Depends(get_principal), s: AsyncSession = Dep
 
 @router.post("/test")
 async def search_test(body: SearchIn, u=Depends(get_current_user), s: AsyncSession = Depends(get_session)):
-    """检索测试：返回召回内容、K 值、Score，便于调参。"""
-    hits = await _dispatch(body, rerank=False)
+    """检索测试：返回召回内容、K 值、Score，便于调参。rerank 默认关闭，可显式开启。"""
+    rerank = body.rerank if body.rerank is not None else False
+    # A selected profile is request-local; never mutate global model settings.
+    candidate_body = body.model_copy(update={"top_k": 100}) if rerank else body
+    hits = await _dispatch(candidate_body, rerank=False)
+    if rerank and hits:
+        from app.services.library_retrieval import rerank_hits
+        for hit in hits:
+            hit['matched_content'] = hit.get('text', '')
+        await rerank_hits(s, body.query, hits, str(body.rerank_model_id) if body.rerank_model_id else None)
+        hits.sort(key=lambda h: h['score'], reverse=True)
+    hits = [h for h in hits if h['score'] >= body.score_threshold][:body.top_k]
     results = [{"text": h.get("text"), "score": h.get("score"),
-                "document_title": h.get("document_title"), "chunk_index": h.get("chunk_index")} for h in hits]
+                "document_title": h.get("document_title"), "chunk_index": h.get("chunk_index"),
+                "document_id": h.get("document_id"),
+                "score_type": h.get("score_type"), "token_similarity": h.get("token_similarity"),
+                "vector_similarity": h.get("vector_similarity"),
+                "rerank_score": h.get("rerank_score"), "semantic_weight": h.get("semantic_weight")} for h in hits]
     masking_meta = await _mask_search_results(s, u, body, results)
-    resp = {"k": body.top_k, "results": results}
+    resp = {"k": body.top_k, "search_type": body.search_type, "rerank": rerank, "results": results}
     if masking_meta:
         resp["masking"] = masking_meta
     return resp
@@ -88,7 +105,7 @@ async def _dispatch(body: SearchIn, rerank: bool) -> list[dict]:
     if st == "semantic":
         return await searcher.semantic(body.kb_ids, body.query, body.top_k, body.filters, rerank=rerank)
     if st == "keyword":
-        return await searcher.keyword(body.kb_ids, body.query, body.top_k, body.filters)
+        return await searcher.keyword(body.kb_ids, body.query, body.top_k, body.filters, rerank=rerank)
     return await searcher.hybrid(body.kb_ids, body.query, body.top_k, body.filters, rerank=rerank)
 
 

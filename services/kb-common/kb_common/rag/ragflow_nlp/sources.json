@@ -1,0 +1,22 @@
+{
+  "ragflow_revision": "7f09c774370dc9ae4eda91492a502dd10c9c51b3",
+  "files": {
+    "rag/nlp/query.py": "bc0440fc2a0216db6d3ccfd929a35ffd4506089c30adc1d9fd4e6a554c852475",
+    "rag/nlp/term_weight.py": "7985788da83796a2cda85a05376a054728944101408e7e52e6b114566802eeb0",
+    "rag/nlp/synonym.py": "e2050486003b8c0cd8c0f16b2b00da560374c81366fd896ea731c0562da4dd1a",
+    "common/query_base.py": "905539b2b698081d015749c0f0ed35eb3530cb93cb6bc0f60daeb8741d8605a2",
+    "common/doc_store/doc_store_base.py": "47a611e7bd53daa0c6e883aa51f3086c3b70ec9e7b893114282e6dd05b34cc8d",
+    "rag/nlp/search.py": "b24bb050e04c3a2bf5d214d0092a986f7cc4937ecc0d38a84775fe321d035b9d",
+    "rag/res/ner.json": "16a1f652e2fe4e568acf55421ecfc25e14bee90fbe5b2c1159e831578d9b6e86",
+    "rag/res/synonym.json": "f740e91e297ec225186e2e35a822df9c870c0665d7e6734eeeb58e320b728c6a"
+  },
+  "tokenizer_dependency": {
+    "package": "infinity-sdk",
+    "version": "0.7.3",
+    "wheel_sha256": "f9a1c8cf20e51da1575d4a18a519523350c145f9025e90f3cd9028c3fd8dfb93",
+    "files": {
+      "infinity/rag_tokenizer.py": "13c5e10817ac2fde25fefb3b123de5de977e60da65c203a56b1e62629dac8398",
+      "infinity/huqie.txt": "c0b19769ba86db1fd5d6aa14db7ffbe2cafcc39ac0b03003f0add8bc929bab0a"
+    }
+  }
+}

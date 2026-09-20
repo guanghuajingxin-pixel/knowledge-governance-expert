@@ -53,3 +53,9 @@ dify/docker/patches/*
 
 # 凭据文件（含真实密码，严禁提交）
 CREDENTIALS.md
+
+# RAGFlow 源码参考（仅作接口契约参考，不导入、不提交）
+ragflow/
+
+# 临时文件
+.tmp/

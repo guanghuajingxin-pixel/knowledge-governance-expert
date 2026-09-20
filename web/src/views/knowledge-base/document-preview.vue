@@ -66,6 +66,7 @@ onMounted(() => {
       <div v-for="seg in segments" :key="seg.id" class="segment-item">
         <div class="seg-header">
           <span class="seg-index">#{{ seg.chunk_index + 1 }}</span>
+          <span class="seg-meta">字符数: {{ seg.content.length }}</span>
           <span class="seg-meta">token: {{ seg.token_count }}</span>
           <span class="seg-meta">hash: {{ seg.content_hash.slice(0, 16) }}...</span>
         </div>

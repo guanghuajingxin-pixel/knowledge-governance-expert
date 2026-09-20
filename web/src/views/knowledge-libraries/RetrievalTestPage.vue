@@ -1,0 +1,47 @@
+<script setup lang="ts">
+import { computed, onMounted, ref } from 'vue'
+import { useRoute } from 'vue-router'
+import { useTabsStore } from '@/stores/tabs'
+import RetrievalTestPanel from '@/components/common/RetrievalTestPanel.vue'
+
+const route = useRoute()
+const tabsStore = useTabsStore()
+
+const libId = computed(() => Number(route.params.libId))
+const docId = computed(() => route.params.docId as string | undefined)
+const scope = computed<'document' | 'kb'>(() => docId.value ? 'document' : 'kb')
+
+const docName = ref('')
+
+// 文档级：尝试从 sessionStorage 取文档名用于标题
+onMounted(() => {
+  if (scope.value === 'document' && docId.value) {
+    const cached = sessionStorage.getItem(`doc_name:${docId.value}`)
+    if (cached) docName.value = cached
+  }
+  const title = scope.value === 'document' ? `检索测试${docName.value ? ` · ${docName.value}` : ''}` : '检索测试'
+  tabsStore.updateTabTitle(route.path, title)
+})
+</script>
+
+<template>
+  <div class="retrieval-test-page">
+    <RetrievalTestPanel
+      backend="library"
+      :scope="scope"
+      :library-id="libId"
+      :document-id="docId"
+      :document-title="docName"
+      :title="docName"
+    />
+  </div>
+</template>
+
+<style scoped>
+.retrieval-test-page {
+  height: 100%;
+  min-height: 0;
+  padding: 16px;
+  box-sizing: border-box;
+}
+</style>

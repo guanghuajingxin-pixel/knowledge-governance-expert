@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routes import auth, users, internal, knowledge_base, directory, document, search, settings_route, knowledge_center, knowledge_library, dify_route, ragflow_route, operate, governance, agent_route, agent_internal, chat_session_route, qa_route, sync_route, process_route, knowledge_gaps, metrics_route, sensitive, masking, structured_route, mineru_route
+from app.routes import auth, users, internal, knowledge_base, directory, document, search, settings_route, knowledge_center, knowledge_library, dify_route, ragflow_route, operate, governance, agent_route, agent_internal, chat_session_route, qa_route, sync_route, process_route, knowledge_gaps, metrics_route, sensitive, masking, structured_route, mineru_route, managed_library
 
 
 @asynccontextmanager
@@ -153,6 +153,7 @@ app.include_router(search.router)
 app.include_router(settings_route.router)
 app.include_router(knowledge_center.router)
 app.include_router(knowledge_library.router)
+app.include_router(managed_library.router)
 app.include_router(sensitive.router)
 app.include_router(masking.router)
 app.include_router(dify_route.router)
