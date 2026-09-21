@@ -777,6 +777,22 @@ async function saveDingtalkModal() {
   }
 }
 
+// ============ 钉钉扫码登录开关（setting: dingtalk_qr_login_enabled，未设置时缺省开启） ============
+const qrLoginEnabled = computed(() =>
+  (form.value.dingtalk_qr_login_enabled?.value ?? 'true').trim().toLowerCase() !== 'false')
+const qrLoginSaving = ref(false)
+
+async function saveQrLogin(val: string | number | boolean) {
+  qrLoginSaving.value = true
+  try {
+    await setSetting({ key: 'dingtalk_qr_login_enabled', value: val ? 'true' : 'false' })
+    form.value = await getSettings()
+    ElMessage.success(val ? '已开启钉钉扫码登录' : '已关闭钉钉扫码登录')
+  } finally {
+    qrLoginSaving.value = false
+  }
+}
+
 // ============ 钉钉机器人 & H5 免登（corpId / 开关 / 白名单 / 运行状态） ============
 const botForm = ref({ corp_id: '', enabled: false, allow_users: '' })
 const botStatus = ref<DingtalkBotStatus | null>(null)
@@ -856,7 +872,7 @@ async function loadMenuConfig() {
         visible: !hidden.includes(r.path),
       }))
     // 保持路由定义顺序
-    const orderedPaths = ['/chat', '/deap-agent', '/hiagent', '/collection', '/knowledge-sources', '/collection/dingtalk', '/collection/upload', '/process', '/process/tagging', '/process/engine', '/apply', '/operate', '/govern']
+    const orderedPaths = ['/chat', '/deap-agent', '/hiagent', '/collection', '/knowledge-sources', '/collection/dingtalk', '/collection/upload', '/process', '/process/engine', '/apply', '/operate', '/govern', '/govern/gaps', '/govern/review']
     items.sort((a, b) => {
       const ia = orderedPaths.indexOf(a.path)
       const ib = orderedPaths.indexOf(b.path)
@@ -1133,10 +1149,8 @@ const visibleMenuCount = computed(() => menuConfigItems.value.filter((x) => x.vi
           <el-form-item label="MinerU API Key">
             <div class="field-row">
               <el-input v-model="form.mineru_api_key.value" show-password placeholder="未设置" />
-              <el-button type="primary" :loading="saving === 'mineru_api_key'" @click="save('mineru_api_key')">保存</el-button>
-            </div>
-            <div class="field-row" style="margin-top: 8px">
               <el-button :loading="mineruTest.testing" @click="runMineruTest">测试连通性</el-button>
+              <el-button type="primary" :loading="saving === 'mineru_api_key'" @click="save('mineru_api_key')">保存</el-button>
             </div>
             <el-alert
               v-if="mineruTest.result?.ok"
@@ -1154,7 +1168,6 @@ const visibleMenuCount = computed(() => menuConfigItems.value.filter((x) => x.vi
               style="margin-top: 8px"
               :title="mineruTest.result.message || '连接失败'"
             />
-            <div class="field-hint">配置 Key 后支持 PDF/Word/Excel/HTML 云解析；留空则仅 txt/md/csv。</div>
           </el-form-item>
 
           <el-divider content-position="left">钉钉（企业知识库数据源）</el-divider>
@@ -1176,8 +1189,18 @@ const visibleMenuCount = computed(() => menuConfigItems.value.filter((x) => x.vi
                 <span class="mono">{{ form.dingtalk_app_secret?.is_set ? '••••••••（已配置，不显示）' : '未配置' }}</span>
               </div>
               <div class="dt-row">
-                <span class="dt-label">操作人 UnionId</span>
+                <span class="dt-label">服务账号 union_id（兜底）</span>
                 <span class="mono">{{ form.dingtalk_operator_union_id?.is_set ? form.dingtalk_operator_union_id.value : '未配置' }}</span>
+              </div>
+              <div class="dt-row">
+                <span class="dt-label">扫码登录</span>
+                <el-switch
+                  :model-value="qrLoginEnabled"
+                  :loading="qrLoginSaving"
+                  aria-label="钉钉扫码登录开关"
+                  @change="saveQrLogin"
+                />
+                <span class="field-hint">开启后登录页展示「钉钉扫码」页签，用户可扫码登录 / 绑定钉钉身份</span>
               </div>
               <div class="dt-row dt-foot">
                 <span class="field-hint">运营看板的"企业知识"指标来源于此用户可见的钉钉知识库；需授予应用「知识库读权限」。</span>
@@ -1493,8 +1516,9 @@ const visibleMenuCount = computed(() => menuConfigItems.value.filter((x) => x.vi
             :placeholder="form.dingtalk_app_secret?.is_set ? '••••••••' : '钉钉开放平台应用 AppSecret'"
           />
         </el-form-item>
-        <el-form-item label="操作人 UnionId">
+        <el-form-item label="服务账号 union_id（兜底）">
           <el-input v-model="dtModal.operator_union_id" placeholder="具备知识库读权限的用户 UnionId" />
+          <div class="field-hint">同步源 owner 未绑定钉钉时使用；建议仅冷启动期使用</div>
         </el-form-item>
         <el-alert
           v-if="dtModal.testResult?.ok"

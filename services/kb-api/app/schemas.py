@@ -164,6 +164,9 @@ class SyncSourceBase(BaseModel):
     # 流水线数据集的 input form 变量值（分段参数），如 {"max_chunk_length": 1024}。
     # 普通数据集忽略；流水线数据集缺失必填变量时 Dify 会报 500。RAGFlow 忽略此字段。
     pipeline_inputs: dict[str, Any] = Field(default_factory=dict)
+    # 同步身份归属用户：定时/后台同步用该用户的钉钉 unionId 调钉钉 API；
+    # 为空回退全局服务账号。创建时不传默认取当前登录用户。
+    owner_user_id: str | None = None
 
 
 class SyncSourceCreate(SyncSourceBase):
@@ -187,6 +190,7 @@ class SyncSourceUpdate(BaseModel):
     cron: str | None = None
     enabled: bool | None = None
     pipeline_inputs: dict[str, Any] | None = None
+    owner_user_id: str | None = None
 
 
 class SyncPreviewItemSetting(BaseModel):
@@ -237,6 +241,8 @@ class SyncRunOut(BaseModel):
     deleted_count: int
     failed_count: int
     message: str
+    # 本次运行调钉钉 API 的身份来源：owner_binding | global_fallback | ""（历史数据）
+    operator_source: str = ""
 
 
 class SyncFailureOut(BaseModel):

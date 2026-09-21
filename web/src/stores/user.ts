@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import type { UserInfo, LoginRequest, LoginResponse } from '@/types/user'
 import { login as loginApi, getUserInfo } from '@/api/auth'
+import { clearDingtalkOAuthState } from '@/utils/dingtalk-auth'
 
 export const useUserStore = defineStore('user', () => {
   const token = ref<string>(localStorage.getItem('kb_token') || '')
@@ -12,18 +13,35 @@ export const useUserStore = defineStore('user', () => {
     localStorage.setItem('kb_token', t)
   }
 
+  /** 整体替换用户信息并持久化（传 null 等价于清除缓存） */
+  function setUserInfo(u: UserInfo | null) {
+    userInfo.value = u
+    if (u) localStorage.setItem('kb_user', JSON.stringify(u))
+    else localStorage.removeItem('kb_user')
+  }
+
+  /** 局部更新用户信息：设密成功后清 must_change_password、绑定钉钉后刷新 dingtalk_binding */
+  function patchUserInfo(patch: Partial<UserInfo>) {
+    if (!userInfo.value) return
+    setUserInfo({ ...userInfo.value, ...patch })
+  }
+
+  /** 登录结果统一落地（密码登录 / 钉钉扫码 / H5 免登共用） */
+  function applyLogin(res: LoginResponse) {
+    setToken(res.access_token)
+    setUserInfo(res.user)
+    return res
+  }
+
   async function login(payload: LoginRequest) {
     const res: LoginResponse = await loginApi(payload)
-    setToken(res.access_token)
-    userInfo.value = res.user
-    localStorage.setItem('kb_user', JSON.stringify(res.user))
+    applyLogin(res)
     return res
   }
 
   async function fetchUserInfo() {
     const res = await getUserInfo()
-    userInfo.value = res
-    localStorage.setItem('kb_user', JSON.stringify(res))
+    setUserInfo(res)
     return res
   }
 
@@ -32,6 +50,8 @@ export const useUserStore = defineStore('user', () => {
     userInfo.value = null
     localStorage.removeItem('kb_token')
     localStorage.removeItem('kb_user')
+    // 未消费完的钉钉扫码 state 一并清掉，避免下次回调误判
+    clearDingtalkOAuthState()
   }
 
   function restoreUser() {
@@ -41,5 +61,16 @@ export const useUserStore = defineStore('user', () => {
     }
   }
 
-  return { token, userInfo, setToken, login, fetchUserInfo, logout, restoreUser }
+  return {
+    token,
+    userInfo,
+    setToken,
+    setUserInfo,
+    patchUserInfo,
+    applyLogin,
+    login,
+    fetchUserInfo,
+    logout,
+    restoreUser,
+  }
 })

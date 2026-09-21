@@ -58,9 +58,8 @@ async function tryDingtalkAutoLogin(): Promise<boolean> {
     }
     const dd = (await import('dingtalk-jsapi')).default
     const auth = await dd.runtime.permission.requestAuthCode({ corpId: cfg.corp_id })
-    const res = await dingtalkLogin(auth.code)
-    userStore.setToken(res.access_token)
-    await userStore.fetchUserInfo()
+    const res = await dingtalkLogin({ auth_code: auth.code, channel: 'h5' })
+    userStore.applyLogin(res)
     return true
   } catch {
     // 免登失败（authCode 无效/应用未授权/网络）：回退账号登录，不静默

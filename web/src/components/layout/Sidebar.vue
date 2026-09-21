@@ -5,7 +5,7 @@ import { useUserStore } from '@/stores/user'
 import * as Icons from '@element-plus/icons-vue'
 import { computed, ref, onMounted, onUnmounted } from 'vue'
 import { getMenuVisibility, getSiteBranding } from '@/api/settings'
-import { openParserEngineDocs } from '@/utils/api-docs'
+import { openParserApiGuide } from '@/utils/api-docs'
 
 const route = useRoute()
 const router = useRouter()
@@ -185,13 +185,13 @@ function navigate(path: string) {
 // 「关于我」产品介绍页
 const aboutUrl = `${import.meta.env.BASE_URL}about.html`
 
-// 左下角用户区菜单：关于我（新窗口）/ API文档（新页签）/ 退出登录
+// 左下角用户区菜单：关于我（新窗口）/ API 调用说明（新页签）/ 退出登录
 function handleUserCommand(command: string | number | object) {
   if (command === 'about') {
     window.open(aboutUrl, '_blank', 'noopener')
   } else if (command === 'api-docs') {
-    // 当前为解析引擎（MinerU）的 Swagger 文档，Base 跟随解析引擎配置
-    openParserEngineDocs()
+    // 解析引擎 API 调用说明文档页（自编静态页，含端到端示例），与处理引擎页入口同源
+    openParserApiGuide()
   } else if (command === 'logout') {
     userStore.logout()
     router.push('/login')
@@ -322,7 +322,7 @@ function handleUserCommand(command: string | number | object) {
       </template>
     </nav>
 
-    <!-- 左下角：用户区（关于我 / API文档 / 退出登录） -->
+    <!-- 左下角：用户区（关于我 / API 调用说明 / 退出登录） -->
     <div class="sidebar-footer">
       <el-dropdown class="user-dropdown" trigger="click" @command="handleUserCommand">
         <span
@@ -340,7 +340,7 @@ function handleUserCommand(command: string | number | object) {
         <template #dropdown>
           <el-dropdown-menu>
             <el-dropdown-item command="about">关于我</el-dropdown-item>
-            <el-dropdown-item command="api-docs">API文档</el-dropdown-item>
+            <el-dropdown-item command="api-docs">API 调用说明</el-dropdown-item>
             <el-dropdown-item command="logout" divided>退出登录</el-dropdown-item>
           </el-dropdown-menu>
         </template>

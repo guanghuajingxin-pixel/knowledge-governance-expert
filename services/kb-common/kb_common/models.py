@@ -15,6 +15,10 @@ class User(Base):
     role: Mapped[str] = mapped_column(String(20), default="viewer")  # super_admin|admin|editor|viewer
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    # 钉钉建档/管理员重置密码后为 true：下次登录强制跳设密页（迁移 0041）
+    must_change_password: Mapped[bool] = mapped_column(Boolean, server_default=sa_text("false"), nullable=False)
+    # 最近一次「用户自主设置/修改」密码的时间；null 表示从未设过可用密码
+    password_updated_at: Mapped[datetime | None] = mapped_column(DateTime)
 
 class ApiKey(Base):
     __tablename__ = "api_keys"
@@ -121,6 +125,20 @@ class Setting(Base):
     key: Mapped[str] = mapped_column(String(64), primary_key=True)
     value: Mapped[str] = mapped_column(Text)
     is_secret: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class AuditLog(Base):
+    """敏感操作审计：管理员重置密码/解绑钉钉/角色变更、用户自主改密等（迁移 0042）。"""
+    __tablename__ = "audit_logs"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    actor_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
+    action: Mapped[str] = mapped_column(String(64), index=True)
+    target_type: Mapped[str] = mapped_column(String(32))          # user / setting / kb
+    target_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    detail: Mapped[dict | None] = mapped_column(JSON)
+    ip: Mapped[str | None] = mapped_column(String(64))
+    user_agent: Mapped[str | None] = mapped_column(String(300))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), index=True)
 
 
 class DifyProfile(Base):
@@ -443,6 +461,22 @@ class DingtalkFileSnapshot(Base):
     payload: Mapped[str] = mapped_column(Text, nullable=False)
 
 
+class DingtalkFileReview(Base):
+    """钉钉文件入库审核记录（入库审核页审核状态数据源）。
+
+    按钉钉节点 ID 独立记录审核状态与审核人，不与 dingtalk_file_snapshots 耦合：
+    快照刷新/覆盖写入不影响已审核结果。review_status 取值：通过/待确认/待更正，
+    空串视为未审核。
+    """
+    __tablename__ = "dingtalk_file_reviews"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    node_id: Mapped[str] = mapped_column(String(128), nullable=False, unique=True, index=True)  # 钉钉节点 ID
+    workspace_id: Mapped[str] = mapped_column(String(128), server_default="", nullable=False)
+    review_status: Mapped[str] = mapped_column(String(20), server_default="", nullable=False)
+    reviewer: Mapped[str] = mapped_column(String(100), server_default="", nullable=False)  # 执行审核动作的用户名
+    reviewed_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+
 # ===== 钉钉知识库 → Dify 定时增量同步（合并自 DingDingKonwledgePipeline）=====
 # 每个同步源自带 cron 字段，不保留独立 jobs 表。表结构由 alembic 0011 创建。
 
@@ -472,6 +506,9 @@ class SyncSource(Base):
     # Dify 的 pipeline/run 接口要求 inputs 携带流水线定义的必填变量，缺失会报 500
     # "xxx is required in input form"。普通数据集忽略此字段。
     pipeline_inputs: Mapped[str] = mapped_column(Text, server_default="{}", nullable=False)
+    # 同步身份归属：定时/后台同步用该用户的钉钉 unionId 调钉钉 API（迁移 0043）；
+    # 为空或该用户未绑定钉钉时回退全局 dingtalk_operator_union_id 服务账号。
+    owner_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
@@ -493,6 +530,8 @@ class SyncRun(Base):
     deleted_count: Mapped[int] = mapped_column(Integer, server_default="0", nullable=False)
     failed_count: Mapped[int] = mapped_column(Integer, server_default="0", nullable=False)
     message: Mapped[str] = mapped_column(Text, server_default="", nullable=False)
+    # 本次运行调钉钉 API 用的身份来源：owner_binding | global_fallback（迁移 0043）
+    operator_source: Mapped[str] = mapped_column(String(20), server_default="", nullable=False)
 
 
 class SyncDocumentMapping(Base):
@@ -763,4 +802,55 @@ class LibraryChunk(Base):
     available: Mapped[bool] = mapped_column(Boolean, default=True)
     important_keywords: Mapped[list] = mapped_column(JSON, default=list)
     position: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+# ===== 知识治理标准（本地可管理 + 版本 + 审核流转）=====
+# 治理标准从「钉钉多维表只读代理」升级为本地可管理：
+# - 主表存当前对外展示版本的字段快照（列表查询直接读，无需 join 版本表）
+# - 版本表存所有历史版本（草稿/审核中/已发布/已驳回），支持回滚
+# 状态流转：
+#   新建 → draft → 提交审核 → reviewing → 通过 → published（主表快照更新）
+#                              → 驳回 → draft（主表仍显示旧已发布版本）
+#   已发布 → 编辑 → 新建 draft 版本（主表不变，列表仍显示已发布版本）
+
+class GovernanceStandard(Base):
+    """治理标准主表：当前对外展示版本的字段快照。"""
+    __tablename__ = "governance_standards"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    doc_type: Mapped[str] = mapped_column(String(100), default="")
+    code: Mapped[str] = mapped_column(String(64), default="")
+    version: Mapped[str] = mapped_column(String(32), default="")
+    effective_date: Mapped[str] = mapped_column(String(20), default="")
+    link: Mapped[str] = mapped_column(String(1000), default="")
+    maintainer: Mapped[str] = mapped_column(String(200), default="")
+    # 当前已发布版本 ID（空=尚无已发布版本，列表展示最新草稿）
+    published_version_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    # 最新版本 ID（可能是草稿/审核中）
+    latest_version_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    # 最新版本状态：draft | reviewing | published
+    latest_status: Mapped[str] = mapped_column(String(16), default="draft")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class GovernanceStandardVersion(Base):
+    """治理标准版本历史：每个版本一条完整字段快照。"""
+    __tablename__ = "governance_standard_versions"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    standard_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("governance_standards.id", ondelete="CASCADE"), index=True)
+    version_no: Mapped[int] = mapped_column(Integer, default=1)
+    doc_type: Mapped[str] = mapped_column(String(100), default="")
+    code: Mapped[str] = mapped_column(String(64), default="")
+    version: Mapped[str] = mapped_column(String(32), default="")
+    effective_date: Mapped[str] = mapped_column(String(20), default="")
+    link: Mapped[str] = mapped_column(String(1000), default="")
+    maintainer: Mapped[str] = mapped_column(String(200), default="")
+    # draft | reviewing | published | rejected
+    status: Mapped[str] = mapped_column(String(16), default="draft", index=True)
+    created_by: Mapped[str] = mapped_column(String(100), default="")
+    review_comment: Mapped[str] = mapped_column(Text, default="")
+    reviewed_by: Mapped[str] = mapped_column(String(100), default="")
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

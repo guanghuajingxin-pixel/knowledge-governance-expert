@@ -21,7 +21,7 @@
 import { computed, ref, watch } from 'vue'
 import { Document, Link, Refresh, TopRight } from '@element-plus/icons-vue'
 import ParserCustomTab from './components/ParserCustomTab.vue'
-import { openParserEngineDocs } from '@/utils/api-docs'
+import { openParserEngineDocs, openParserApiGuide } from '@/utils/api-docs'
 
 const activeTab = ref<'custom' | 'webui'>('custom')
 
@@ -62,16 +62,18 @@ function openWebuiExternal() {
 }
 
 // ===== 解析引擎 OpenAPI 接口文档（页签行最右侧入口，新窗口打开）=====
-// 地址解析抽到 utils/api-docs，与侧边栏左下角「API文档」入口共用同一份
-// localStorage Base URL 配置（与「自定义解析」页签 ParserCustomTab 共享）。
+// 地址解析抽到 utils/api-docs；侧边栏左下角「API 调用说明」入口指向自编文档页，
+// Swagger 调试台入口仅保留在处理引擎页。
 function openOpenApiDocs() {
   openParserEngineDocs()
 }
 
-// ===== API 调用说明（页签行最右侧入口，新窗口打开自编文档页）=====
-// 静态页位于 web/public/mineru-api-docs.html，页面内自动读取同一份 Base URL 配置。
+// ===== API 调用说明（页签行最右侧入口，新窗口打开文档页）=====
+// 文档页 web/public/mineru-api-docs.html 基于 Docsify 渲染 Markdown（左侧边栏目录 +
+// 搜索 + 代码复制），页内自动读取同一份 Base URL 配置；与侧边栏左下角「API 调用说明」
+// 入口共用同一跳转。
 function openApiDocPage() {
-  window.open('/mineru-api-docs.html', '_blank', 'noopener')
+  openParserApiGuide()
 }
 </script>
 
@@ -97,9 +99,6 @@ function openApiDocPage() {
               />
               <el-button plain :icon="Refresh" @click="reloadWebui">重新加载</el-button>
               <el-button plain :icon="TopRight" @click="openWebuiExternal">新窗口打开</el-button>
-              <span class="webui-hint">
-                MinerU 官方 Gradio WebUI；UI 由 Gradio 运行时生成，无独立前端源码，故 iframe 原样接入，其后端调用（MinerU V1 API）不变。
-              </span>
             </div>
             <iframe
               :key="frameNonce"
@@ -187,13 +186,6 @@ function openApiDocPage() {
   gap: 8px;
   flex-wrap: wrap;
   margin-bottom: 10px;
-}
-.webui-hint {
-  font-size: 12px;
-  color: #909399;
-  line-height: 1.6;
-  margin-left: auto;
-  max-width: 560px;
 }
 .webui-frame {
   display: block;

@@ -240,11 +240,23 @@ async def inventory(s, user):
     return items, dirs, kbs
 
 
-def filtered(items, has_filter, kb_uuid, owner, document_state):
+# 数量区间筛选：下拉预设值 → [最小值, 最大值]（None 表示无上限；空串/未知值视为不过滤）
+_COUNT_RANGES = {'0': (0, 0), '1-9': (1, 9), '10-99': (10, 99), '100+': (100, None)}
+
+
+def _in_count_range(value: int, rng: str | None) -> bool:
+    lo, hi = _COUNT_RANGES.get(rng or '', (0, None))
+    return value >= lo and (hi is None or value <= hi)
+
+
+def filtered(items, has_filter, kb_uuid, owner, document_state,
+             document_count: str | None = None, folder_count: str | None = None):
     return [r for r in items
             if (not has_filter or r['kb_id'] == str(kb_uuid))
             and (not owner or r['owner'] == owner)
-            and (document_state == 'all' or (r['document_count'] > 0) == (document_state == 'has'))]
+            and (document_state == 'all' or (r['document_count'] > 0) == (document_state == 'has'))
+            and _in_count_range(r['document_count'], document_count)
+            and _in_count_range(r['folder_count'], folder_count)]
 
 
 def csv_response(rows, filename):
@@ -259,6 +271,7 @@ def csv_response(rows, filename):
 @router.get('')
 async def list_gaps(kb_id: str | None = None, owner: str | None = None,
                     document_state: Literal['all', 'empty', 'has'] = 'all',
+                    document_count: str | None = None, folder_count: str | None = None,
                     page: int = Query(1, ge=1), size: int = Query(20, ge=1, le=100),
                     u=Depends(get_current_user), s: AsyncSession = Depends(get_session)):
     kb_uuid, source, has_filter = await resolve_kb_filter(s, kb_id)
@@ -272,7 +285,7 @@ async def list_gaps(kb_id: str | None = None, owner: str | None = None,
     else:
         # 本地知识库 UUID（兼容旧链接）：读本地目录
         items, _, _ = await inventory(s, u)
-    matches = filtered(items, has_filter, kb_uuid, owner, document_state)
+    matches = filtered(items, has_filter, kb_uuid, owner, document_state, document_count, folder_count)
     kbs = (await s.execute(visible_kbs(u))).scalars().all()
     return dict(items=matches[(page-1)*size:page*size], total=len(matches),
                 knowledge_bases=[dict(id=str(k.id), name=k.name) for k in kbs],
@@ -282,6 +295,7 @@ async def list_gaps(kb_id: str | None = None, owner: str | None = None,
 @router.get('/export')
 async def export_gaps(kb_id: str | None = None, owner: str | None = None,
                       document_state: Literal['all', 'empty', 'has'] = 'all',
+                      document_count: str | None = None, folder_count: str | None = None,
                       u=Depends(get_current_user), s: AsyncSession = Depends(get_session)):
     kb_uuid, source, has_filter = await resolve_kb_filter(s, kb_id)
     if source is not None:
@@ -294,7 +308,8 @@ async def export_gaps(kb_id: str | None = None, owner: str | None = None,
     return csv_response([['目录ID', '知识库', '目录路径', '知识Owner', '文档数量', '文件夹数量']] +
         [[r['directory_id'], r['kb_name'], r['directory_path'], r['owner'], r['document_count'],
           r.get('folder_count', 0)]
-         for r in filtered(items, has_filter, kb_uuid, owner, document_state)], 'knowledge-gaps.csv')
+         for r in filtered(items, has_filter, kb_uuid, owner, document_state,
+                           document_count, folder_count)], 'knowledge-gaps.csv')
 
 
 @router.get('/owner-template')

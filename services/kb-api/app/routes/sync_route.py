@@ -270,7 +270,8 @@ def sources_stats_all(db=Depends(get_sync_db)):
 
 @router.post("/sources", response_model=SyncSourceOut,
              dependencies=[Depends(require_role("super_admin", "admin"))])
-def create_source(payload: SyncSourceCreate, db=Depends(get_sync_db)):
+def create_source(payload: SyncSourceCreate, u=Depends(require_role("super_admin", "admin")),
+                  db=Depends(get_sync_db)):
     data = payload.model_dump()
     if not (data.get("dify_dataset_name") or "").strip():
         raise HTTPException(status_code=422, detail="请选择目标知识库")
@@ -287,6 +288,10 @@ def create_source(payload: SyncSourceCreate, db=Depends(get_sync_db)):
     finally:
         client.close()
     data.update(dify_dataset_id=dataset["id"], dify_dataset_name=dataset["name"])
+    # 同步身份归属：默认记创建者（定时同步用其钉钉权限拉取）；body 可显式指定/置空
+    import uuid as _uuid
+    owner_raw = data.get("owner_user_id") or str(u.id)
+    data["owner_user_id"] = _uuid.UUID(owner_raw) if isinstance(owner_raw, str) else owner_raw
     source = SyncSource(**data)
     db.add(source)
     db.commit()
@@ -321,6 +326,10 @@ def update_source(source_id: int, payload: SyncSourceUpdate, db=Depends(get_sync
             raise HTTPException(status_code=422, detail=str(exc)) from exc
     if "pipeline_inputs" in updates:
         updates["pipeline_inputs"] = _serialize_pipeline_inputs(updates.get("pipeline_inputs"))
+    if "owner_user_id" in updates:
+        import uuid as _uuid
+        raw = updates["owner_user_id"]
+        updates["owner_user_id"] = _uuid.UUID(raw) if raw else None
     if "dify_dataset_id" in updates or "dify_dataset_name" in updates:
         backend_type = updates.get("backend_type") or source.backend_type or "dify"
         client = make_backend(backend_type, db)
@@ -348,6 +357,9 @@ def update_source(source_id: int, payload: SyncSourceUpdate, db=Depends(get_sync
         setattr(source, key, value)
     db.commit()
     db.refresh(source)
+    if "owner_user_id" in updates:
+        from app.services import dingtalk_operator
+        dingtalk_operator.invalidate_source(source_id)
     reload_sync_jobs()
     return source
 

@@ -9,6 +9,21 @@ const routes: RouteRecordRaw[] = [
     meta: { public: true },
   },
   {
+    // 钉钉扫码授权回调：读 ?code=&state= → /auth/dingtalk-login（已登录时改为绑定当前账号）
+    path: '/login/callback',
+    name: 'LoginCallback',
+    component: () => import('@/views/login/Callback.vue'),
+    meta: { public: true, hidden: true },
+  },
+  {
+    // 首次登录 / 管理员重置后强制设密页：独立居中布局，不挂 AppLayout
+    // allowWhenMustChange：must_change_password=true 时守卫只放行本页与公开页
+    path: '/onboarding/set-password',
+    name: 'OnboardingSetPassword',
+    component: () => import('@/views/onboarding/SetPassword.vue'),
+    meta: { title: '设置密码', hidden: true, standalone: true, allowWhenMustChange: true },
+  },
+  {
     // 独立问答页：全屏复用问答视图（会话历史+问答区），供新窗口/钉钉 H5 微应用接入
     // hidden：不进侧边栏菜单（仅经新窗口按钮/独立地址/钉钉微应用进入）
     path: '/qa',
@@ -56,32 +71,26 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '知识采集', icon: 'Download', group: 'feature' },
       },
       {
-        // 知识加工：页面拆分为二级页（知识打标/解析引擎），父级仅作分组，重定向到首个子页
+        // 知识加工：二级页（解析引擎/结构化处理），父级仅作分组，重定向到首个子页
+        // （入库审核已迁入知识治理分组，见 /govern/review）
         path: 'process',
         name: 'Process',
-        redirect: '/process/tagging',
+        redirect: '/process/engine',
         meta: { title: '知识加工', icon: 'Setting', group: 'feature' },
-      },
-      {
-        // 知识打标：原「知识加工」页内容下沉为二级页（AI 打标 + 摘要生成 + 知识关系构建）
-        path: 'process/tagging',
-        name: 'ProcessTagging',
-        component: () => import('@/views/governance/process.vue'),
-        meta: { title: '知识打标', icon: 'CollectionTag', group: 'feature', parent: '/process', menuOrder: 1 },
       },
       {
         // 解析引擎：双页签（自定义解析 + MinerU WebUI iframe）
         path: 'process/engine',
         name: 'ProcessEngine',
         component: () => import('@/views/governance/ProcessEngine.vue'),
-        meta: { title: '解析引擎', icon: 'Odometer', group: 'feature', parent: '/process', menuOrder: 2 },
+        meta: { title: '解析引擎', icon: 'Odometer', group: 'feature', parent: '/process', menuOrder: 1 },
       },
       {
         // 结构化处理：解析 JSON → 表结构/字段映射 → 预览 → 一键写入共享 PG(structured schema)
         path: 'process/structured',
         name: 'ProcessStructured',
         component: () => import('@/views/governance/StructuredProcess.vue'),
-        meta: { title: '结构化处理', icon: 'Grid', group: 'feature', parent: '/process', menuOrder: 3 },
+        meta: { title: '结构化处理', icon: 'Grid', group: 'feature', parent: '/process', menuOrder: 2 },
       },
       {
         // 知识应用：拆分为二级页（脱敏策略/知识库），父级仅作分组，重定向到首个子页
@@ -132,10 +141,25 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '知识运营', icon: 'DataLine', group: 'feature' },
       },
       {
+        // 知识治理：分组容器（知识缺口/入库审核），父级仅作分组，重定向到首个子页
         path: 'govern',
         name: 'Govern',
-        component: () => import('@/views/governance/govern.vue'),
+        redirect: '/govern/gaps',
         meta: { title: '知识治理', icon: 'Stamp', group: 'feature' },
+      },
+      {
+        // 知识缺口：原「知识治理」页下沉为子页（知识缺口 + 治理标准页签）
+        path: 'govern/gaps',
+        name: 'GovernGaps',
+        component: () => import('@/views/governance/govern.vue'),
+        meta: { title: '知识缺口', icon: 'DataLine', group: 'feature', parent: '/govern', menuOrder: 1 },
+      },
+      {
+        // 入库审核：原「知识打标」页迁入知识治理分组（AI 打标 + 摘要生成 + 知识关系构建 + 钉钉知识入库审核）
+        path: 'govern/review',
+        name: 'GovernReview',
+        component: () => import('@/views/governance/process.vue'),
+        meta: { title: '入库审核', icon: 'Checked', group: 'feature', parent: '/govern', menuOrder: 2 },
       },
       {
         // 知识源管理：原「知识中心」子菜单，知识中心页签迁入知识加工后挂到知识采集分组下
@@ -170,6 +194,13 @@ const routes: RouteRecordRaw[] = [
         name: 'Model',
         component: () => import('@/views/governance/model.vue'),
         meta: { title: '系统配置', icon: 'Cpu', group: 'config' },
+      },
+      {
+        // 个人账户：所有登录角色可见（基本信息 / 钉钉绑定 / 修改密码）
+        path: 'settings/account',
+        name: 'AccountSettings',
+        component: () => import('@/views/settings/Account.vue'),
+        meta: { title: '个人账户', icon: 'User', group: 'config' },
       },
       {
         path: 'agent-config',
@@ -259,6 +290,12 @@ router.beforeEach((to, _from, next) => {
       return
     }
     next(to.meta.standalone ? `/login?redirect=${encodeURIComponent(to.fullPath)}` : '/login')
+    return
+  }
+
+  // 强制改密：首次建档 / 管理员重置密码后，除设密页（allowWhenMustChange）外一律先设密
+  if (userStore.userInfo?.must_change_password && !to.meta.allowWhenMustChange) {
+    next({ path: '/onboarding/set-password', query: { redirect: to.fullPath } })
     return
   }
 

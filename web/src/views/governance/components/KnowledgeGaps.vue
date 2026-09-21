@@ -9,7 +9,7 @@ import { listKnowledgeSources } from '@/api/knowledge-center'
 
 const user = useUserStore()
 const canEdit = computed(() => ['admin', 'super_admin', 'editor'].includes(user.userInfo?.role || ''))
-const filters = reactive<GapFilters>({ document_state: 'all' })
+const filters = reactive<GapFilters>({ document_state: 'all', document_count: '', folder_count: '' })
 const rows = ref<KnowledgeGap[]>([])
 // 知识库下拉选项：来自知识源管理注册表，只取已启用的钉钉知识库（value 为知识库 external_id）
 const kbs = ref<{ id: string; name: string }[]>([])
@@ -212,6 +212,20 @@ onUnmounted(stopPolling)
         <el-option label="全部文档状态" value="all" />
         <el-option label="无文档" value="empty" />
         <el-option label="有文档" value="has" />
+      </el-select>
+      <el-select v-model="filters.document_count" aria-label="文档数量过滤">
+        <el-option label="全部文档数量" value="" />
+        <el-option label="0 个" value="0" />
+        <el-option label="1-9 个" value="1-9" />
+        <el-option label="10-99 个" value="10-99" />
+        <el-option label="100 个以上" value="100+" />
+      </el-select>
+      <el-select v-model="filters.folder_count" aria-label="文件夹数量过滤">
+        <el-option label="全部文件夹数量" value="" />
+        <el-option label="0 个" value="0" />
+        <el-option label="1-9 个" value="1-9" />
+        <el-option label="10-99 个" value="10-99" />
+        <el-option label="100 个以上" value="100+" />
       </el-select>
       <el-button type="primary" :loading="loading" @click="load(true)">查询</el-button>
       <!-- 常驻显示，未选钉钉知识库时禁用，避免用户找不到入口；? 图标绝对定位在按钮右上角 -->

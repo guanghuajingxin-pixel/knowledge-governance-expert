@@ -64,7 +64,9 @@ def _do_retry(task_id: int, source_id: int) -> dict:
         task.retry_count = (task.retry_count or 0) + 1
         db.commit()
 
-        dt = make_dingtalk_client(db)
+        from app.services.dingtalk_operator import resolve_source_operator_sync
+        op_union, _op_tag = resolve_source_operator_sync(db, source)
+        dt = make_dingtalk_client(db, operator_union_id=op_union)
         backend = make_backend(source, db)
         try:
             response = dt.get_node(task.node_id)

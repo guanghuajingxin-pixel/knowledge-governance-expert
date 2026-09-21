@@ -1,0 +1,877 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>MinerU 解析引擎 · OpenAPI Playground</title>
+<!-- 仅用于产物预览，不参与业务逻辑 -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
+<style>
+  :root {
+    --primary: #409eff;
+    --primary-light: #ecf5ff;
+    --primary-dark: #337ecc;
+    --success: #67c23a;
+    --warning: #e6a23c;
+    --danger: #f56c6c;
+    --info: #909399;
+    --text: #303133;
+    --text-regular: #606266;
+    --text-secondary: #909399;
+    --border: #dcdfe6;
+    --border-light: #e4e7ed;
+    --bg: #f5f7fa;
+    --bg-white: #ffffff;
+    --radius: 6px;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+      "Hiragino Sans GB", "Microsoft YaHei", Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 14px;
+    line-height: 1.6;
+  }
+  header {
+    background: var(--bg-white);
+    border-bottom: 1px solid var(--border-light);
+    padding: 16px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    position: sticky;
+    top: 0;
+    z-index: 10;
+  }
+  header h1 { font-size: 18px; margin: 0; font-weight: 600; }
+  header .subtitle { color: var(--text-secondary); font-size: 12px; margin-top: 2px; }
+  header .status {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 12px; border-radius: 20px;
+    background: var(--bg); font-size: 12px; color: var(--text-regular);
+  }
+  header .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--info); }
+  header .dot.ok { background: var(--success); }
+  header .dot.err { background: var(--danger); }
+
+  main {
+    display: grid;
+    grid-template-columns: 380px 1fr;
+    gap: 16px;
+    padding: 16px 24px 24px;
+    align-items: start;
+  }
+  @media (max-width: 1100px) {
+    main { grid-template-columns: 1fr; }
+  }
+
+  .card {
+    background: var(--bg-white);
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius);
+    padding: 16px;
+  }
+  .card + .card { margin-top: 12px; }
+  .card h2 {
+    font-size: 14px; font-weight: 600; margin: 0 0 12px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .card h2 .step {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 20px; height: 20px; border-radius: 50%;
+    background: var(--primary); color: #fff; font-size: 12px; font-weight: 500;
+  }
+  .card h2 .hint { font-weight: 400; color: var(--text-secondary); font-size: 12px; }
+
+  label { display: block; font-size: 12px; color: var(--text-regular); margin-bottom: 4px; }
+  input[type="text"], input[type="password"], input[type="number"], select, textarea {
+    width: 100%;
+    padding: 7px 11px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg-white);
+    color: var(--text);
+    font-size: 13px;
+    font-family: inherit;
+    outline: none;
+    transition: border-color .2s;
+  }
+  input:focus, select:focus, textarea:focus { border-color: var(--primary); }
+  textarea { resize: vertical; font-family: var(--mono); font-size: 12px; }
+  .row { display: flex; gap: 8px; }
+  .row > * { flex: 1; }
+  .field + .field { margin-top: 10px; }
+
+  button {
+    padding: 8px 16px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg-white);
+    color: var(--text-regular);
+    font-size: 13px;
+    cursor: pointer;
+    font-family: inherit;
+    transition: all .2s;
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  button:hover:not(:disabled) { color: var(--primary); border-color: var(--primary); background: var(--primary-light); }
+  button:disabled { cursor: not-allowed; opacity: .5; }
+  button.primary { background: var(--primary); border-color: var(--primary); color: #fff; }
+  button.primary:hover:not(:disabled) { background: var(--primary-dark); border-color: var(--primary-dark); color: #fff; }
+  button.danger:hover:not(:disabled) { color: var(--danger); border-color: var(--danger); background: #fef0f0; }
+  button.small { padding: 4px 10px; font-size: 12px; }
+
+  .drop {
+    border: 2px dashed var(--border);
+    border-radius: var(--radius);
+    padding: 24px 12px;
+    text-align: center;
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: all .2s;
+    background: #fafbfc;
+  }
+  .drop:hover, .drop.over { border-color: var(--primary); background: var(--primary-light); color: var(--primary); }
+  .drop .file-info { color: var(--text); font-size: 13px; }
+  .drop .file-info strong { color: var(--primary); }
+
+  .checkgroup { display: flex; gap: 16px; flex-wrap: wrap; }
+  .checkgroup label { display: inline-flex; align-items: center; gap: 6px; margin: 0; font-size: 13px; color: var(--text-regular); cursor: pointer; }
+
+  .log {
+    background: #1e1e1e; color: #d4d4d4;
+    font-family: var(--mono); font-size: 12px;
+    padding: 10px 12px; border-radius: var(--radius);
+    max-height: 220px; overflow: auto;
+    line-height: 1.7;
+  }
+  .log .l-info { color: #9cdcfe; }
+  .log .l-ok { color: #b5cea8; }
+  .log .l-warn { color: #dcdcaa; }
+  .log .l-err { color: #f48771; }
+  .log .l-dim { color: #808080; }
+  .log .ts { color: #6a9955; margin-right: 6px; }
+
+  .progress-bar {
+    height: 6px; background: var(--border-light);
+    border-radius: 3px; overflow: hidden; margin-top: 8px;
+  }
+  .progress-bar > div {
+    height: 100%; background: var(--primary);
+    transition: width .3s; width: 0;
+  }
+  .progress-bar.done > div { background: var(--success); }
+  .progress-bar.err > div { background: var(--danger); }
+
+  .tabs { display: flex; gap: 0; border-bottom: 1px solid var(--border-light); margin-bottom: 12px; }
+  .tab {
+    padding: 8px 16px; cursor: pointer;
+    color: var(--text-regular); font-size: 13px;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .tab.active { color: var(--primary); border-bottom-color: var(--primary); font-weight: 500; }
+  .tab .badge {
+    background: var(--bg); color: var(--text-secondary);
+    font-size: 11px; padding: 1px 6px; border-radius: 8px; font-weight: 400;
+  }
+  .tab.active .badge { background: var(--primary-light); color: var(--primary); }
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+
+  .toolbar {
+    display: flex; gap: 8px; align-items: center;
+    margin-bottom: 8px; flex-wrap: wrap;
+  }
+  .toolbar .grow { flex: 1; }
+  .toolbar .meta { color: var(--text-secondary); font-size: 12px; }
+
+  .result-box {
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius);
+    background: #fafbfc;
+    max-height: 640px;
+    overflow: auto;
+    padding: 16px 20px;
+  }
+  .result-box.raw {
+    padding: 0; background: #1e1e1e;
+  }
+  .result-box.raw pre {
+    margin: 0; padding: 12px 16px;
+    color: #d4d4d4; font-family: var(--mono); font-size: 12px;
+    white-space: pre; overflow-x: auto;
+  }
+  .result-box .empty {
+    color: var(--text-secondary); text-align: center;
+    padding: 60px 20px; font-size: 13px;
+  }
+
+  /* Markdown rendering */
+  .md h1, .md h2, .md h3, .md h4 { margin: 16px 0 8px; font-weight: 600; line-height: 1.4; }
+  .md h1 { font-size: 22px; border-bottom: 1px solid var(--border-light); padding-bottom: 6px; }
+  .md h2 { font-size: 18px; }
+  .md h3 { font-size: 16px; }
+  .md p { margin: 8px 0; }
+  .md code { background: #f0f2f5; padding: 1px 5px; border-radius: 3px; font-family: var(--mono); font-size: 12.5px; }
+  .md pre { background: #1e1e1e; color: #d4d4d4; padding: 12px; border-radius: var(--radius); overflow-x: auto; }
+  .md pre code { background: transparent; color: inherit; padding: 0; }
+  .md table { border-collapse: collapse; margin: 8px 0; }
+  .md table th, .md table td { border: 1px solid var(--border); padding: 6px 10px; }
+  .md table th { background: #f5f7fa; }
+  .md img { max-width: 100%; }
+  .md blockquote { border-left: 3px solid var(--primary); padding-left: 10px; color: var(--text-regular); margin: 8px 0; }
+  .md ul, .md ol { padding-left: 24px; }
+
+  /* JSON syntax colors */
+  .json .k { color: #9cdcfe; }
+  .json .s { color: #ce9178; }
+  .json .n { color: #b5cea8; }
+  .json .b { color: #569cd6; }
+  .json .null { color: #569cd6; }
+
+  .pill {
+    display: inline-block; padding: 1px 8px; border-radius: 10px;
+    font-size: 11px; background: var(--bg); color: var(--text-secondary);
+    border: 1px solid var(--border-light);
+  }
+  .pill.ok { background: #f0f9eb; color: var(--success); border-color: #e1f3d8; }
+  .pill.warn { background: #fdf6ec; color: var(--warning); border-color: #faecd8; }
+  .pill.err { background: #fef0f0; color: var(--danger); border-color: #fde2e2; }
+  .pill.info { background: var(--primary-light); color: var(--primary); border-color: #d9ecff; }
+
+  details summary { cursor: pointer; color: var(--text-regular); font-size: 12px; padding: 4px 0; user-select: none; }
+  details summary:hover { color: var(--primary); }
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>MinerU 解析引擎 · OpenAPI Playground</h1>
+    <div class="subtitle">仅调用 kb-api 公开契约 <code>/api/v1/mineru/v1/*</code> · 登录换 JWT · 三步上传 · 轮询任务 · 下载 markdown &amp; structured_json</div>
+  </div>
+  <div class="status">
+    <span class="dot" id="dotHealth"></span>
+    <span id="healthText">未检测</span>
+  </div>
+</header>
+
+<main>
+  <!-- 左侧：配置 + 上传 + 控制 -->
+  <section>
+    <div class="card">
+      <h2><span class="step">1</span> 连接配置</h2>
+      <div class="field">
+        <label>kb-api Base URL</label>
+        <input type="text" id="cfgBase" value="" placeholder="留空则用当前页面同源" />
+      </div>
+      <div class="field">
+        <label>X-Mineru-Base（引擎）</label>
+        <select id="cfgEngine">
+          <option value="http://127.0.0.1:8010">本地引擎 · http://127.0.0.1:8010</option>
+          <option value="cloud">云端 SaaS · cloud</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>自定义 X-Mineru-Base（可选）</label>
+        <input type="text" id="cfgEngineCustom" placeholder="留空则用上方下拉值" />
+      </div>
+      <div class="toolbar" style="margin-top:12px;">
+        <button id="btnHealth" class="small">测试连接 / 能力发现</button>
+        <span class="grow"></span>
+        <span id="capInfo" class="meta"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2><span class="step">2</span> 鉴权（JWT）</h2>
+      <div class="row">
+        <div class="field">
+          <label>用户名</label>
+          <input type="text" id="authUser" value="admin" />
+        </div>
+        <div class="field">
+          <label>密码</label>
+          <input type="password" id="authPass" value="admin123" />
+        </div>
+      </div>
+      <div class="toolbar" style="margin-top:8px;">
+        <button id="btnLogin" class="small primary">登录换 Token</button>
+        <button id="btnLogout" class="small">清除</button>
+        <span class="grow"></span>
+        <span id="authInfo" class="meta">未登录</span>
+      </div>
+      <details style="margin-top:8px;">
+        <summary>手动粘贴 Token（跳过登录）</summary>
+        <div class="field" style="margin-top:6px;">
+          <textarea id="authToken" rows="3" placeholder="Bearer Token（不含 Bearer 前缀）"></textarea>
+        </div>
+      </details>
+    </div>
+
+    <div class="card">
+      <h2><span class="step">3</span> 选择文件</h2>
+      <div class="drop" id="dropZone">
+        <input type="file" id="fileInput" style="display:none" />
+        <div id="dropHint">点击选择或拖入文件<br /><span style="font-size:11px;">PDF / DOCX / PPTX / XLSX / HTML / TXT / MD / CSV / 图片</span></div>
+      </div>
+      <div class="field" style="margin-top:12px;">
+        <label>解析档位 tier</label>
+        <select id="optTier">
+          <option value="speed">speed · 速度优先</option>
+          <option value="balanced" selected>balanced · 均衡（推荐）</option>
+          <option value="quality">quality · 效果最佳</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>OCR 模式</label>
+        <select id="optOcr">
+          <option value="auto" selected>auto · 自动</option>
+          <option value="txt">txt · 仅内嵌文字层</option>
+          <option value="ocr">ocr · 强制 OCR（扫描件）</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>页码范围 page_range（可选，仅 PDF）</label>
+        <input type="text" id="optPages" placeholder="如 1-5,8 或 all 或 r3-r1，留空表示全部" />
+      </div>
+      <div class="field">
+        <label>输出格式</label>
+        <div class="checkgroup">
+          <label><input type="checkbox" id="optMd" checked /> markdown</label>
+          <label><input type="checkbox" id="optJson" checked /> structured_json</label>
+        </div>
+      </div>
+      <div class="toolbar" style="margin-top:12px;">
+        <button id="btnRun" class="primary">开始解析</button>
+        <button id="btnCancel" class="danger" disabled>取消任务</button>
+      </div>
+      <div class="progress-bar" id="progressBar"><div></div></div>
+      <div class="meta" id="progressText" style="color:var(--text-secondary);font-size:12px;margin-top:4px;">等待操作</div>
+    </div>
+
+    <div class="card">
+      <h2><span class="step">4</span> 执行日志</h2>
+      <div class="log" id="log"></div>
+    </div>
+  </section>
+
+  <!-- 右侧：结果 -->
+  <section>
+    <div class="card">
+      <h2>
+        <span>解析产物</span>
+        <span class="hint" id="jobMeta">尚无任务</span>
+      </h2>
+      <div class="tabs">
+        <div class="tab active" data-tab="preview"><span>Markdown 预览</span><span class="badge" id="badgeMd">-</span></div>
+        <div class="tab" data-tab="md"><span>Markdown 源码</span></div>
+        <div class="tab" data-tab="json"><span>Structured JSON</span><span class="badge" id="badgeJson">-</span></div>
+        <div class="tab" data-tab="job"><span>任务详情</span></div>
+      </div>
+
+      <div class="toolbar">
+        <button id="btnDownMd" class="small" disabled>下载 .md</button>
+        <button id="btnDownJson" class="small" disabled>下载 .json</button>
+        <button id="btnDownZip" class="small" disabled title="仅云端引擎支持">下载 result.zip</button>
+        <span class="grow"></span>
+        <span class="meta" id="resultMeta"></span>
+      </div>
+
+      <div class="tab-panel active" data-panel="preview">
+        <div class="result-box md" id="mdPreview"><div class="empty">尚无 markdown 产物</div></div>
+      </div>
+      <div class="tab-panel" data-panel="md">
+        <div class="result-box raw"><pre id="mdRaw"></pre></div>
+      </div>
+      <div class="tab-panel" data-panel="json">
+        <div class="result-box raw"><pre id="jsonView" class="json"></pre></div>
+      </div>
+      <div class="tab-panel" data-panel="job">
+        <div class="result-box raw"><pre id="jobView" class="json"></pre></div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script>
+/* =========================================================
+ * 状态
+ * =======================================================*/
+const state = {
+  token: '',
+  file: null,
+  uploadId: '',
+  fileId: '',
+  jobId: '',
+  job: null,
+  abort: null,          // AbortController for polling
+  mdBlob: null,
+  jsonBlob: null,
+  capabilities: null,
+};
+
+/* =========================================================
+ * 工具
+ * =======================================================*/
+const $ = (id) => document.getElementById(id);
+const now = () => new Date().toLocaleTimeString('zh-CN', { hour12: false });
+
+function log(msg, level = 'info') {
+  const el = $('log');
+  const div = document.createElement('div');
+  div.innerHTML = `<span class="ts">[${now()}]</span><span class="l-${level}"></span>`;
+  div.lastChild.textContent = msg;
+  el.appendChild(div);
+  el.scrollTop = el.scrollHeight;
+}
+function setProgress(pct, text, kind = '') {
+  const bar = $('progressBar');
+  bar.className = 'progress-bar ' + kind;
+  bar.firstElementChild.style.width = Math.max(0, Math.min(100, pct)) + '%';
+  $('progressText').textContent = text;
+}
+function setHealth(state_, text) {
+  $('dotHealth').className = 'dot ' + (state_ === 'ok' ? 'ok' : state_ === 'err' ? 'err' : '');
+  $('healthText').textContent = text;
+}
+function apiBase() {
+  const v = $('cfgBase').value.trim();
+  if (v) return v.replace(/\/+$/, '');
+  // 同源：Vite dev(3000) 有 /api/v1 → 8000 的代理；直接部署到 kb-api 同源也可用
+  return window.location.origin === 'file://' ? 'http://127.0.0.1:8000' : '';
+}
+function engineHeader() {
+  const custom = $('cfgEngineCustom').value.trim();
+  return custom || $('cfgEngine').value;
+}
+function headers(extra = {}) {
+  const h = { 'X-Mineru-Base': engineHeader(), ...extra };
+  if (state.token) h['Authorization'] = 'Bearer ' + state.token;
+  return h;
+}
+function isLoopback() {
+  const h = window.location.hostname;
+  return h === 'localhost' || h === '127.0.0.1' || h === '::1' || h === '0.0.0.0';
+}
+function netHint(e) {
+  // 网络层失败（fetch 抛 TypeError）通常是 CORS / 后端未启动 / 源不对
+  if (e && e.message === 'Failed to fetch') {
+    const proto = window.location.protocol;
+    if (proto === 'file:') {
+      return '（网络层失败：当前以 file:// 打开页面，直连 kb-api 会被 CORS 拦截。请改用 http://localhost:3000/mineru-playground.html 打开，并把「kb-api Base URL」留空走同源代理）';
+    }
+    if (!isLoopback()) {
+      return '（网络层失败：当前页面源 ' + window.location.origin + ' 是远程预览/托管域名，无法访问你本机的 kb-api。请在本机浏览器打开 http://localhost:3000/mineru-playground.html 并留空 Base URL）';
+    }
+    return '（网络层失败：多为跨域 CORS 或后端未启动。请留空「kb-api Base URL」走同源代理；若确需直连 8000，须把当前源 ' + window.location.origin + ' 加入 kb-api CORS 白名单 services/kb-api/app/main.py）';
+  }
+  return '';
+}
+async function jfetch(path, opts = {}) {
+  const url = apiBase() + path;
+  const res = await fetch(url, opts);
+  const ctype = res.headers.get('content-type') || '';
+  const raw = await res.text();   // 先取文本，兼容空 body（如 PUT content 返回 content-length:0）
+  let body;
+  if (ctype.includes('application/json')) {
+    if (raw.trim() === '') body = {};
+    else { try { body = JSON.parse(raw); } catch { body = raw; } }
+  } else {
+    body = raw;
+  }
+  if (!res.ok) {
+    const detail = typeof body === 'string' ? body : (body.detail || body.error?.message || JSON.stringify(body));
+    const err = new Error(`HTTP ${res.status} ${res.statusText}: ${detail}`);
+    err.status = res.status; err.body = body;
+    throw err;
+  }
+  return { status: res.status, headers: res.headers, body };
+}
+function formatBytes(n) {
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+  return (n / 1024 / 1024).toFixed(2) + ' MB';
+}
+function escapeHtml(s) {
+  return s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+function syntaxJson(obj) {
+  const str = JSON.stringify(obj, null, 2);
+  return escapeHtml(str).replace(
+    /("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false)\b|\bnull\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g,
+    (m) => {
+      let cls = 'n';
+      if (/^&quot;/.test(m)) cls = /:\s*$/.test(m.replace(/&quot;/g, '"')) ? 'k' : 's';
+      else if (/true|false/.test(m)) cls = 'b';
+      else if (/null/.test(m)) cls = 'null';
+      return `<span class="${cls}">${m}</span>`;
+    }
+  );
+}
+function mimeOf(name) {
+  const ext = (name.split('.').pop() || '').toLowerCase();
+  const map = {
+    pdf: 'application/pdf',
+    doc: 'application/msword',
+    docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    ppt: 'application/vnd.ms-powerpoint',
+    pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    xls: 'application/vnd.ms-excel',
+    xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    html: 'text/html', htm: 'text/html',
+    txt: 'text/plain', md: 'text/markdown', csv: 'text/csv',
+    png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg',
+    gif: 'image/gif', bmp: 'image/bmp', webp: 'image/webp', tif: 'image/tiff', tiff: 'image/tiff',
+  };
+  return map[ext] || 'application/octet-stream';
+}
+
+/* =========================================================
+ * Tab 切换
+ * =======================================================*/
+document.querySelectorAll('.tab').forEach(t => {
+  t.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+    document.querySelectorAll('.tab-panel').forEach(x => x.classList.remove('active'));
+    t.classList.add('active');
+    document.querySelector(`.tab-panel[data-panel="${t.dataset.tab}"]`).classList.add('active');
+  });
+});
+
+/* =========================================================
+ * 文件选择 / 拖拽
+ * =======================================================*/
+const dropZone = $('dropZone');
+const fileInput = $('fileInput');
+dropZone.addEventListener('click', () => fileInput.click());
+['dragenter', 'dragover'].forEach(ev => dropZone.addEventListener(ev, e => {
+  e.preventDefault(); dropZone.classList.add('over');
+}));
+['dragleave', 'drop'].forEach(ev => dropZone.addEventListener(ev, e => {
+  e.preventDefault(); dropZone.classList.remove('over');
+}));
+dropZone.addEventListener('drop', e => {
+  const f = e.dataTransfer.files?.[0];
+  if (f) setFile(f);
+});
+fileInput.addEventListener('change', e => {
+  const f = e.target.files?.[0];
+  if (f) setFile(f);
+});
+function setFile(f) {
+  state.file = f;
+  state.uploadId = ''; state.fileId = '';
+  dropZone.innerHTML = `<div class="file-info">
+    <strong>${escapeHtml(f.name)}</strong><br/>
+    <span style="color:var(--text-secondary);font-size:12px;">${formatBytes(f.size)} · ${mimeOf(f.name)}</span>
+  </div>`;
+  log(`已选择文件：${f.name} (${formatBytes(f.size)}, ${mimeOf(f.name)})`);
+}
+
+/* =========================================================
+ * 登录 / 健康
+ * =======================================================*/
+$('btnLogin').addEventListener('click', async () => {
+  const u = $('authUser').value.trim(), p = $('authPass').value;
+  if (!u || !p) return log('请填写用户名和密码', 'err');
+  try {
+    log(`POST /api/v1/auth/login (${u})`);
+    const { body } = await jfetch('/api/v1/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: u, password: p }),
+    });
+    state.token = body.access_token;
+    $('authToken').value = state.token;
+    $('authInfo').textContent = `已登录 · ${u}`;
+    log('登录成功，已获取 JWT', 'ok');
+  } catch (e) {
+    log('登录失败：' + e.message + netHint(e), 'err');
+  }
+});
+$('btnLogout').addEventListener('click', () => {
+  state.token = ''; $('authToken').value = ''; $('authInfo').textContent = '未登录';
+  log('已清除 Token');
+});
+$('authToken').addEventListener('input', e => {
+  state.token = e.target.value.trim();
+  $('authInfo').textContent = state.token ? '已使用手动 Token' : '未登录';
+});
+
+$('btnHealth').addEventListener('click', async () => {
+  try {
+    setHealth('', '检测中…');
+    const { body } = await jfetch('/api/v1/mineru/v1/health', { headers: headers() });
+    state.capabilities = body.capabilities || {};
+    const cap = state.capabilities;
+    setHealth('ok', `${cap.engine_label || cap.engine || 'engine'} · v${body.version || '?'}`);
+    $('capInfo').innerHTML = `
+      <span class="pill info">${cap.engine || '?'}</span>
+      <span class="pill">tiers: ${(cap.tiers || []).join('/')}</span>
+      <span class="pill">cancelable: ${cap.cancelable ? 'yes' : 'no'}</span>
+      <span class="pill">page_range: ${cap.page_range ? 'yes' : 'no'}</span>
+      <span class="pill">max: ${cap.max_file_mb || '?'}MB</span>`;
+    log('健康检查通过：' + JSON.stringify(cap), 'ok');
+  } catch (e) {
+    setHealth('err', '连接失败');
+    $('capInfo').textContent = '';
+    log('健康检查失败：' + e.message + netHint(e), 'err');
+  }
+});
+
+/* =========================================================
+ * 主流程
+ * =======================================================*/
+$('btnRun').addEventListener('click', run);
+$('btnCancel').addEventListener('click', cancelJob);
+
+async function run() {
+  if (!state.token) return log('请先登录或粘贴 Token', 'err');
+  if (!state.file) return log('请先选择文件', 'err');
+  const outputFormats = [];
+  if ($('optMd').checked) outputFormats.push('markdown');
+  if ($('optJson').checked) outputFormats.push('structured_json');
+  if (!outputFormats.length) return log('请至少选择一种输出格式', 'err');
+
+  resetResult();
+  $('btnRun').disabled = true;
+  state.abort = new AbortController();
+
+  try {
+    // ① 创建上传会话
+    setProgress(5, '步骤 1/6 · 创建上传会话…');
+    const mime = mimeOf(state.file.name);
+    log(`POST /v1/uploads · filename=${state.file.name} bytes=${state.file.size} mime=${mime}`);
+    const upRes = await jfetch('/api/v1/mineru/v1/uploads', {
+      method: 'POST',
+      headers: headers({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ filename: state.file.name, bytes: state.file.size, mime_type: mime }),
+      signal: state.abort.signal,
+    });
+    state.uploadId = upRes.body.id;
+    log(`upload_id = ${state.uploadId}`, 'ok');
+
+    // ② PUT 原始字节
+    setProgress(15, '步骤 2/6 · 上传原始字节…');
+    log(`PUT /v1/uploads/${state.uploadId}/content (${formatBytes(state.file.size)})`);
+    await jfetch(`/api/v1/mineru/v1/uploads/${state.uploadId}/content`, {
+      method: 'PUT',
+      headers: headers({ 'Content-Type': mime }),
+      body: state.file,
+      signal: state.abort.signal,
+    });
+    log('字节上传完成', 'ok');
+
+    // ③ 完成上传
+    setProgress(30, '步骤 3/6 · 完成上传…');
+    log(`POST /v1/uploads/${state.uploadId}/complete`);
+    const cRes = await jfetch(`/api/v1/mineru/v1/uploads/${state.uploadId}/complete`, {
+      method: 'POST', headers: headers(), signal: state.abort.signal,
+    });
+    state.fileId = cRes.body.file?.id;
+    if (!state.fileId) throw new Error('complete 未返回 file.id: ' + JSON.stringify(cRes.body));
+    log(`file_id = ${state.fileId}`, 'ok');
+
+    // ④ 创建解析任务
+    setProgress(40, '步骤 4/6 · 创建解析任务…');
+    const payload = {
+      files: [{ source: { type: 'file_id', file_id: state.fileId } }],
+      ocr_mode: $('optOcr').value,
+      output_formats: outputFormats,
+      tier: $('optTier').value,
+    };
+    const pr = $('optPages').value.trim();
+    if (pr) payload.files[0].page_range = pr;
+    log('POST /v1/parse/jobs · ' + JSON.stringify(payload));
+    const jRes = await jfetch('/api/v1/mineru/v1/parse/jobs', {
+      method: 'POST',
+      headers: headers({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(payload),
+      signal: state.abort.signal,
+    });
+    state.jobId = jRes.body.job_id;
+    state.job = jRes.body;
+    log(`job_id = ${state.jobId} · status=${jRes.body.status} · tier=${jRes.body.tier}(raw=${jRes.body.raw_tier})`, 'ok');
+    $('btnCancel').disabled = !(state.capabilities?.cancelable ?? true);
+    renderJob();
+
+    // ⑤ 轮询
+    setProgress(50, '步骤 5/6 · 轮询任务进度…');
+    await pollJob();
+
+    // ⑥ 下载产物
+    setProgress(90, '步骤 6/6 · 下载产物…');
+    await downloadArtifacts();
+
+    setProgress(100, '解析完成', 'done');
+    log('=== 全部完成 ===', 'ok');
+  } catch (e) {
+    if (e.name === 'AbortError') {
+      log('已中止', 'warn');
+      setProgress(0, '已中止', 'err');
+    } else {
+      log('失败：' + e.message + netHint(e), 'err');
+      setProgress(100, '解析失败', 'err');
+    }
+  } finally {
+    $('btnRun').disabled = false;
+    $('btnCancel').disabled = true;
+  }
+}
+
+async function pollJob() {
+  const startedAt = Date.now();
+  let lastPct = 50;
+  while (true) {
+    if (state.abort?.signal.aborted) throw new DOMException('aborted', 'AbortError');
+    const { body } = await jfetch(`/api/v1/mineru/v1/parse/jobs/${state.jobId}`, {
+      headers: headers(), signal: state.abort.signal,
+    });
+    state.job = body;
+    renderJob();
+    const p = body.progress || { completed: 0, failed: 0, total: 1 };
+    const done = (p.completed || 0) + (p.failed || 0);
+    const pct = 50 + Math.round((done / Math.max(1, p.total)) * 35);
+    if (pct !== lastPct) {
+      lastPct = pct;
+      setProgress(pct, `轮询中 · status=${body.status} · ${done}/${p.total}`);
+    }
+    log(`poll · status=${body.status} · progress ${done}/${p.total} · elapsed ${((Date.now() - startedAt) / 1000).toFixed(1)}s`);
+    if (['completed', 'partial', 'failed', 'canceled'].includes(body.status)) {
+      if (body.status === 'failed' || body.status === 'canceled') {
+        throw new Error(`任务终态：${body.status}${body.error ? ' · ' + body.error : ''}`);
+      }
+      if (body.status === 'partial') log('部分文件失败，继续下载可用产物', 'warn');
+      return;
+    }
+    await new Promise(r => setTimeout(r, 2000));
+  }
+}
+
+async function cancelJob() {
+  if (!state.jobId) return;
+  try {
+    log(`DELETE /v1/parse/jobs/${state.jobId}`);
+    await jfetch(`/api/v1/mineru/v1/parse/jobs/${state.jobId}`, { method: 'DELETE', headers: headers() });
+    state.abort?.abort();
+    log('已发送取消请求', 'ok');
+  } catch (e) {
+    log('取消失败：' + e.message, 'err');
+  }
+}
+
+async function downloadArtifacts() {
+  const files = state.job?.files || [];
+  if (!files.length) return log('任务无文件产物', 'warn');
+  const f0 = files[0];
+  const outs = f0.output_files || {};
+  const mdId = outs.markdown?.file_id;
+  const jsId = outs.structured_json?.file_id;
+
+  if (mdId) {
+    log(`GET /v1/files/${mdId}/content (markdown)`);
+    const res = await fetch(apiBase() + `/api/v1/mineru/v1/files/${mdId}/content`, { headers: headers() });
+    if (!res.ok) throw new Error('下载 markdown 失败 HTTP ' + res.status);
+    const blob = await res.blob();
+    state.mdBlob = blob;
+    const text = await blob.text();
+    $('mdRaw').textContent = text;
+    $('mdPreview').innerHTML = marked.parse(text);
+    $('badgeMd').textContent = formatBytes(blob.size);
+    $('btnDownMd').disabled = false;
+    log(`markdown 下载完成 · ${formatBytes(blob.size)} · ${text.split('\n').length} 行`, 'ok');
+  }
+  if (jsId) {
+    log(`GET /v1/files/${jsId}/content (structured_json)`);
+    const res = await fetch(apiBase() + `/api/v1/mineru/v1/files/${jsId}/content`, { headers: headers() });
+    if (!res.ok) throw new Error('下载 structured_json 失败 HTTP ' + res.status);
+    const blob = await res.blob();
+    state.jsonBlob = blob;
+    const text = await blob.text();
+    let parsed; try { parsed = JSON.parse(text); } catch { parsed = text; }
+    $('jsonView').innerHTML = typeof parsed === 'string' ? escapeHtml(parsed) : syntaxJson(parsed);
+    $('badgeJson').textContent = formatBytes(blob.size);
+    $('btnDownJson').disabled = false;
+    log(`structured_json 下载完成 · ${formatBytes(blob.size)}`, 'ok');
+  }
+  // 云端 zip
+  const engine = engineHeader();
+  if (engine === 'cloud') {
+    $('btnDownZip').disabled = false;
+    $('btnDownZip').onclick = async () => {
+      try {
+        const r = await fetch(apiBase() + `/api/v1/mineru/v1/parse/jobs/${state.jobId}/files/0/result-zip`, { headers: headers() });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const b = await r.blob();
+        triggerDownload(b, (state.file?.name || 'result').replace(/\.[^.]+$/, '') + '-result.zip');
+      } catch (e) { log('下载 zip 失败：' + e.message, 'err'); }
+    };
+  }
+  $('jobMeta').textContent = `job_id=${state.jobId} · status=${state.job.status} · tier=${state.job.tier}`;
+  $('resultMeta').textContent = `产物：${mdId ? 'markdown ✓ ' : ''}${jsId ? 'structured_json ✓' : ''}`;
+}
+
+function renderJob() {
+  $('jobView').innerHTML = syntaxJson(state.job || {});
+  $('jobMeta').textContent = state.job ? `job_id=${state.jobId} · status=${state.job.status}` : '尚无任务';
+}
+
+function resetResult() {
+  state.mdBlob = null; state.jsonBlob = null;
+  $('mdPreview').innerHTML = '<div class="empty">解析中…</div>';
+  $('mdRaw').textContent = '';
+  $('jsonView').innerHTML = '';
+  $('jobView').innerHTML = '';
+  $('badgeMd').textContent = '-';
+  $('badgeJson').textContent = '-';
+  $('btnDownMd').disabled = true;
+  $('btnDownJson').disabled = true;
+  $('btnDownZip').disabled = true;
+  $('resultMeta').textContent = '';
+}
+
+/* =========================================================
+ * 下载按钮
+ * =======================================================*/
+function triggerDownload(blob, filename) {
+  const a = document.createElement('a');
+  const url = URL.createObjectURL(blob);
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click();
+  setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 500);
+}
+$('btnDownMd').addEventListener('click', () => {
+  if (!state.mdBlob) return;
+  const name = (state.file?.name || 'result').replace(/\.[^.]+$/, '') + '.md';
+  triggerDownload(state.mdBlob, name);
+});
+$('btnDownJson').addEventListener('click', () => {
+  if (!state.jsonBlob) return;
+  const name = (state.file?.name || 'result').replace(/\.[^.]+$/, '') + '.structured.json';
+  triggerDownload(state.jsonBlob, name);
+});
+
+/* =========================================================
+ * 初始化
+ * =======================================================*/
+(function init() {
+  // 默认基址：如果页面挂在 3000（Vite）或 8000（kb-api）都可用同源；file:// 回退 8000
+  if (window.location.protocol === 'file:') {
+    $('cfgBase').value = 'http://127.0.0.1:8000';
+    log('警告：当前以 file:// 打开页面。浏览器直连 kb-api(8000) 会被 CORS 拦截（白名单仅 localhost:5173）。请改用 http://localhost:3000/mineru-playground.html 打开并留空 Base URL。', 'warn');
+  } else if (!isLoopback()) {
+    log('警告：当前页面源为 ' + window.location.origin + '（远程预览/托管域名），无法连通你本机的 kb-api。请在本机浏览器打开 http://localhost:3000/mineru-playground.html 并留空 Base URL。', 'warn');
+  }
+  log('Playground 已加载。使用步骤：① 测试连接 → ② 登录 → ③ 选择文件 → ④ 开始解析');
+  log('所有请求仅调用文档中列出的 kb-api OpenAPI 端点（/api/v1/auth/login、/api/v1/mineru/v1/*）', 'dim');
+})();
+</script>
+</body>
+</html>

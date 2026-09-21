@@ -40,15 +40,19 @@ def load_sync_settings(db) -> dict[str, str]:
     return vals
 
 
-def make_dingtalk_client(db):
-    """用解析后的凭据构建同步 DingTalkClient。"""
+def make_dingtalk_client(db, operator_union_id: str | None = None):
+    """用解析后的凭据构建同步 DingTalkClient。
+
+    operator_union_id：按同步源 owner 维度传入（权限与 owner 一致）；
+    不传回退全局 dingtalk_operator_union_id 服务账号（历史行为）。
+    """
     from app.services.sync.dingtalk_sync_client import DingTalkClient
 
     vals = load_sync_settings(db)
     return DingTalkClient(
         vals["dingtalk_app_key"],
         vals["dingtalk_app_secret"],
-        vals["dingtalk_operator_union_id"],
+        operator_union_id or vals["dingtalk_operator_union_id"],
     )
 
 

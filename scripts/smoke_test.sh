@@ -180,10 +180,36 @@ import sys,json
 d=json.load(sys.stdin)
 for k,v in d.items():
     if v['is_secret'] and v['is_set']:
-        assert v['value']=='', f'secret {k} leaked: {v}'
+        # 掩码口径：空串或 sk-****f57b 形态（首三尾四+****），不得返回原文
+        assert v['value']=='' or ('****' in v['value'] and len(v['value'])<=12), f'secret {k} leaked: {v}'
         print(f'  -> {k}: MASKED (is_set={v[\"is_set\"]})')
     else:
         print(f'  -> {k}: value={v[\"value\"]!r} is_set={v[\"is_set\"]}')
 "
+
+# --- 10. Onboarding: 新建账号强制改密链路 -----------------------------------
+echo "[10] Onboarding 强制改密（管理员建号 → 首登被强制设密 → 设密后正常登录）"
+NEWU="smoke_ob_$(date +%s)"
+curl -s -X POST "$KB_API/api/v1/users" -H "$H" -H 'Content-Type: application/json' \
+  -d "{\"username\":\"$NEWU\",\"password\":\"Tmp12345678\",\"role\":\"viewer\"}" \
+  | python3 -c "import sys,json;d=json.load(sys.stdin);assert d.get('must_change_password') is True, f'created user should must_change_password: {d}';print('  -> created (must_change_password=true)')"
+RESP=$(curl -s -X POST "$KB_API/api/v1/auth/login" -H 'Content-Type: application/json' \
+  -d "{\"username\":\"$NEWU\",\"password\":\"Tmp12345678\"}")
+echo "$RESP" | python3 -c "import sys,json;d=json.load(sys.stdin);assert d.get('must_set_password') is True, f'first login should must_set_password: {d}';print('  -> first login must_set_password=true')"
+TK=$(echo "$RESP" | python3 -c "import sys,json;print(json.load(sys.stdin)['access_token'])")
+curl -s -X POST "$KB_API/api/v1/auth/set-password" -H "Authorization: Bearer $TK" -H 'Content-Type: application/json' \
+  -d '{"new_password":"New12345678","new_password_confirm":"New12345678"}' \
+  | python3 -c "import sys,json;d=json.load(sys.stdin);assert d.get('must_set_password') is False and d.get('access_token'), f'set-password bad: {d}';print('  -> set-password OK (new token issued)')"
+curl -s -X POST "$KB_API/api/v1/auth/login" -H 'Content-Type: application/json' \
+  -d "{\"username\":\"$NEWU\",\"password\":\"New12345678\"}" \
+  | python3 -c "import sys,json;d=json.load(sys.stdin);assert d.get('must_set_password') is False, f'after set-password still must: {d}';print('  -> relogin with new password OK')"
+curl -s -X POST "$KB_API/api/v1/auth/login" -H 'Content-Type: application/json' \
+  -d "{\"username\":\"$NEWU\",\"password\":\"Tmp12345678\"}" \
+  | python3 -c "import sys,json;d=json.load(sys.stdin);assert 'access_token' not in d, f'old password still works: {d}';print('  -> old password rejected OK')"
+
+# --- 11. 钉钉认证配置端点 ---------------------------------------------------
+echo "[11] GET /auth/dingtalk-config 公开端点字段"
+curl -s "$KB_API/api/v1/auth/dingtalk-config" \
+  | python3 -c "import sys,json;d=json.load(sys.stdin);assert {'corp_id','app_key','auto_login_enabled','qr_login_enabled','redirect_uri'} <= set(d), f'dingtalk-config missing keys: {sorted(d)}';print(f'  -> fields OK (qr_login_enabled={d[\"qr_login_enabled\"]})')"
 
 echo "SMOKE OK"

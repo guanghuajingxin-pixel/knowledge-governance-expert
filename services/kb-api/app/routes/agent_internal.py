@@ -332,6 +332,7 @@ async def internal_context_expand(body: dict, s: AsyncSession = Depends(get_sess
 class DingTalkSearchIn(BaseModel):
     query: str
     top_k: int = 10
+    user_id: str | None = None   # 终端用户 ID（可选）：传入时按其钉钉权限做工作区级隔离
 
 
 @router.post("/internal/dingtalk/search", dependencies=[Depends(_verify_internal_token)])
@@ -342,8 +343,9 @@ async def internal_dingtalk_search(body: DingTalkSearchIn,
     基于**持久化快照**（知识加工 →「钉钉知识」页手动刷新写入）做关键词模糊匹配
     （文件名 + 目录路径）。钉钉开放平台无语义检索 API，仅支持按元数据匹配。
     本接口只读快照，不触发钉钉全量遍历（遍历仅由「刷新」按钮触发）。
+    携带 user_id 时按该用户钉钉可见的工作库做工作区级隔离。
     """
-    from app.routes.knowledge_center import _dingtalk_cache, ensure_dingtalk_files_loaded
+    from app.routes.knowledge_center import _dingtalk_cache, ensure_dingtalk_files_loaded, _visible_workspace_ids
     from kb_common.clients import dingtalk_client
 
     # 确保钉钉配置已加载
@@ -358,6 +360,10 @@ async def internal_dingtalk_search(body: DingTalkSearchIn,
     await ensure_dingtalk_files_loaded(s)
     cached_files = _dingtalk_cache.get("files") or []
 
+    visible, scope_err = (None, None)
+    if body.user_id:
+        visible, scope_err = await _visible_workspace_ids(body.user_id)
+
     if not cached_files:
         return {
             "results": [],
@@ -365,6 +371,8 @@ async def internal_dingtalk_search(body: DingTalkSearchIn,
             "loading": _dingtalk_cache.get("loading", False),
             "error": _dingtalk_cache.get("error", ""),
         }
+    if visible is not None:
+        cached_files = [f for f in cached_files if f.get("workspace_id") in visible]
 
     # 关键词分词匹配（所有词都必须出现在文件名或目录路径中）
     keywords = [k.strip().lower() for k in body.query.split() if k.strip()]
@@ -393,7 +401,8 @@ async def internal_dingtalk_search(body: DingTalkSearchIn,
         }
         for f in top
     ]
-    return {"results": results, "total": len(results), "matched_total": len(matched)}
+    return {"results": results, "total": len(results), "matched_total": len(matched),
+            **({"error": scope_err} if scope_err else {})}
 
 
 @router.get("/agent/bootstrap", dependencies=[Depends(_verify_internal_token)])

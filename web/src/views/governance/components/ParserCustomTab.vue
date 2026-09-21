@@ -2,20 +2,25 @@
 /**
  * 解析引擎 · 页签一【自定义解析】
  *
- * 对接 MinerU V1 API（OpenAI 风格、无鉴权）：
+ * 双引擎接入，页面交互（上传 / 队列 / 结果预览）完全复用，按 V1 形状发起请求：
  *  - GET  /v1/health                 健康检查（版本 / 支持的输出格式）
- *  - GET  /v1/tiers                  解析档位（flash / basic / standard / advanced）
+ *  - GET  /v1/tiers                  解析档位
  *  - POST /v1/uploads                创建上传会话
  *  - PUT  /v1/uploads/{id}/content   上传原始字节（octet-stream）
  *  - POST /v1/uploads/{id}/complete  完成上传 → 得到 file_id
  *  - POST /v1/parse/jobs             创建解析任务（file_id 源，可多文件）
  *  - GET  /v1/parse/jobs/{id}        轮询状态（status / progress / output_files）
- *  - GET  /v1/files/{id}/content     下载解析产物（markdown / middle_json）
+ *  - GET  /v1/files/{id}/content     下载解析产物（markdown / structured_json）
  *  - DELETE /v1/parse/jobs/{id}      取消排队 / 运行中的任务
  *
- * 输出格式固定 markdown + middle_json（服务实际产物），HTML / TXT 等不再提供。
+ * 引擎切换（X-Mineru-Base 头）：
+ *  - local：本地 mineru-kit V1 服务（Base URL 用户配置，无鉴权），代理原样透传；
+ *  - cloud：MinerU 云端 SaaS（mineru.net/api/v4），后端适配器把 V1 形状翻译为
+ *    V4 契约（file-urls/batch 预签名上传 + extract-results/batch 轮询 + 结果 zip），
+ *    Key 复用模型配置页 mineru_api_key，前端不经手密钥；云端任务不支持取消。
+ *
  * 浏览器直连 MinerU 会被 CORS 拦截（服务不带 CORS 头，官方 WebUI 靠同源），
- * 故全部请求经 kb-api 同源代理 /api/v1/mineru/*，目标地址由 X-Mineru-Base 头指定。
+ * 故全部请求经 kb-api 同源代理 /api/v1/mineru/*，目标由 X-Mineru-Base 头指定。
  * 作为子组件被 ProcessEngine.vue（页签外壳）引用；页签二为 MinerU 官方 WebUI（iframe）。
  */
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
@@ -27,6 +32,7 @@ import {
   Delete,
   DocumentCopy,
   Download,
+  QuestionFilled,
   Refresh,
   Search,
   Upload,
@@ -85,7 +91,7 @@ interface JobFileResult {
   parse?: FileParseInfo | null
   output_files?: {
     markdown?: OutputFileRef | null
-    middle_json?: OutputFileRef | null
+    structured_json?: OutputFileRef | null
     [k: string]: OutputFileRef | null | undefined
   } | null
   error?: { message?: string; detail?: string } | null
@@ -119,24 +125,27 @@ interface QueueJob {
   file_count: number
   progress?: { completed: number; failed: number; total: number }
   files?: JobFileResult[]
-  /** 懒加载：markdown / middle_json 文本，key = `${jobId}:${fileIndex}` */
+  /** 懒加载：markdown / structured_json 文本，key = `${jobId}:${fileIndex}` */
   contents: Record<string, { md?: string; json?: string }>
 }
 
 // ============================================================
-// 连接配置（localStorage 持久化，仅 Base URL —— 本地服务无鉴权）
+// 连接配置（localStorage 持久化）
+// 引擎二选一：local=本地 mineru-kit（Base URL，无鉴权）；cloud=MinerU 云端 SaaS
+// （mineru.net/api/v4，Key 走模型配置页 mineru_api_key，前端不经手密钥）
 // ============================================================
 const CONFIG_KEY = 'kge:mineru_config_v1'
 const DEFAULT_BASE = 'http://127.0.0.1:8010'
 
-const config = reactive({ baseUrl: DEFAULT_BASE })
+const config = reactive({ baseUrl: DEFAULT_BASE, engine: 'local' as 'local' | 'cloud' })
 
 function loadConfig() {
   try {
     const raw = localStorage.getItem(CONFIG_KEY)
     if (raw) {
-      const parsed = JSON.parse(raw) as { baseUrl?: string }
+      const parsed = JSON.parse(raw) as { baseUrl?: string; engine?: string }
       config.baseUrl = parsed.baseUrl?.trim() || DEFAULT_BASE
+      config.engine = parsed.engine === 'cloud' ? 'cloud' : 'local'
     }
   } catch {
     /* 忽略损坏的本地缓存 */
@@ -145,35 +154,25 @@ function loadConfig() {
 
 function saveConfig() {
   try {
-    localStorage.setItem(CONFIG_KEY, JSON.stringify({ baseUrl: config.baseUrl }))
+    localStorage.setItem(CONFIG_KEY, JSON.stringify({ baseUrl: config.baseUrl, engine: config.engine }))
   } catch {
     /* 存储失败不影响使用 */
   }
 }
 
-// Base URL 变更即时持久化：页签外壳的【OpenAPI】入口读取同一份配置，需保持最新
-watch(() => config.baseUrl, saveConfig)
+// Base URL / 引擎变更即时持久化：页签外壳的【OpenAPI】入口读取同一份配置，需保持最新
+watch([() => config.baseUrl, () => config.engine], saveConfig)
 
 const normalizedBase = computed(() => config.baseUrl.trim().replace(/\/+$/, ''))
 
 // ============================================================
-// 顶部横幅 / 健康检查
+// 顶部提示 / 健康检查
 // ============================================================
 type BannerType = 'info' | 'success' | 'warning' | 'error'
-const banner = reactive<{ show: boolean; type: BannerType; message: string }>({
-  show: false,
-  type: 'info',
-  message: '',
-})
 
+// 顶部水滴提示：ElMessage 悬浮于页面顶部，3 秒后自动消失
 function setBanner(type: BannerType, message: string) {
-  banner.type = type
-  banner.message = message
-  banner.show = true
-}
-function clearBanner() {
-  banner.show = false
-  banner.message = ''
+  ElMessage({ type, message, duration: 3000 })
 }
 
 const health = reactive({
@@ -183,13 +182,20 @@ const health = reactive({
   error: '',
 })
 
-const healthLabel = computed(() => {
-  if (!normalizedBase.value) return '未配置'
-  if (health.checking) return '检测中'
-  return health.ok ? `已连接 · v${health.info?.version || '?'}` : '未连接'
+// 连接状态轻提示：圆点角标挂「连接测试」按钮右上角（绿=连通，红=失败，未测试不显示）
+const dotClass = computed(() => {
+  if (health.ok) return 'is-success'
+  if (health.error) return 'is-danger'
+  return ''
 })
-const healthTagType = computed<'info' | 'success' | 'danger'>(() =>
-  health.ok ? 'success' : 'info',
+const dotTip = computed(() =>
+  health.ok ? '连接正常' : `连接失败：${health.error || '未知错误'}`,
+)
+// 引擎说明收敛为 hover 提示，双模式占位等宽避免行宽跳动
+const engineHint = computed(() =>
+  config.engine === 'cloud'
+    ? '云端 SaaS：直连 mineru.net/api/v4，API Key 取「模型配置」页的 MinerU API Key'
+    : '本地服务：对接 mineru-kit V1 API（无鉴权），地址即上方 Base URL',
 )
 
 // ============================================================
@@ -200,13 +206,16 @@ interface ApiOpts {
   body?: unknown
   headers?: Record<string, string>
   timeout?: number
+  responseType?: 'blob'
 }
 
 async function api<T>(path: string, opts: ApiOpts = {}): Promise<T> {
-  if (!normalizedBase.value) throw new Error('未配置 MinerU 服务地址')
+  // cloud 模式目标固定为 "cloud"（后端适配器），本地模式为用户配置的 Base URL
+  const target = config.engine === 'cloud' ? 'cloud' : normalizedBase.value
+  if (!target) throw new Error('未配置 MinerU 服务地址')
   // 相对路径 → 走代理；绝对地址（upload_url）→ 取其 path 部分走代理
   const cleanPath = path.replace(/^https?:\/\/[^/]+/i, '').replace(/^\/+/, '')
-  const headers: Record<string, string> = { 'X-Mineru-Base': normalizedBase.value, ...(opts.headers || {}) }
+  const headers: Record<string, string> = { 'X-Mineru-Base': target, ...(opts.headers || {}) }
   // axios 对字符串 body 不会自动设 Content-Type（浏览器默认 text/plain 会被 MinerU 以 400 拒绝）
   if (typeof opts.body === 'string' && !Object.keys(headers).some((k) => k.toLowerCase() === 'content-type')) {
     headers['Content-Type'] = 'application/json'
@@ -217,6 +226,7 @@ async function api<T>(path: string, opts: ApiOpts = {}): Promise<T> {
     data: opts.body as never,
     headers,
     timeout: opts.timeout,
+    responseType: opts.responseType,
   })
   return res as T
 }
@@ -232,8 +242,8 @@ function errText(e: unknown): string {
   return e instanceof Error ? e.message : String(e)
 }
 
-async function runHealthCheck(silent = false): Promise<boolean> {
-  if (!normalizedBase.value) {
+async function runHealthCheck(silent = false) {
+  if (config.engine === 'local' && !normalizedBase.value) {
     health.ok = false
     health.error = '缺少服务地址'
     if (!silent) setBanner('warning', '请先填写 MinerU 服务 Base URL（默认 http://127.0.0.1:8010）')
@@ -271,6 +281,16 @@ async function handleTestConn() {
   }
 }
 
+/** 切换引擎（本地/云端）：重置档位并按新模式重测连接 */
+async function handleEngineChange() {
+  saveConfig()
+  tiers.value = []
+  health.ok = false
+  health.info = null
+  const ok = await runHealthCheck(true)
+  if (ok) await loadTiers()
+}
+
 // ============================================================
 // 解析档位（/v1/tiers 动态拉取）
 // ============================================================
@@ -278,10 +298,9 @@ const tiers = ref<TierInfo[]>([])
 const tiersLoading = ref(false)
 
 const TIER_FALLBACK: TierInfo[] = [
-  { id: 'flash', description: '快速本地文本抽取', current_model: 'flash' },
-  { id: 'basic', description: '轻量模型基础解析', current_model: 'hybrid-basic' },
-  { id: 'standard', description: '常规文档标准解析', current_model: 'MinerU2.5' },
-  { id: 'advanced', description: '困难文档高精度解析', current_model: 'MinerU2.5' },
+  { id: 'speed', description: '速度优先：最快出结果，适合预览与批量草稿', current_model: 'flash' },
+  { id: 'balanced', description: '均衡：质量与速度折中，推荐默认档位', current_model: 'MinerU2.5' },
+  { id: 'quality', description: '效果最佳：解析最准确，速度较慢', current_model: 'MinerU2.5' },
 ]
 
 async function loadTiers() {
@@ -374,12 +393,11 @@ async function uploadOne(file: File): Promise<string> {
 
 async function submitParse() {
   if (!selectedFiles.value.length) return
-  if (!normalizedBase.value) {
+  if (config.engine === 'local' && !normalizedBase.value) {
     setBanner('warning', '请先配置 MinerU 服务地址并测试连接')
     return
   }
   uploading.value = true
-  clearBanner()
   const fileIds: string[] = []
   try {
     for (const f of selectedFiles.value) {
@@ -388,7 +406,7 @@ async function submitParse() {
     const body: Record<string, unknown> = {
       files: fileIds.map((file_id) => ({ source: { type: 'file_id', file_id } })),
       ocr_mode: options.ocrMode,
-      output_formats: ['markdown', 'middle_json'],
+      output_formats: ['markdown', 'structured_json'],
     }
     if (options.tier) body.tier = options.tier
     if (options.pageRange.trim()) {
@@ -474,7 +492,7 @@ function jobFileTypes(j: QueueJob): string[] {
 function jobFileIds(j: QueueJob): Array<{ id: string; name: string }> {
   return (j.files || [])
     .map((f) => ({
-      id: f.output_files?.markdown?.file_id || f.output_files?.middle_json?.file_id || '',
+      id: f.output_files?.markdown?.file_id || f.output_files?.structured_json?.file_id || '',
       name: f.name || '',
     }))
     .filter((x) => x.id)
@@ -706,13 +724,13 @@ const resultMetaText = computed(() => {
   return parts.join(' · ')
 })
 
-/** 懒加载某个文件的 markdown / middle_json 内容并缓存 */
+/** 懒加载某个文件的 markdown / structured_json 内容并缓存 */
 async function ensureContents(j: QueueJob, fileIdx: number) {
   const f = j.files?.[fileIdx]
   const key = `${j.job_id}:${fileIdx}`
   if (!f || j.contents[key]) return
   const mdRef = f.output_files?.markdown
-  const jsonRef = f.output_files?.middle_json
+  const jsonRef = f.output_files?.structured_json
   const entry: { md?: string; json?: string } = {}
   const tasks: Promise<void>[] = []
   if (mdRef?.file_id) {
@@ -807,18 +825,77 @@ const jsonPretty = computed(() => {
   }
 })
 
-/** markdown 渲染：相对路径图片（产物在 zip 内）→ 占位；base64 内联图保留，由 CSS 限尺寸 */
+/** markdown 渲染：
+ *  - base64 内联图保留，由 CSS 约束为缩略尺寸；
+ *  - 云端 SaaS：zip 内相对路径图片（images/xxx.jpg）构造 file_id `batch::idx::路径`
+ *    经 GET /v1/files/{id}/content 拉取 blob 渲染，宽度占满内容区；
+ *  - 本地 kit：无成员寻址能力，维持占位提示。 */
+const imgBlobs = reactive<Record<string, string>>({}) // key `${jobId}:${idx}:${path}` → objectURL
+const imgFailed = reactive<Record<string, boolean>>({})
+const imgPending = new Set<string>()
+
+function imgKey(jobId: string, idx: number, path: string) {
+  return `${jobId}:${idx}:${path}`
+}
+
+async function loadJobImage(jobId: string, idx: number, path: string) {
+  const key = imgKey(jobId, idx, path)
+  if (imgBlobs[key] || imgFailed[key] || imgPending.has(key)) return
+  imgPending.add(key)
+  try {
+    const fileId = `${jobId}::${idx}::${path}`
+    const blob = await api<Blob>(`/v1/files/${encodeURIComponent(fileId)}/content`, {
+      responseType: 'blob',
+    })
+    imgBlobs[key] = URL.createObjectURL(blob)
+  } catch {
+    imgFailed[key] = true
+  } finally {
+    imgPending.delete(key)
+  }
+}
+
 const mdHtml = computed(() => {
   if (!mdText.value) return ''
+  const job = currentJob.value
+  const idx = currentFileIdx.value
+  const cloud = config.engine === 'cloud' && !!job
   const pre = mdText.value.replace(
-    /!\[([^\]]*)\]\(([^)]+)\)/g,
+    /!\[([^\]]*)\]\(([^)\s]+)\)/g,
     (m, cap: string, path: string) => {
       if (/^data:image\//i.test(path)) return m // base64 内联图：保留渲染，CSS 约束展示尺寸
-      return `> 🖼️ 图片引用：${cap || path}（图片文件包含在结果 zip 内，未随文本返回）`
+      if (!cloud || !job) return `> 🖼️ 图片引用：${cap || path}（图片文件包含在结果 zip 内，未随文本返回）`
+      const key = imgKey(job.job_id, idx, path)
+      const alt = cap || path.split('/').pop() || path
+      if (imgBlobs[key]) return `![${alt}](${imgBlobs[key]})`
+      if (imgFailed[key]) return `> ⚠️ 图片加载失败：${path}`
+      return `![${alt}](mineru-pending:${key})` // 渲染后由 watcher 替换为加载占位并触发拉取
     },
   )
-  return marked.parse(pre, { async: false }) as string
+  let html = marked.parse(pre, { async: false }) as string
+  html = html.replace(
+    /<img src="mineru-pending:([^"]*)"([^>]*)>/g,
+    (_m, key: string, attrs: string) =>
+      `<div class="md-img-pending" data-imgkey="${key}"${attrs}>图片加载中…</div>`,
+  )
+  return html
 })
+
+// 渲染完成后扫描加载占位，触发图片懒拉取（blob 就绪 → mdHtml 重算 → <img> 出现）
+watch(
+  mdHtml,
+  (html) => {
+    if (!html || config.engine !== 'cloud' || !currentJob.value) return
+    const re = /data-imgkey="([^"]+)"/g
+    let m: RegExpExecArray | null
+    while ((m = re.exec(html))) {
+      const parts = m[1].split(':')
+      const path = parts.slice(2).join(':')
+      if (parts.length >= 3 && path) loadJobImage(parts[0], Number(parts[1]), path)
+    }
+  },
+  { immediate: true },
+)
 
 function escapeHtml(src: string): string {
   return src
@@ -849,7 +926,7 @@ const byteStats = computed(() => {
   const f = currentFile.value
   return {
     md: f?.output_files?.markdown?.bytes || 0,
-    json: f?.output_files?.middle_json?.bytes || 0,
+    json: f?.output_files?.structured_json?.bytes || 0,
   }
 })
 
@@ -889,7 +966,9 @@ function baseName(): string {
   return n.replace(/\.[^.]+$/, '').replace(/[^\w\u4e00-\u9fa5.-]+/g, '_')
 }
 
-function handleDownloadResult() {
+const downloadingZip = ref(false)
+
+async function handleDownloadResult() {
   if (!currentContent.value) {
     ElMessage.warning('请先在队列中查看一条已完成任务')
     return
@@ -899,13 +978,31 @@ function handleDownloadResult() {
       ElMessage.warning('当前文件无 markdown 内容')
       return
     }
+    // 云端模式：markdown 引用 zip 内相对路径图片，打包下载原始结果 zip（解压即为完整内容）；
+    // 本地 kit 的 markdown 图片为 base64 内联，直接下载 .md 即自包含
+    const job = currentJob.value
+    if (config.engine === 'cloud' && job) {
+      downloadingZip.value = true
+      try {
+        const blob = await api<Blob>(
+          `/v1/parse/jobs/${encodeURIComponent(job.job_id)}/files/${currentFileIdx.value}/result-zip`,
+          { responseType: 'blob' },
+        )
+        downloadBlob(blob, `${baseName()}_markdown.zip`, 'application/zip')
+      } catch (e) {
+        ElMessage.error(`结果包下载失败：${errText(e)}`)
+      } finally {
+        downloadingZip.value = false
+      }
+      return
+    }
     downloadBlob(mdText.value, `${baseName()}.md`, 'text/markdown')
   } else {
     if (!jsonPretty.value) {
       ElMessage.warning('当前文件无 JSON 内容')
       return
     }
-    downloadBlob(jsonPretty.value, `${baseName()}_middle.json`, 'application/json')
+    downloadBlob(jsonPretty.value, `${baseName()}_structured.json`, 'application/json')
   }
 }
 
@@ -931,30 +1028,40 @@ onBeforeUnmount(() => {
     <el-card shadow="never" class="conn-card">
       <div class="conn-row">
         <div class="conn-fields">
-          <el-tag :type="healthTagType" effect="plain" size="default" class="status-tag">
-            <span class="dot" :class="healthTagType" />
-            {{ healthLabel }}
-          </el-tag>
-          <el-input v-model="config.baseUrl" placeholder="MinerU 服务地址" style="width: 280px">
+          <!-- 引擎切换：本地 mineru-kit / 云端 SaaS（mineru.net，Key 走模型配置页） -->
+          <!-- 说明 ? 角标挂在对象右上角（不占行内主轴位置），hover 展示说明 -->
+          <div class="engine-wrap">
+            <el-radio-group v-model="config.engine" size="default" @change="handleEngineChange">
+              <el-radio-button value="local">本地服务</el-radio-button>
+              <el-radio-button value="cloud">云端 SaaS</el-radio-button>
+            </el-radio-group>
+            <el-tooltip placement="top" :content="engineHint">
+              <el-icon class="conn-info"><QuestionFilled /></el-icon>
+            </el-tooltip>
+          </div>
+          <!-- 双模式等宽占位：本地=可编辑 Base URL；云端=只读 SaaS 端点，切换不跳动 -->
+          <el-input
+            v-if="config.engine === 'local'"
+            v-model="config.baseUrl"
+            placeholder="MinerU 服务地址"
+            style="width: 280px"
+          >
             <template #prepend>Base</template>
           </el-input>
-          <el-button type="primary" plain :icon="Connection" :loading="health.checking" @click="handleTestConn">
-            连接测试
-          </el-button>
-          <span v-if="health.info?.features?.output_formats" class="hint">
-            输出格式：{{ health.info.features.output_formats.join(' / ') }}
-          </span>
+          <el-input v-else model-value="https://mineru.net/api/v4" disabled style="width: 280px">
+            <template #prepend>Base</template>
+          </el-input>
+          <!-- 连接测试：右上角圆点轻提示连通状态（绿=正常，红=失败），hover 展示详情 -->
+          <div class="test-btn-wrap">
+            <el-button type="primary" plain :icon="Connection" :loading="health.checking" @click="handleTestConn">
+              连接测试
+            </el-button>
+            <el-tooltip v-if="dotClass" placement="top" :content="dotTip">
+              <span class="conn-dot" :class="dotClass" />
+            </el-tooltip>
+          </div>
         </div>
       </div>
-      <el-alert
-        v-if="banner.show"
-        :type="banner.type"
-        :title="banner.message"
-        :closable="true"
-        class="banner"
-        show-icon
-        @close="clearBanner"
-      />
     </el-card>
 
     <el-tabs v-model="activeInnerTab" class="inner-tabs">
@@ -1034,7 +1141,7 @@ onBeforeUnmount(() => {
               </el-col>
             </el-row>
             <div class="hint">
-              输出格式固定为 Markdown + 结构化 JSON（middle_json）；页码范围仅对首个 PDF 生效。
+              输出格式固定为 Markdown + 结构化 JSON（structured_json）；页码范围仅对首个 PDF 生效。
             </div>
           </el-form>
 
@@ -1083,7 +1190,15 @@ onBeforeUnmount(() => {
             <el-button size="small" plain :icon="DocumentCopy" :disabled="!currentContent" @click="handleCopyResult">
               复制
             </el-button>
-            <el-button size="small" plain :icon="Download" :disabled="!currentContent" @click="handleDownloadResult">
+            <el-button
+              size="small"
+              plain
+              :icon="Download"
+              :disabled="!currentContent"
+              :loading="downloadingZip"
+              :title="config.engine === 'cloud' ? '云端模式：下载结果 zip（markdown + images 文件夹），解压后即为完整内容' : '下载当前视图文件'"
+              @click="handleDownloadResult"
+            >
               下载当前视图
             </el-button>
             <span class="muted small toolbar-hint">
@@ -1274,21 +1389,45 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 8px;
 }
-.status-tag {
+/* 连接测试按钮容器：状态圆点角标绝对定位于右上角，不占行内主轴位置 */
+.test-btn-wrap {
+  position: relative;
   display: inline-flex;
-  align-items: center;
-  gap: 6px;
 }
-.dot {
-  width: 8px;
-  height: 8px;
+.conn-dot {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  width: 10px;
+  height: 10px;
   border-radius: 50%;
-  display: inline-block;
-  background: #b9c4cf;
+  border: 2px solid #fff;
+  box-sizing: content-box;
+  z-index: 1;
 }
-.dot.success { background: #67c23a; }
-.dot.info { background: #b9c4cf; }
-.banner { margin-top: 12px; }
+.conn-dot.is-success {
+  background: var(--el-color-success);
+}
+.conn-dot.is-danger {
+  background: var(--el-color-danger);
+}
+/* 引擎切换容器：? 角标绝对定位于右上角，不占据行内主轴位置 */
+.engine-wrap {
+  position: relative;
+  display: inline-flex;
+}
+.conn-info {
+  position: absolute;
+  top: -7px;
+  right: -9px;
+  z-index: 1;
+  color: #909399;
+  font-size: 14px;
+  cursor: help;
+}
+.conn-info:hover {
+  color: var(--el-color-primary);
+}
 
 /* ===== 通用区块 ===== */
 .main-row { margin-bottom: 0; }
@@ -1462,6 +1601,24 @@ onBeforeUnmount(() => {
   border: 1px solid #e5e8ee;
   border-radius: 6px;
   background: #fafbfc;
+}
+/* zip 内图片（blob: 懒加载产物）：占据完整内容宽度 */
+.md-view :deep(img[src^='blob:']) {
+  width: 100%;
+  max-height: none;
+  margin: 10px 0;
+  object-fit: contain;
+}
+/* 图片懒加载占位 */
+.md-view :deep(.md-img-pending) {
+  margin: 10px 0;
+  padding: 18px 12px;
+  text-align: center;
+  color: #909399;
+  font-size: 13px;
+  background: #fafbfc;
+  border: 1px dashed #dcdfe6;
+  border-radius: 6px;
 }
 .md-view :deep(h1),
 .md-view :deep(h2),

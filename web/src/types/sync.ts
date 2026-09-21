@@ -76,6 +76,9 @@ export interface PipelineVariablesResponse {
   variables: PipelineVariable[]
 }
 
+/** 同步身份来源：owner 自己的钉钉绑定 / 全局服务账号兜底 / 空串=历史数据无记录 */
+export type OperatorSource = 'owner_binding' | 'global_fallback' | ''
+
 export interface Run {
   id: number
   source_id: number
@@ -89,6 +92,8 @@ export interface Run {
   deleted_count: number
   failed_count: number
   message: string
+  /** 本次运行使用的钉钉身份来源（旧数据为空串） */
+  operator_source?: OperatorSource
 }
 
 export interface Failure {

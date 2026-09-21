@@ -98,7 +98,17 @@ class SyncEngine:
             operator = run.operator or ("系统" if run.trigger == "schedule" else "")
 
             s = get_settings()
-            dt = make_dingtalk_client(db)
+            # 同步身份按 source owner：用 owner 的钉钉 unionId 调钉钉 API（权限与 owner
+            # 实际可见范围一致）；owner 缺失/未绑定回退全局服务账号；两者皆无则本次运行
+            # 失败并提示配置（OperatorUnavailable 由外层 except 统一落 failed）。
+            from app.services.dingtalk_operator import resolve_source_operator_sync
+            op_union, op_tag = resolve_source_operator_sync(db, source)
+            run.operator_source = op_tag
+            db.commit()
+            self._log(db, run.id, "INFO",
+                      f"钉钉操作人身份：{op_tag}"
+                      + ("" if op_tag == "owner_binding" else "（owner 未绑定钉钉，回退服务账号）"))
+            dt = make_dingtalk_client(db, operator_union_id=op_union)
             backend = make_backend(source, db)
             is_dify = (source.backend_type or "dify") == "dify"
             try:

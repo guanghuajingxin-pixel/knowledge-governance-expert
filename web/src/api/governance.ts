@@ -1,8 +1,27 @@
 import request from './request'
 
-/** 治理标准：钉钉 AI 多维表《杰克知识管理规范》记录 */
+/** 治理标准（本地可管理 + 版本 + 审核流转） */
 export interface StandardDoc {
-  record_id: string
+  id: string
+  doc_type: string
+  code: string
+  version: string
+  /** 最新版本状态：draft | reviewing | published | rejected */
+  status: string
+  effective_date: string
+  link: string
+  maintainer: string
+  published_version_id: string | null
+  latest_version_id: string | null
+  created_at: string
+  updated_at: string
+}
+
+/** 治理标准历史版本 */
+export interface StandardVersion {
+  id: string
+  standard_id: string
+  version_no: number
   doc_type: string
   code: string
   version: string
@@ -10,23 +29,75 @@ export interface StandardDoc {
   effective_date: string
   link: string
   maintainer: string
+  created_by: string
+  review_comment: string
+  reviewed_by: string
+  reviewed_at: string
+  created_at: string
 }
 
 export interface StandardsResponse {
   items: StandardDoc[]
   total: number
   error?: string | null
-  fetched_at?: string
-  /** 后端 60s 缓存：true=本次返回的是缓存数据 */
-  from_cache?: boolean
-  /** true=缓存已过期，旧数据先展示、后台正在重新拉取 */
-  stale?: boolean
 }
 
-/** refresh=true 时绕过服务端缓存强制重拉钉钉多维表（页面「刷新」按钮用） */
-export const getStandards = (refresh = false) =>
-  request.get<unknown, StandardsResponse>('/governance/standards',
-    { params: refresh ? { refresh: true } : undefined })
+/** 治理标准列表（本地数据库） */
+export const getStandards = () =>
+  request.get<unknown, StandardsResponse>('/governance/standards')
+
+export interface StandardPayload {
+  doc_type: string
+  code: string
+  version: string
+  effective_date: string
+  link: string
+  maintainer: string
+}
+
+/** 新建标准 */
+export const createStandard = (data: StandardPayload) =>
+  request.post<unknown, StandardDoc>('/governance/standards', data)
+
+/** 编辑标准（创建新版本） */
+export const updateStandard = (id: string, data: StandardPayload) =>
+  request.put<unknown, StandardDoc>(`/governance/standards/${id}`, data)
+
+/** 删除标准 */
+export const deleteStandard = (id: string) =>
+  request.delete(`/governance/standards/${id}`)
+
+/** 历史版本列表 */
+export const getVersions = (id: string) =>
+  request.get<unknown, { items: StandardVersion[]; total: number }>(
+    `/governance/standards/${id}/versions`)
+
+/** 回滚到指定版本 */
+export const rollbackVersion = (stdId: string, verId: string) =>
+  request.post<unknown, StandardDoc>(`/governance/standards/${stdId}/versions/${verId}/rollback`)
+
+/** 提交审核（发钉钉动作卡片给审批人） */
+export const submitReview = (id: string, reviewerUserid: string, reviewerName = '') =>
+  request.post<unknown, { ok: boolean; message_error: string | null }>(
+    `/governance/standards/${id}/submit-review`,
+    { reviewer_userid: reviewerUserid, reviewer_name: reviewerName })
+
+/** 审核通过 */
+export const approveStandard = (id: string, comment = '') =>
+  request.post<unknown, StandardDoc>(`/governance/standards/${id}/approve`, { comment })
+
+/** 审核驳回 */
+export const rejectStandard = (id: string, comment = '') =>
+  request.post<unknown, StandardDoc>(`/governance/standards/${id}/reject`, { comment })
+
+/** 从钉钉多维表导入（初始化） */
+export const importStandardsFromDingtalk = () =>
+  request.post<unknown, { ok: boolean; imported: number }>('/governance/standards/import-dingtalk')
+
+/** 搜索钉钉通讯录用户（选择审批人） */
+export interface DingtalkUser { userid: string; name: string }
+export const searchDingtalkUsers = (q: string) =>
+  request.get<unknown, { items: DingtalkUser[] }>('/governance/dingtalk/users/search', { params: { q } })
 
 export interface KnowledgeGap {
   directory_id: string
@@ -44,10 +115,14 @@ export interface KnowledgeGap {
   /** 该目录在钉钉中的节点链接（仅 dingtalk 行）；根目录同样可跳转知识库首页 */
   dingtalk_url?: string
 }
+/** 数量区间筛选预设值：''=全部，后端映射为闭区间（100+ 无上限） */
+export type GapCountRange = '' | '0' | '1-9' | '10-99' | '100+'
 export interface GapFilters {
   kb_id?: string
   owner?: string
   document_state: 'all' | 'empty' | 'has'
+  document_count?: GapCountRange
+  folder_count?: GapCountRange
 }
 export interface GapResponse {
   items: KnowledgeGap[]

@@ -493,7 +493,7 @@ docker compose down -v        # 同时删除卷（清空 Dify 数据库与知识
 
 ## 知识中心
 
-「知识中心」（路由 `/knowledge-center`）提供统一的知识文件列表视图，分两个一级 Tab：
+原「知识中心」页已拆分收编：钉钉知识列表迁入侧边栏「知识治理 → 入库审核」（`/govern/review`，含入库审核操作），本地上传知识列表页签已下线（后端 `GET /knowledge-center/documents`、回收站等接口保留）。
 
 ### 钉钉知识
 
@@ -503,20 +503,16 @@ docker compose down -v        # 同时删除卷（清空 Dify 数据库与知识
 - **刷新方式（仅手动）**：**只有点右上角「刷新」并确认**才触发后台全量遍历（会二次确认，提示约 25–30 分钟）；接口立即返回、前端按 12s 轮询并显示「后台同步中…」，期间列表继续展示当前快照；遍历成功后覆盖写入数据库快照并提示「钉钉知识快照已刷新」，失败则在表头显示告警（不弹成功提示）。没有任何定时/过期自动遍历——表头「数据更新于 HH:mm」即最近一次成功刷新的时间（悬停可看说明）。同一时刻只跑一个遍历（单飞）。
 - **创建人姓名**：遍历结束时一次性经 `oapi.dingtalk.com/topapi/v2/user/get` 解析并写入快照，列表接口不再调用钉钉通讯录；仅对缺少姓名的历史快照做一次补解析并回写快照。
 - **上级目录**：多层文件夹以 `/` 拼接完整路径（如 `/业务管理/AI与数字化团队/营销项目管理/M8系统`），知识库根目录下的文件显示 `/`。
-- **元数据列**：文件名称（点击跳转钉钉文档）、来源知识库、上级目录、文件类型、文件大小、创建人、创建时间、最近更新。
+- **元数据列**：文件名称（点击跳转钉钉文档）、来源知识库、上级目录、文件类型、文件大小、创建人、创建时间、最近更新、审核人。
+- **入库审核**：操作列按钮即审核状态字段——未审核显示「审核」，点击弹窗选择 通过/待确认/待更正 并确认后，按钮文案变为所选状态（通过=绿/待确认=橙/待更正=红），再次点击状态字段可弹窗变更；新增「审核人」列记录执行审核动作的用户名（后端取当前登录用户，`PUT /knowledge-center/dingtalk/documents/review`）。审核记录按钉钉节点 ID 独立存储于 `dingtalk_file_reviews` 表（alembic 0044），快照刷新/覆盖不影响已审核结果；列表接口查询时按当前页 node_id 叠加审核状态与审核人。
 - **过滤维度**：按知识库过滤（多选）、按创建人过滤（多选）、文件名搜索、上级目录路径搜索。
 - **性能与容错**：钉钉 `wiki/nodes` 接口限流严格（实测 3 并发即批量 403），客户端采用**并发信号量（≤3）+ 全局最小请求间隔节流（0.4s/次，约 2.5 QPS）+ 403/429/5xx/超时指数退避重试**；全量约 4,500 个节点请求、**25–30 分钟**。明确无权限的目录自动跳过。智能问答的 `dingtalk_search` / `dingtalk_browse` 兜底工具读同一份快照（只读，不触发遍历）。
 - **配置**：在「系统配置」页填写钉钉 AppKey / AppSecret / 操作人 UnionId（settings 表持久化，`sync_runtime_config` 每次调用前同步）；未配置时页面显示友好告警。
 - **知识Owner通知（知识缺口）**：知识缺口页钉钉行操作列新增「通知」按钮（仅**快照存在 + 已维护 Owner + 目录无文档**的行可点，其余禁用并以 tooltip 说明原因）；点击弹窗预览正文「你即将通过钉钉发送私聊通知给知识Owner xxx：【库名 / 目录路径】该目录下的知识为空，请尽快补充，谢谢！」，确认后经 `POST /governance/gaps/dingtalk/notify` 走钉钉企业机器人单聊（`v1.0/robot/oToMessages/send`，sampleText）。前置条件：①「系统配置 → 钉钉设置」填写 **机器人 robotCode**（`dingtalk_robot_code`，取值见开放平台「应用详情 → 机器人」，与 AppKey 不同）；②应用开通「企业内机器人发送消息权限」与「通讯录个人信息读权限」；③ Owner 填写的是员工**姓名**（后端按姓名在通讯录精确匹配 userid，无精确匹配返回 400）。发送成功返回 `已通过钉钉私聊通知 {owner}`，错误分类：400 业务校验、502 钉钉 OpenAPI 网络/权限错误。
 
-### 本地上传知识
+### 本地下线说明
 
-平台内上传的文档（DOCUMENT 类型知识库），平铺列表展示：
-
-- **元数据列**：文档标题、来源知识库、知识分类、文件类型、文件大小、分块数、状态、创建人、创建时间。
-- **过滤维度**：按知识库过滤（多选）、按创建人过滤（多选）、标题关键词搜索。
-- **手动刷新**：右上角「刷新」按钮；任务队列状态栏展示 全部/执行中/已完成/失败 计数。
-- 创建人通过 `documents.uploader_id` 关联 `users` 表（迁移 `0005_add_document_uploader` 新增；历史文档显示 `-`，新上传自动记录）。
+「本地上传知识」页签（平台内上传文档列表 + 回收站/详情弹窗）已随知识中心收编下线，前端组件（KnowledgeManageTab / RecycleBinDialog / KnowledgeDetailDialog / TaskQueueBar / CenterDirectoryTree）与 `web/src/api/process.ts` 已删除；后端接口（文档列表、回收站、任务统计、`/api/v1/process/*` 加工接口）保留，上下文扩展接口仍被智能问答调用。
 
 ## 知识采集（collection 模块）
 
@@ -542,13 +538,13 @@ docker compose down -v        # 同时删除卷（清空 Dify 数据库与知识
 
 ## 知识加工（process 模块）
 
-侧边栏「知识加工」（父级路由 `/process`）已拆分为二级菜单：
+侧边栏「知识加工」（父级路由 `/process`，重定向到 `/process/engine`）为二级菜单：
 
-- **知识打标**（`/process/tagging`，原「知识加工」页内容）：对已进入 Dify 知识库的文档进行 **AI 打标 + 摘要生成 + 知识关系构建**，为智能问答提供结构化上下文工程能力。
+- **入库审核**（`/govern/review`，原「知识打标」页 `/process/tagging` 迁入知识治理分组并更名）：页面无页内签，仅保留钉钉知识列表（列表内完成入库审核：通过/待确认/待更正 + 审核人，见上文「钉钉知识」节）。原 加工总览/知识图谱/标签库/加工说明 页签及其前端代码已删除；AI 打标/摘要/关系构建仅保留后端能力（`/api/v1/process/*`），上下文扩展接口仍被智能问答与 DeerFlow 调用。
 - **解析引擎**（`/process/engine`，双页签）：
-  - **自定义解析**（[ParserCustomTab.vue](web/src/views/governance/components/ParserCustomTab.vue)）：对接 MinerU V1 API（本地 `http://127.0.0.1:8010`，无鉴权，地址可在页面配置并持久化 localStorage）。内部含两个页签：**解析测试**（三步上传 `POST /v1/uploads` → `PUT content` → `complete` 得 `file_id` → 建解析任务 `POST /v1/parse/jobs`，支持档位 flash/basic/standard/advanced 动态拉取 `/v1/tiers`、OCR 模式 auto/txt/ocr、页码范围 → 2s 自动轮询进度 → 懒加载产物；提交后自动跳转队列页签）与**解析队列**（任务表含文档名称、类型、**产物ID** 列——产物 file_id 可经 `GET /v1/files/{id}/content` 直接下载，行内一键复制，MinerU 无鉴权模式下源文件禁止下载仅产物可下载；历史任务自动补拉详情填充；支持状态/文档名称筛选、统计汇总、取消任务；点「查看」自动切回解析测试页签）。**输出格式仅 markdown + middle_json 双视图**（marked 渲染 / 语法高亮），HTML、TXT 等已按服务实际能力裁剪；支持复制、下载（`.md` / `_middle.json`）。结果区限高 60vh 窗口内滚动；base64 内联图缩略展示（≤220px 居中带边框），zip 内相对路径图片以占位提示代替。
+  - **自定义解析**（[ParserCustomTab.vue](web/src/views/governance/components/ParserCustomTab.vue)）：**双引擎接入 + 统一契约**，页面交互（上传/队列/结果预览）完全复用，顶部「本地服务 / 云端 SaaS」切换并持久化 localStorage。**调用方只认一套契约**（[mineru_contract.py](services/kb-api/app/routes/mineru_contract.py) Pydantic schema，kb-api `/docs` 可查 10 个显式类型化端点）：三步上传（`POST /v1/uploads` → `PUT content` → `complete` 得 `file_id`）→ 建任务 `POST /v1/parse/jobs` → 2s 轮询 → `GET /v1/files/{id}/content` 拉产物。**引擎差异按能力发现封装**：`GET /v1/health` 返回 `capabilities`（engine / tiers / output_formats / cancelable / page_range / max_file_mb），调用方按能力适配而非按引擎适配；**档位统一语义三级** speed/balanced/quality（本地映射 flash/standard/advanced、云端映射 pipeline/vlm，响应保留 `raw_tier` 便于排查）；**产物统一 markdown + structured_json**（本地 middle.json 与云端 content_list.json 归入同一槽位）。引擎选择由 `X-Mineru-Base` 头指定：**本地服务**透传 MinerU V1 API（默认 `http://127.0.0.1:8010`，无鉴权，地址可配，代理层做档位/产物归一化）；**云端 SaaS** 由适配器（[mineru_saas.py](services/kb-api/app/routes/mineru_saas.py)）翻译为 V4 契约（`file-urls/batch` 预签名上传 → `extract-results/batch` 轮询 → 结果 zip 解包，Key 复用模型配置页 `mineru_api_key` 脱敏配置，前端不经手密钥；云端 `cancelable=false`，取消任务返回 409；任务注册表为进程内临时态，kb-api 重启清空）。显式路由未覆盖的本地 kit 私有端点由 catch-all 兜底透传，云端一律 404。解析队列：任务表含文档名称、类型、**产物ID** 列（一键复制）、历史任务自动补拉、状态/名称筛选、统计汇总、取消任务；点「查看」自动切回解析测试页签。结果预览 **markdown + structured_json 双视图**（marked 渲染 / 语法高亮），支持复制与下载：云端模式 markdown 视图下载**原始结果 zip**（`{名称}_markdown.zip`，内含 full.md + images/ 文件夹 + content_list.json，解压即为完整可读内容；本地模式 markdown 图片 base64 自包含，直接下 `.md`），JSON 视图下载 `_structured.json`；base64 内联图缩略展示（≤220px）；**zip 内相对路径图片真实渲染**（云端模式构造 `batch::idx::images/x.jpg` 经产物接口拉取 blob，懒加载+缓存+失败占位，宽度占满内容区；本地 kit 无成员寻址能力维持占位提示）。
   - **MinerU WebUI**：iframe 嵌入官方 WebUI（同源部署直连）。
-  - **API 文档入口**（页签行最右侧，均新窗口打开）：【API 调用说明】打开自编文档页 [mineru-api-docs.html](web/public/mineru-api-docs.html)（三步上传协议 / 任务轮询 / 产物下载全端点说明 + page_range 语法 + 端到端 bash 脚本 + 前端代理集成 + 错误排查，页内自动跟随配置的 Base URL）；【OpenAPI】打开引擎 Swagger 调试台（`{Base}/docs`）。同一入口也放在侧边栏左下角用户菜单「API文档」（关于我下方，新浏览器页签打开），两处地址解析共用 [api-docs.ts](web/src/utils/api-docs.ts)（读取同一份 Base URL 配置）；后续新增其他 OpenAPI 服务在该工具与菜单中追加。
+  - **API 文档入口**（页签行最右侧，均新窗口打开）：【API 调用说明】打开文档页 [mineru-api-docs.html](web/public/mineru-api-docs.html)——基于 **Docsify**（组件 vendor 在 `web/public/vendor/docsify/`，内网不依赖 CDN）渲染 [mineru-api-docs.md](web/public/mineru-api-docs.md)，左侧边栏目录 + 全文搜索 + 代码一键复制。内容对应 **kb-api 统一契约**（`mineru_route.py` + `mineru_contract.py`）：双引擎（本地 Kit / 云端 SaaS）接入对照与 capabilities 能力发现、登录换 JWT、**全端点逐个配 curl + Python（requests）双语言调用示例**、page_range 语法、端到端 curl / Python 完整脚本、前端 axios 集成、错误排查；页内通过 `{{MINERU_BASE}}`/`{{SWAGGER_URL}}` 占位符自动跟随配置的引擎 Base URL。【OpenAPI】打开引擎 Swagger 调试台（`{Base}/docs`）。侧边栏左下角用户菜单同名入口「API 调用说明」（关于我下方，新浏览器页签打开）指向同一文档页，跳转逻辑共用 [api-docs.ts](web/src/utils/api-docs.ts)；后续新增其他 OpenAPI 服务在该工具与菜单中追加。
   - **CORS 代理**：浏览器直连 MinerU 会被 CORS 拦截（服务不带跨域头），全部请求经 kb-api 同源透传代理（[mineru_route.py](services/kb-api/app/routes/mineru_route.py)）`/api/v1/mineru/*`，目标地址由 `X-Mineru-Base` 请求头指定，仅 super_admin/admin 可用。
 
 ### 核心能力
@@ -618,6 +614,7 @@ docker compose down -v        # 同时删除卷（清空 Dify 数据库与知识
 
 ```
 knowledge-governance-expert/
+├── docs/ui-guidelines.md        # UI/UED 设计规范（所有界面改动强制遵循，含交付自检清单）
 ├── docker-compose.app.yml       # 应用容器（kb-api/faq-service/kb-worker）
 ├── tools/dws/                   # 钉钉官方 CLI（dws），存储总量兜底查询（用户 OAuth 授权）
 ├── .env / .env.example          # 开发模式 env（含 Dify 配置）
@@ -637,11 +634,11 @@ knowledge-governance-expert/
 │   │   └── app/services/sync/   # 钉钉知识库 → Dify 定时增量同步（engine/scheduler/clients）
 │   └── faq-service/             # FAQ KB + 精准匹配（FastAPI）
 └── web/                         # Vue3 + Element Plus 前端（七大治理模块）
-    ├── public/about.html        # 「关于我」产品介绍页（侧边栏左下角用户菜单新页签打开；同菜单「API文档」打开解析引擎 Swagger，见 src/utils/api-docs.ts）
+    ├── public/about.html        # 「关于我」产品介绍页（侧边栏左下角用户菜单新页签打开；同菜单「API 调用说明」打开解析引擎 API 调用文档页，见 src/utils/api-docs.ts）
     └── src/views/
         ├── chat/                # 智能问答（Dify 数据集多选 + Agent）
         ├── hiagent/             # HiAgent智能问答（火山 HiAgent WebSDK iframe 嵌入）
-        ├── governance/          # 知识治理 7 大模块（默认页签为知识缺口；含 model.vue 接入配置；治理标准页实时读取钉钉多维表《杰克知识管理规范》，需应用开通 Notable.Base.Read.All 权限；知识缺口页知识库过滤选项取自知识源管理中已启用的钉钉知识库，选中钉钉知识库后查询读取 dingtalk_folder_stats 快照表（文件夹直属文档数=在线文档+本地上传文件（.dlink 文件夹快捷方式计为其所在文件夹的一个文档，不作为目录遍历——其子节点 API 无法列出）；「文件夹数量」列=该目录直属子文件夹数，不含目录本身与孙级——钉钉行由快照路径树推导、本地行走 parent_id，CSV 导出同口径），「刷新数据」按钮触发后台全量遍历并覆盖写入快照（几万文档的大库需数分钟，前端轮询进度，刷新保留已维护的 Owner）；知识Owner 支持行内编辑弹窗与批量导入（CSV/XLSX，按目录ID或知识库＋目录路径匹配，本地目录与钉钉文件夹均可），钉钉行另提供「通知」按钮——经钉钉企业机器人向 Owner 发单聊催补提醒（无文档行可点，正文预览见「知识Owner通知」说明）；新增钉钉知识源时自动触发该库快照预热，知识源列表显示「目录获取中」状态；知识采集的同步任务弹窗「目录选择」优先读取该快照表秒开（GET /knowledge-center/knowledge-sources/{id}/dingtalk-folder-snapshot，按路径树还原目录，快照缺失时自动回退实时遍历））
+        ├── governance/          # 知识治理（分组：知识缺口 /govern/gaps——原「知识治理」页，含知识缺口+治理标准页签、model.vue 接入配置；入库审核 /govern/review——原「知识打标」页迁入更名，钉钉知识列表操作列即审核状态字段：点击弹窗选择 通过/待确认/待更正 确认后文案变为所选状态、可再次点击变更，审核人列记录操作用户名，审核记录存 dingtalk_file_reviews 表按节点ID独立存储、快照刷新不覆盖；治理标准页实时读取钉钉多维表《杰克知识管理规范》，需应用开通 Notable.Base.Read.All 权限；知识缺口页知识库过滤选项取自知识源管理中已启用的钉钉知识库，选中钉钉知识库后查询读取 dingtalk_folder_stats 快照表（文件夹直属文档数=在线文档+本地上传文件（.dlink 文件夹快捷方式计为其所在文件夹的一个文档，不作为目录遍历——其子节点 API 无法列出）；「文件夹数量」列=该目录直属子文件夹数，不含目录本身与孙级——钉钉行由快照路径树推导、本地行走 parent_id，CSV 导出同口径）；筛选项：知识库、Owner、有无文档状态，以及「文档数量 / 文件夹数量」区间下拉（0 / 1-9 / 10-99 / 100+，按直属数量过滤，查询与 CSV 导出同口径，变更后由「查询」按钮触发），「刷新数据」按钮触发后台全量遍历并覆盖写入快照（几万文档的大库需数分钟，前端轮询进度，刷新保留已维护的 Owner）；知识Owner 支持行内编辑弹窗与批量导入（CSV/XLSX，按目录ID或知识库＋目录路径匹配，本地目录与钉钉文件夹均可），钉钉行另提供「通知」按钮——经钉钉企业机器人向 Owner 发单聊催补提醒（无文档行可点，正文预览见「知识Owner通知」说明）；新增钉钉知识源时自动触发该库快照预热，知识源列表显示「目录获取中」状态；知识采集的同步任务弹窗「目录选择」优先读取该快照表秒开（GET /knowledge-center/knowledge-sources/{id}/dingtalk-folder-snapshot，按路径树还原目录，快照缺失时自动回退实时遍历））
         └── settings/            # 兼容旧路由的模型配置页（隐藏）
 ```
 

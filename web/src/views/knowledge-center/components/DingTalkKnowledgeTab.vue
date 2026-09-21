@@ -1,15 +1,18 @@
 <script setup lang="ts">
 /**
- * 知识中心 - 钉钉知识
+ * 知识中心 - 钉钉知识（入库审核）
  * 读取服务端持久化快照（重启后仍在）；全量遍历只在点「刷新」时触发，
- * 支持按知识库 / 创建人 / 目录过滤
+ * 支持按知识库 / 创建人 / 目录过滤；操作列可对文件做入库审核（通过/待确认/待更正）
  */
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { Search, Refresh, Document } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { fetchDingTalkDocuments } from '@/api/knowledge-center'
+import { fetchDingTalkDocuments, reviewDingTalkDocument } from '@/api/knowledge-center'
 import { formatDate, formatFileSize } from '@/utils/format'
-import type { DingTalkFile, DingTalkOption } from '@/types/knowledge-center'
+import { useUserStore } from '@/stores/user'
+import type { DingTalkFile, DingTalkOption, DingTalkReviewStatus } from '@/types/knowledge-center'
+
+const userStore = useUserStore()
 
 // 数据
 const documents = ref<DingTalkFile[]>([])
@@ -147,10 +150,45 @@ function handleSizeChange(s: number) {
   loadDocs()
 }
 
-function openDoc(row: DingTalkFile) {
-  if (row.url) {
-    window.open(row.url, '_blank')
-  }
+// ===== 入库审核：操作列按钮即状态字段（未审核显示「审核」，已审核显示状态文案）=====
+// 点击弹窗选择 通过/待确认/待更正，确认后文案变为所选状态，再次点击可变更
+const REVIEW_STATUS_TYPES: Record<string, 'success' | 'warning' | 'danger'> = {
+  通过: 'success',
+  待确认: 'warning',
+  待更正: 'danger',
+}
+const reviewDialog = ref(false)
+const reviewRow = ref<DingTalkFile>()
+const reviewStatus = ref<DingTalkReviewStatus>('通过')
+const reviewSaving = ref(false)
+
+function openReview(row: DingTalkFile) {
+  reviewRow.value = row
+  reviewStatus.value = (row.review_status || '通过') as DingTalkReviewStatus
+  reviewDialog.value = true
+}
+
+function reviewBtnType(row: DingTalkFile): 'success' | 'warning' | 'danger' | 'primary' {
+  return (row.review_status && REVIEW_STATUS_TYPES[row.review_status]) || 'primary'
+}
+
+async function confirmReview() {
+  const row = reviewRow.value
+  if (!row) return
+  reviewSaving.value = true
+  try {
+    const res = await reviewDingTalkDocument({
+      node_id: row.node_id,
+      workspace_id: row.workspace_id,
+      review_status: reviewStatus.value,
+    })
+    // 行内即时更新：状态文案 + 审核人（后端记录为操作者用户名）
+    row.review_status = res.review_status as DingTalkReviewStatus
+    row.reviewer = res.reviewer || userStore.userInfo?.username || ''
+    reviewDialog.value = false
+    ElMessage.success(`已审核：${row.name} → ${res.review_status}`)
+  } catch { /* API interceptor displays errors. */ }
+  finally { reviewSaving.value = false }
 }
 
 function fileTypeText(row: DingTalkFile): string {
@@ -302,11 +340,21 @@ onUnmounted(() => {
           {{ formatDate(scope.row.modified_at) }}
         </template>
       </el-table-column>
+      <el-table-column label="审核人" width="100" prop="reviewer">
+        <template #default="scope: any">
+          {{ scope.row.reviewer || '-' }}
+        </template>
+      </el-table-column>
+      <!-- 操作列即审核状态字段：未审核显示「审核」，已审核显示状态文案，点击均可弹窗（变更）审核 -->
       <el-table-column label="操作" width="80" fixed="right">
         <template #default="scope: any">
-          <el-button link type="primary" size="small" :disabled="!scope.row.url" @click="openDoc(scope.row)">
-            打开
-          </el-button>
+          <el-tooltip :disabled="!scope.row.reviewer"
+                      :content="`审核人：${scope.row.reviewer}`"
+                      placement="top">
+            <el-button link :type="reviewBtnType(scope.row)" size="small" @click="openReview(scope.row)">
+              {{ scope.row.review_status || '审核' }}
+            </el-button>
+          </el-tooltip>
         </template>
       </el-table-column>
     </el-table>
@@ -325,6 +373,20 @@ onUnmounted(() => {
         @size-change="handleSizeChange"
       />
     </div>
+
+    <!-- 入库审核弹窗：选择审核状态，确认后操作列文案变为所选状态，可再次点击变更 -->
+    <el-dialog v-model="reviewDialog" title="入库审核" width="min(420px, 90vw)" :close-on-click-modal="!reviewSaving">
+      <p class="review-file" :title="reviewRow?.name">{{ reviewRow?.name }}</p>
+      <el-radio-group v-model="reviewStatus" class="review-options">
+        <el-radio value="通过">通过</el-radio>
+        <el-radio value="待确认">待确认</el-radio>
+        <el-radio value="待更正">待更正</el-radio>
+      </el-radio-group>
+      <template #footer>
+        <el-button :disabled="reviewSaving" @click="reviewDialog = false">取消</el-button>
+        <el-button type="primary" :loading="reviewSaving" @click="confirmReview">确认</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -459,5 +521,24 @@ onUnmounted(() => {
 
 .col-muted {
   color: #909399;
+}
+
+/* 入库审核弹窗：文件名单行截断，三个状态选项竖排 */
+.review-file {
+  margin: 0 0 12px;
+  font-weight: 600;
+  color: #303133;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.review-options {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: flex-start;
+}
+.review-options .el-radio {
+  margin-right: 0;
 }
 </style>

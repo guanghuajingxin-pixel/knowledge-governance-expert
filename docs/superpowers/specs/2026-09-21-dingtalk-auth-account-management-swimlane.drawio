@@ -1,0 +1,258 @@
+<mxfile host="app.diagrams.net" modified="2026-09-21T00:00:00.000Z" agent="QwenWork" version="24.0.0">
+  <diagram name="钉钉扫码登录与首次设密" id="page-login">
+    <mxGraphModel dx="2400" dy="1400" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2200" pageHeight="1400" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="lane-user" value="用户 / 浏览器" style="swimlane;html=1;startSize=30;horizontal=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=14;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="40" y="40" width="2120" height="180" as="geometry" />
+        </mxCell>
+        <mxCell id="lane-web" value="前端 Web (Vue)" style="swimlane;html=1;startSize=30;horizontal=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=14;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="40" y="220" width="2120" height="180" as="geometry" />
+        </mxCell>
+        <mxCell id="lane-api" value="kb-api (FastAPI)" style="swimlane;html=1;startSize=30;horizontal=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=14;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="40" y="400" width="2120" height="220" as="geometry" />
+        </mxCell>
+        <mxCell id="lane-db" value="PostgreSQL" style="swimlane;html=1;startSize=30;horizontal=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=14;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="40" y="620" width="2120" height="160" as="geometry" />
+        </mxCell>
+        <mxCell id="lane-dt" value="钉钉开放平台" style="swimlane;html=1;startSize=30;horizontal=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=14;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="40" y="780" width="2120" height="160" as="geometry" />
+        </mxCell>
+        <mxCell id="lane-worker" value="Celery 同步 Worker" style="swimlane;html=1;startSize=30;horizontal=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=14;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="40" y="940" width="2120" height="220" as="geometry" />
+        </mxCell>
+
+        <mxCell id="u1" value="打开 /login" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff" vertex="1" parent="lane-user">
+          <mxGeometry x="40" y="70" width="120" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="u2" value="切换到&#10;「钉钉扫码」Tab" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff" vertex="1" parent="lane-user">
+          <mxGeometry x="200" y="70" width="140" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="u3" value="手机钉钉&#10;扫码授权" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff" vertex="1" parent="lane-user">
+          <mxGeometry x="380" y="70" width="120" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="u4" value="输入两次&#10;新密码" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff" vertex="1" parent="lane-user">
+          <mxGeometry x="900" y="70" width="120" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="u5" value="进入 /chat&#10;创建 KB" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff" vertex="1" parent="lane-user">
+          <mxGeometry x="1220" y="70" width="120" height="40" as="geometry" />
+        </mxCell>
+
+        <mxCell id="w1" value="GET /auth/dingtalk-config&#10;判断 qr_login_enabled" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff" vertex="1" parent="lane-web">
+          <mxGeometry x="40" y="70" width="180" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="w2" value="加载 DingTalk QR SDK&#10;渲染二维码" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff" vertex="1" parent="lane-web">
+          <mxGeometry x="240" y="70" width="160" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="w3" value="/login/callback&#10;拿到 ?code=xxx" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff" vertex="1" parent="lane-web">
+          <mxGeometry x="420" y="70" width="160" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="w4" value="POST /auth/dingtalk-login&#10;{auth_code}" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff" vertex="1" parent="lane-web">
+          <mxGeometry x="600" y="70" width="180" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="w5" value="must_set_password=true&#10;→ 跳 /onboarding/set-password" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc" vertex="1" parent="lane-web">
+          <mxGeometry x="800" y="55" width="200" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="w6" value="POST /auth/set-password&#10;{new_password, confirm}" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff" vertex="1" parent="lane-web">
+          <mxGeometry x="1020" y="70" width="200" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="w7" value="存新 JWT&#10;router.push(/chat)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff" vertex="1" parent="lane-web">
+          <mxGeometry x="1240" y="70" width="160" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="w8" value="POST /knowledge-bases&#10;owner_id=当前用户" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff" vertex="1" parent="lane-web">
+          <mxGeometry x="1420" y="70" width="180" height="40" as="geometry" />
+        </mxCell>
+
+        <mxCell id="a1" value="dingtalk-login 处理器&#10;调钉钉换 union_id" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff" vertex="1" parent="lane-api">
+          <mxGeometry x="600" y="50" width="180" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="a2" value="resolve_user(corp_id, dt_userid)&#10;查 DingtalkBinding" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff" vertex="1" parent="lane-api">
+          <mxGeometry x="600" y="110" width="220" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="a3" value="新建分支：&#10;User(must_change_password=true,&#10;password_hash=random,&#10;role=viewer) + Binding" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc" vertex="1" parent="lane-api">
+          <mxGeometry x="840" y="105" width="220" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="a4" value="签发 JWT&#10;payload={sub, role, dtu, mcp:true}" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff" vertex="1" parent="lane-api">
+          <mxGeometry x="1080" y="110" width="200" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="a5" value="set-password 处理器&#10;bcrypt.hash + 校验强度" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff" vertex="1" parent="lane-api">
+          <mxGeometry x="1020" y="50" width="200" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="a6" value="写 audit_log&#10;action=self_set_password" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff" vertex="1" parent="lane-api">
+          <mxGeometry x="1240" y="50" width="180" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="a7" value="KB 创建&#10;owner_id=principal.sub" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff" vertex="1" parent="lane-api">
+          <mxGeometry x="1420" y="50" width="180" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="a8" value="enqueue&#10;sync_kb.delay(kb_id)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff" vertex="1" parent="lane-api">
+          <mxGeometry x="1620" y="50" width="180" height="40" as="geometry" />
+        </mxCell>
+
+        <mxCell id="d1" value="INSERT users&#10;INSERT dingtalk_bindings" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;fillColor=#ffffff" vertex="1" parent="lane-db">
+          <mxGeometry x="860" y="50" width="180" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="d2" value="UPDATE users&#10;SET password_hash, must_change_password=false,&#10;password_updated_at=now()" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;fillColor=#ffffff" vertex="1" parent="lane-db">
+          <mxGeometry x="1080" y="50" width="240" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="d3" value="INSERT knowledge_bases&#10;owner_id=新用户" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;fillColor=#ffffff" vertex="1" parent="lane-db">
+          <mxGeometry x="1420" y="50" width="180" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="d4" value="SELECT KB.owner_id →&#10;DingtalkBinding.dt_unionid" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;fillColor=#ffffff" vertex="1" parent="lane-db">
+          <mxGeometry x="1640" y="50" width="200" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="t1" value="POST /v1.0/oauth2/userAccessToken&#10;+ GET /v1.0/contact/users/me&#10;→ 返回 union_id, userid, name" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff" vertex="1" parent="lane-dt">
+          <mxGeometry x="600" y="50" width="240" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="c1" value="XXL-Job 触发&#10;sync_kb(kb_id)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff" vertex="1" parent="lane-worker">
+          <mxGeometry x="1620" y="50" width="180" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="c2" value="resolve_operator(kb_id)&#10;TTL 缓存 60s" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff" vertex="1" parent="lane-worker">
+          <mxGeometry x="1620" y="110" width="180" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="c3" value="DingtalkClient.list_nodes(&#10;  folder_id,&#10;  operator_union_id=U1)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff" vertex="1" parent="lane-worker">
+          <mxGeometry x="1820" y="105" width="200" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="c4" value="钉钉按 U1 权限&#10;过滤返回可见节点" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7" vertex="1" parent="lane-worker">
+          <mxGeometry x="1820" y="50" width="200" height="40" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=classic" edge="1" parent="1" source="u1" target="w1"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=classic" edge="1" parent="1" source="w1" target="u2"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=classic" edge="1" parent="1" source="u2" target="w2"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e4" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=classic" edge="1" parent="1" source="w2" target="u3"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e5" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=classic" edge="1" parent="1" source="u3" target="w3"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e6" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=classic" edge="1" parent="1" source="w3" target="w4"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e7" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=classic" edge="1" parent="1" source="w4" target="a1"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e8" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=classic" edge="1" parent="1" source="a1" target="t1"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e9" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=classic" edge="1" parent="1" source="t1" target="a2"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e10" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=classic" edge="1" parent="1" source="a2" target="a3"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e11" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=classic" edge="1" parent="1" source="a3" target="d1"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e12" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=classic" edge="1" parent="1" source="d1" target="a4"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e13" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=classic" edge="1" parent="1" source="a4" target="w5"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e14" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=classic" edge="1" parent="1" source="w5" target="u4"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e15" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=classic" edge="1" parent="1" source="u4" target="w6"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e16" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=classic" edge="1" parent="1" source="w6" target="a5"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e17" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=classic" edge="1" parent="1" source="a5" target="d2"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e18" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=classic" edge="1" parent="1" source="d2" target="a6"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e19" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=classic" edge="1" parent="1" source="a6" target="w7"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e20" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=classic" edge="1" parent="1" source="w7" target="u5"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e21" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=classic" edge="1" parent="1" source="u5" target="w8"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e22" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=classic" edge="1" parent="1" source="w8" target="a7"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e23" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=classic" edge="1" parent="1" source="a7" target="d3"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e24" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=classic" edge="1" parent="1" source="d3" target="a8"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e25" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=classic" edge="1" parent="1" source="a8" target="c1"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e26" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=classic" edge="1" parent="1" source="c1" target="c2"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e27" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=classic" edge="1" parent="1" source="c2" target="d4"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e28" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=classic" edge="1" parent="1" source="d4" target="c3"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e29" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=classic" edge="1" parent="1" source="c3" target="c4"><mxGeometry relative="1" as="geometry"/></mxCell>
+
+        <mxCell id="note1" value="关键点：&#10;1. JWT payload 携带 dtu (dt_unionid) 和 mcp (must_change_password)&#10;2. 前端路由守卫：mcp=true 时除白名单外全部重定向到 /onboarding/set-password&#10;3. 同步 Worker 用 KB.owner 的 union_id，未绑定时回退全局 Setting，日志记 operator_source" style="shape=note;whiteSpace=wrap;html=1;backgroundOutline=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;align=left;verticalAlign=top" vertex="1" parent="1">
+          <mxGeometry x="40" y="1200" width="720" height="100" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+
+  <diagram name="管理员重置密码与解绑" id="page-admin">
+    <mxGraphModel dx="1800" dy="1000" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="900" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="alane-admin" value="管理员 (王五)" style="swimlane;html=1;startSize=30;horizontal=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=14;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="40" y="40" width="1520" height="160" as="geometry" />
+        </mxCell>
+        <mxCell id="alane-user" value="目标用户 (李四)" style="swimlane;html=1;startSize=30;horizontal=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=14;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="40" y="200" width="1520" height="160" as="geometry" />
+        </mxCell>
+        <mxCell id="alane-web" value="前端 Web" style="swimlane;html=1;startSize=30;horizontal=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=14;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="40" y="360" width="1520" height="140" as="geometry" />
+        </mxCell>
+        <mxCell id="alane-api" value="kb-api" style="swimlane;html=1;startSize=30;horizontal=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=14;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="40" y="500" width="1520" height="180" as="geometry" />
+        </mxCell>
+        <mxCell id="alane-db" value="PostgreSQL" style="swimlane;html=1;startSize=30;horizontal=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=14;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="40" y="680" width="1520" height="160" as="geometry" />
+        </mxCell>
+
+        <mxCell id="au1" value="进入 /admin/users" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff" vertex="1" parent="alane-admin">
+          <mxGeometry x="40" y="60" width="140" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="au2" value="点击行操作&#10;「重置密码」" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff" vertex="1" parent="alane-admin">
+          <mxGeometry x="220" y="60" width="140" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="au3" value="弹窗输入&#10;临时密码 + 勾选&#10;「强制下次改密」" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff" vertex="1" parent="alane-admin">
+          <mxGeometry x="400" y="55" width="180" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="au4" value="钉钉私聊&#10;告知临时密码" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff" vertex="1" parent="alane-admin">
+          <mxGeometry x="820" y="60" width="140" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="au5" value="解绑钉钉&#10;（换岗/离职）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff" vertex="1" parent="alane-admin">
+          <mxGeometry x="1180" y="60" width="140" height="40" as="geometry" />
+        </mxCell>
+
+        <mxCell id="bu1" value="用 dd_{userid}&#10;+ 临时密码登录" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff" vertex="1" parent="alane-user">
+          <mxGeometry x="820" y="60" width="160" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="bu2" value="被强制跳&#10;/onboarding/set-password" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc" vertex="1" parent="alane-user">
+          <mxGeometry x="1000" y="60" width="180" height="40" as="geometry" />
+        </mxCell>
+
+        <mxCell id="bw1" value="POST /api/v1/users/{id}&#10;{password, must_change_password:true}" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff" vertex="1" parent="alane-web">
+          <mxGeometry x="400" y="50" width="240" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="bw2" value="DELETE /api/v1/users/{id}/dingtalk-binding" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff" vertex="1" parent="alane-web">
+          <mxGeometry x="1120" y="50" width="280" height="40" as="geometry" />
+        </mxCell>
+
+        <mxCell id="ba1" value="require_role(admin)&#10;校验最后一名 super_admin 保护" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff" vertex="1" parent="alane-api">
+          <mxGeometry x="400" y="40" width="240" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="ba2" value="bcrypt.hash_password&#10;更新 User" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff" vertex="1" parent="alane-api">
+          <mxGeometry x="400" y="100" width="240" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="ba3" value="audit.write(&#10;  actor=admin,&#10;  action=admin_reset_password,&#10;  target=user)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff" vertex="1" parent="alane-api">
+          <mxGeometry x="660" y="100" width="200" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="ba4" value="require_role(admin)&#10;+ 保护最后一名 super_admin" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff" vertex="1" parent="alane-api">
+          <mxGeometry x="1120" y="40" width="240" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="ba5" value="DELETE FROM dingtalk_bindings&#10;WHERE user_id=?&#10;+ audit.write(admin_unbind_dingtalk)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff" vertex="1" parent="alane-api">
+          <mxGeometry x="1120" y="100" width="280" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="bd1" value="UPDATE users SET password_hash,&#10;must_change_password=true,&#10;password_updated_at=null" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;fillColor=#ffffff" vertex="1" parent="alane-db">
+          <mxGeometry x="400" y="50" width="240" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="bd2" value="INSERT audit_logs" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;fillColor=#ffffff" vertex="1" parent="alane-db">
+          <mxGeometry x="660" y="50" width="200" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="bd3" value="DELETE dingtalk_bindings" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;fillColor=#ffffff" vertex="1" parent="alane-db">
+          <mxGeometry x="1120" y="50" width="240" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="ae1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=classic" edge="1" parent="1" source="au1" target="au2"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ae2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=classic" edge="1" parent="1" source="au2" target="au3"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ae3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=classic" edge="1" parent="1" source="au3" target="bw1"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ae4" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=classic" edge="1" parent="1" source="bw1" target="ba1"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ae5" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=classic" edge="1" parent="1" source="ba1" target="ba2"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ae6" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=classic" edge="1" parent="1" source="ba2" target="bd1"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ae7" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=classic" edge="1" parent="1" source="bd1" target="ba3"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ae8" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=classic" edge="1" parent="1" source="ba3" target="bd2"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ae9" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=classic" edge="1" parent="1" source="bd2" target="au4"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ae10" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=classic" edge="1" parent="1" source="au4" target="bu1"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ae11" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=classic" edge="1" parent="1" source="bu1" target="bu2"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ae12" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=classic;dashed=1" edge="1" parent="1" source="au5" target="bw2"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ae13" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=classic;dashed=1" edge="1" parent="1" source="bw2" target="ba4"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ae14" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=classic;dashed=1" edge="1" parent="1" source="ba4" target="ba5"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ae15" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=classic;dashed=1" edge="1" parent="1" source="ba5" target="bd3"><mxGeometry relative="1" as="geometry"/></mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

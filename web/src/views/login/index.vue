@@ -1,14 +1,18 @@
 <script setup lang="ts">
-import { reactive, ref } from 'vue'
+import { onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useUserStore } from '@/stores/user'
 import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
 import { User, Lock, Reading } from '@element-plus/icons-vue'
+import { getDingtalkConfig, type DingtalkConfig } from '@/api/auth'
+import { gotoDingtalkAuth, loginDestination, safeRedirect } from '@/utils/dingtalk-auth'
+import type { LoginResponse } from '@/types/user'
 
 const router = useRouter()
 const route = useRoute()
 const userStore = useUserStore()
 
+const activeTab = ref('password')
 const formRef = ref<FormInstance>()
 const loading = ref(false)
 const form = reactive({
@@ -21,18 +25,33 @@ const rules: FormRules = {
   password: [{ required: true, message: '请输入密码', trigger: 'blur' }],
 }
 
+// 钉钉扫码配置：qr_login_enabled=true 时才展示「钉钉扫码」页签
+const dtConfig = ref<DingtalkConfig | null>(null)
+onMounted(async () => {
+  try {
+    dtConfig.value = await getDingtalkConfig()
+  } catch {
+    // 配置读取失败（后端未配钉钉）：仅保留密码登录，不打扰用户
+    dtConfig.value = null
+  }
+})
+
+/** 登录成功统一落地：token/userInfo 入 store，需设密先去设密页，否则回原目标 */
+function postLogin(res: LoginResponse) {
+  userStore.applyLogin(res)
+  const redirect = safeRedirect(route.query.redirect, '/chat')
+  router.push(loginDestination(res, redirect))
+}
+
 async function handleLogin() {
   if (!formRef.value) return
   await formRef.value.validate(async (valid) => {
     if (!valid) return
     loading.value = true
     try {
-      await userStore.login(form)
+      const res = await userStore.login(form)
       ElMessage.success('登录成功')
-      const redirect = typeof route.query.redirect === 'string' && route.query.redirect.startsWith('/')
-        ? route.query.redirect
-        : '/chat'
-      router.push(redirect)
+      postLogin(res)
     } catch (e) {
       // 登录接口 401 由 request.ts 放行至此；展示后端 detail 或默认提示
       const err = e as { response?: { data?: { detail?: string } } }
@@ -41,6 +60,22 @@ async function handleLogin() {
       loading.value = false
     }
   })
+}
+
+/** 钉钉扫码登录：整页跳转钉钉统一授权页，回调 /login/callback 换 token（不引钉钉 JS SDK） */
+const dtLoading = ref(false)
+function handleDingtalkLogin() {
+  if (!dtConfig.value?.app_key) {
+    ElMessage.error('钉钉应用未配置，请联系管理员')
+    return
+  }
+  dtLoading.value = true
+  try {
+    gotoDingtalkAuth(dtConfig.value.app_key)
+  } catch {
+    dtLoading.value = false
+    ElMessage.error('跳转钉钉授权页失败，请重试')
+  }
 }
 </script>
 
@@ -51,26 +86,39 @@ async function handleLogin() {
         <el-icon size="40" color="#409EFF"><Reading /></el-icon>
         <h2>知识治理专家</h2>
       </div>
-      <el-form
-        ref="formRef"
-        :model="form"
-        :rules="rules"
-        size="large"
-        @keyup.enter="handleLogin"
-      >
-        <el-form-item prop="username">
-          <el-input v-model="form.username" placeholder="用户名" :prefix-icon="User" />
-        </el-form-item>
-        <el-form-item prop="password">
-          <el-input v-model="form.password" type="password" show-password placeholder="密码" :prefix-icon="Lock" />
-        </el-form-item>
-        <el-form-item>
-          <el-button type="primary" :loading="loading" style="width: 100%" @click="handleLogin">
-            登录
-          </el-button>
-        </el-form-item>
-      </el-form>
-      <div class="login-tip">默认管理员：admin / admin123</div>
+      <el-tabs v-model="activeTab" stretch>
+        <el-tab-pane label="密码登录" name="password">
+          <el-form
+            ref="formRef"
+            :model="form"
+            :rules="rules"
+            size="large"
+            @keyup.enter="handleLogin"
+          >
+            <el-form-item prop="username">
+              <el-input v-model="form.username" placeholder="用户名" :prefix-icon="User" />
+            </el-form-item>
+            <el-form-item prop="password">
+              <el-input v-model="form.password" type="password" show-password placeholder="密码" :prefix-icon="Lock" />
+            </el-form-item>
+            <el-form-item>
+              <el-button type="primary" :loading="loading" style="width: 100%" @click="handleLogin">
+                登录
+              </el-button>
+            </el-form-item>
+          </el-form>
+          <div class="login-tip">默认管理员：admin / admin123</div>
+        </el-tab-pane>
+        <el-tab-pane v-if="dtConfig?.qr_login_enabled" label="钉钉扫码" name="dingtalk">
+          <div class="dt-pane">
+            <p class="dt-desc">点击下方按钮跳转钉钉统一授权页，使用钉钉 App 扫码确认后自动登录。</p>
+            <el-button type="primary" size="large" :loading="dtLoading" style="width: 100%" @click="handleDingtalkLogin">
+              使用钉钉扫码登录
+            </el-button>
+            <div class="login-tip">首次扫码将自动创建账号，并引导设置本地密码</div>
+          </div>
+        </el-tab-pane>
+      </el-tabs>
     </div>
   </div>
 </template>
@@ -92,7 +140,7 @@ async function handleLogin() {
 }
 .login-header {
   text-align: center;
-  margin-bottom: 30px;
+  margin-bottom: 16px;
 }
 .login-header h2 {
   margin: 12px 0 0;
@@ -103,5 +151,15 @@ async function handleLogin() {
   color: #909399;
   font-size: 12px;
   margin-top: 8px;
+}
+.dt-pane {
+  padding: 8px 0 4px;
+}
+.dt-desc {
+  margin: 0 0 20px;
+  color: #606266;
+  font-size: 13px;
+  line-height: 1.7;
+  text-align: center;
 }
 </style>

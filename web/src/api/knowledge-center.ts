@@ -1,52 +1,5 @@
 import request from './request'
-import type { KbTreeNode, KnowledgeCenterDocument, TrashItem, TaskQueueStats, KcDocumentQuery, UploaderOption, DingTalkDocResult, DingTalkWorkspace, DingTalkNode, KnowledgeSource, KnowledgeSourcePayload } from '@/types/knowledge-center'
-import type { PageQuery, PageResult } from '@/types/api'
-
-/** 获取统一目录树 */
-export function fetchDirectoryTree(kbType?: string) {
-  return request.get<unknown, KbTreeNode[]>('/knowledge-center/directories', {
-    params: kbType ? { kb_type: kbType } : {},
-  })
-}
-
-/** 跨知识库文档列表 */
-export function fetchDocuments(params: KcDocumentQuery) {
-  return request.get<unknown, PageResult<KnowledgeCenterDocument>>('/knowledge-center/documents', { params })
-}
-
-/** 获取文档详情 */
-export function fetchDocumentDetail(id: string) {
-  return request.get<unknown, KnowledgeCenterDocument>(`/knowledge-center/documents/${id}`)
-}
-
-/** 回收站列表 */
-export function fetchRecycleBin(params: PageQuery) {
-  return request.get<unknown, PageResult<TrashItem>>('/knowledge-center/recycle-bin', { params })
-}
-
-/** 从回收站恢复文档 */
-export function restoreDocument(id: string) {
-  return request.post<unknown, { ok: boolean }>(`/knowledge-center/recycle-bin/${id}/restore`)
-}
-
-/** 永久删除文档 */
-export function permanentDeleteDocument(id: string) {
-  return request.delete<unknown, { ok: boolean }>(`/knowledge-center/recycle-bin/${id}`)
-}
-
-/** 任务队列统计 */
-export function fetchTaskStats(kbType?: string) {
-  return request.get<unknown, TaskQueueStats>('/knowledge-center/task-stats', {
-    params: kbType ? { kb_type: kbType } : {},
-  })
-}
-
-/** 获取文档创建人列表 */
-export function fetchUploaders(kbType?: string) {
-  return request.get<unknown, UploaderOption[]>('/knowledge-center/uploaders', {
-    params: kbType ? { kb_type: kbType } : {},
-  })
-}
+import type { DingTalkDocResult, DingTalkWorkspace, DingTalkNode, KnowledgeSource, KnowledgeSourcePayload } from '@/types/knowledge-center'
 
 /** 钉钉知识库文件列表（读取服务端持久化快照；refresh=true 才后台重新遍历钉钉） */
 export function fetchDingTalkDocuments(params: {
@@ -61,6 +14,21 @@ export function fetchDingTalkDocuments(params: {
   // 后端读持久化快照即返回（refresh=true 也是立即返回 + 后台遍历），
   // 无需 10 分钟超时；回落全局 60s，避免异常时长时间挂住一条请求占后端连接。
   return request.get<unknown, DingTalkDocResult>('/knowledge-center/dingtalk/documents', { params })
+}
+
+/** 入库审核：记录/变更钉钉文件的审核状态（审核人由后端记录为当前登录用户名） */
+export function reviewDingTalkDocument(params: {
+  node_id: string
+  workspace_id?: string
+  review_status: '通过' | '待确认' | '待更正'
+}) {
+  return request.put<unknown, {
+    ok: boolean
+    node_id: string
+    review_status: string
+    reviewer: string
+    reviewed_at: string | null
+  }>('/knowledge-center/dingtalk/documents/review', params)
 }
 
 /** 实时列出钉钉团队知识库（单次 API 调用，轻量） */

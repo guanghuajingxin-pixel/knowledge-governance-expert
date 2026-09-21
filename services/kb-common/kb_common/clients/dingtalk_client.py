@@ -75,12 +75,13 @@ _walk_info: dict[str, int] = {"requests": 0, "failed_folders": 0}
 # 运行时配置（DB settings 表）读取缓存：TTL 内复用，避免每个请求都为读配置占一条 DB 连接
 _RUNTIME_CFG_TTL = 30.0
 _runtime_cfg_cache: dict[str, float] = {"loaded_at": 0.0}
-# 知识库列表缓存：变动极少但被高频读取（页面挂载 + 后台遍历），TTL 内直接复用
+# 知识库列表缓存：变动极少但被高频读取（页面挂载 + 后台遍历），TTL 内直接复用。
+# 按 operator 分键：不同登录用户可见的知识库范围不同，共用一份缓存会串权限。
 _WS_TTL = 60.0
-_ws_cache: dict[str, Any] = {"at": 0.0, "items": None}
+_ws_cache: dict[str, dict[str, Any]] = {}
 _ws_lock = asyncio.Lock()
-# 后台刷新单飞标记：缓存过期时只允许一个刷新任务在飞
-_ws_refresh: dict[str, bool] = {"running": False}
+# 后台刷新单飞标记：缓存过期时只允许一个刷新任务在飞（按 operator 分键）
+_ws_refresh: dict[str, bool] = {}
 
 
 # ===================== 配置 =====================
@@ -240,13 +241,15 @@ async def _request_with_retry(method: str, url: str, *, client: httpx.AsyncClien
 
 # ===================== 知识库 =====================
 async def _list_workspaces_remote(timeout: float = 60.0,
-                                  max_retry: int | None = None) -> list[dict[str, Any]]:
+                                  max_retry: int | None = None,
+                                  operator_union_id: str | None = None) -> list[dict[str, Any]]:
     """真正去钉钉拉知识库列表（自动分页，受全局节流约束）。
 
     timeout / max_retry：后台刷新用默认宽松值；用户正在等的冷启动路径传小值，
     避免钉钉抖动时把页面卡住几十秒。
+    operator_union_id：按登录用户维度取可见范围；不传回退全局服务账号。
     """
-    operator = _operator_id()
+    operator = operator_union_id or _operator_id()
     if not operator:
         raise RuntimeError("钉钉操作人 UnionId 未配置")
     token = await _get_access_token()
@@ -268,29 +271,31 @@ async def _list_workspaces_remote(timeout: float = 60.0,
     return out
 
 
-def _schedule_ws_refresh() -> None:
+def _schedule_ws_refresh(operator: str) -> None:
     """后台单飞刷新知识库列表缓存：失败就保留旧数据，下次访问再试。"""
-    if _ws_refresh["running"]:
+    if _ws_refresh.get(operator):
         return
-    _ws_refresh["running"] = True
+    _ws_refresh[operator] = True
 
     async def _run() -> None:
         try:
-            items = await _list_workspaces_remote()
-            _ws_cache["at"] = time.monotonic()
-            _ws_cache["items"] = items
+            items = await _list_workspaces_remote(operator_union_id=operator)
+            entry = _ws_cache.setdefault(operator, {"at": 0.0, "items": None})
+            entry["at"] = time.monotonic()
+            entry["items"] = items
         except Exception as e:  # noqa: BLE001 — 刷新失败不影响已缓存数据的展示
             logger.warning("后台刷新钉钉知识库列表失败，沿用旧缓存: %s", e)
         finally:
-            _ws_refresh["running"] = False
+            _ws_refresh[operator] = False
 
     try:
         asyncio.get_running_loop().create_task(_run())
     except RuntimeError:      # 不在事件循环里（同步调用方）——放弃本次刷新
-        _ws_refresh["running"] = False
+        _ws_refresh[operator] = False
 
 
-async def list_workspaces(use_cache: bool = True) -> list[dict[str, Any]]:
+async def list_workspaces(use_cache: bool = True,
+                          operator_union_id: str | None = None) -> list[dict[str, Any]]:
     """获取操作人可见的知识库列表（60s 缓存 + 过期后台刷新 + 冷启动单飞）。
 
     知识库列表变动极少，但「钉钉知识同步」页每次挂载、后台全量遍历都会读它。
@@ -298,35 +303,40 @@ async def list_workspaces(use_cache: bool = True) -> list[dict[str, Any]]:
     不会再变成用户界面上的等待。只有进程内完全没有缓存时才同步等一次，
     且用 15s 超时 + 2 次重试的短预算兜底。
     需要强制取最新时传 use_cache=False，或在钉钉配置变更后调 invalidate_workspaces_cache()。
+    operator_union_id：按登录用户维度取可见范围（缓存按 operator 分键）；不传回退全局服务账号。
     """
+    operator = operator_union_id or _operator_id()
     if not use_cache:
-        return await _list_workspaces_remote()
+        return await _list_workspaces_remote(operator_union_id=operator)
 
-    items = _ws_cache["items"]
-    if items is not None:
-        if time.monotonic() - _ws_cache["at"] >= _WS_TTL:
-            _schedule_ws_refresh()      # 过期：旧值先顶上，后台悄悄刷新
-        return items
+    entry = _ws_cache.get(operator)
+    if entry and entry["items"] is not None:
+        if time.monotonic() - entry["at"] >= _WS_TTL:
+            _schedule_ws_refresh(operator)      # 过期：旧值先顶上，后台悄悄刷新
+        return entry["items"]
 
     # 冷启动没有任何缓存：只能同步等一次（短超时 + 小重试预算），并发请求共用同一次拉取
     async with _ws_lock:
-        if _ws_cache["items"] is not None:
-            return _ws_cache["items"]
-        fetched = await _list_workspaces_remote(timeout=15.0, max_retry=2)
-        _ws_cache["at"] = time.monotonic()
-        _ws_cache["items"] = fetched
+        entry = _ws_cache.get(operator)
+        if entry and entry["items"] is not None:
+            return entry["items"]
+        fetched = await _list_workspaces_remote(timeout=15.0, max_retry=2,
+                                                operator_union_id=operator)
+        _ws_cache[operator] = {"at": time.monotonic(), "items": fetched}
         return fetched
 
 
 def invalidate_workspaces_cache() -> None:
     """清空知识库列表缓存（钉钉操作人/凭证变更后调用）。"""
-    _ws_cache["at"] = 0.0
-    _ws_cache["items"] = None
+    _ws_cache.clear()
 
 
-async def list_nodes(parent_node_id: str) -> list[dict[str, Any]]:
-    """获取某父节点下的直接子节点，自动分页。"""
-    operator = _operator_id()
+async def list_nodes(parent_node_id: str,
+                     operator_union_id: str | None = None) -> list[dict[str, Any]]:
+    """获取某父节点下的直接子节点，自动分页。operator_union_id 不传回退全局服务账号。"""
+    operator = operator_union_id or _operator_id()
+    if not operator:
+        raise RuntimeError("钉钉操作人 UnionId 未配置")
     token = await _get_access_token()
     url = f"{API_BASE}/v2.0/wiki/nodes"
     params = {"parentNodeId": parent_node_id, "operatorId": operator, "maxResults": 50}
@@ -347,7 +357,8 @@ async def list_nodes(parent_node_id: str) -> list[dict[str, Any]]:
 
 
 async def walk_workspace_folders(root_node_id: str, max_folders: int = 5000,
-                                 on_progress=None) -> list[dict[str, Any]]:
+                                 on_progress=None,
+                                 operator_union_id: str | None = None) -> list[dict[str, Any]]:
     """递归遍历钉钉知识库，返回全部文件夹及各文件夹直属文档数量。
 
     直属文档 = 文件夹直接子节点中的非文件夹节点，包含在线文档（钉钉在线编辑）
@@ -356,6 +367,7 @@ async def walk_workspace_folders(root_node_id: str, max_folders: int = 5000,
     - path: 从根开始的文件夹路径（不带前导斜杠），如 "规章制度/研发流程"；根为 ""
     - document_count: 该文件夹直属文档数（不含子文件夹内的文档）
     max_folders 为安全上限；on_progress(done: int) 在每完成一个文件夹后回调（用于进度展示）。
+    operator_union_id：按登录用户维度遍历（仅能看到其有权限的节点）；不传回退全局。
     """
     folders: list[dict[str, Any]] = []
     sem = asyncio.Semaphore(5)
@@ -365,7 +377,7 @@ async def walk_workspace_folders(root_node_id: str, max_folders: int = 5000,
             return
         async with sem:
             try:
-                nodes = await list_nodes(node_id)
+                nodes = await list_nodes(node_id, operator_union_id=operator_union_id)
             except Exception as e:
                 logger.warning("钉钉获取节点失败 %s: %s（该文件夹文档数记为 0）", path or "/", e)
                 nodes = []
@@ -400,13 +412,15 @@ async def walk_workspace_folders(root_node_id: str, max_folders: int = 5000,
     return folders
 
 
-async def download_document(node_id: str) -> tuple[bytes, str]:
+async def download_document(node_id: str,
+                            operator_union_id: str | None = None) -> tuple[bytes, str]:
     """按 wiki 节点 ID 下载文件原始内容，返回 (内容 bytes, 文件名)。
 
     钉钉 wiki 节点的 url 字段是在线预览页（alidocs.dingtalk.com），直接 HTTP 下载
     会拿到 HTML；必须走 queryDentryId → downloadInfos/query → OSS 直链才能取到原文件。
+    operator_union_id 不传回退全局服务账号。
     """
-    operator = _operator_id()
+    operator = operator_union_id or _operator_id()
     if not operator:
         raise RuntimeError("钉钉操作人 UnionId 未配置")
     token = await _get_access_token()
@@ -448,7 +462,8 @@ async def download_document(node_id: str) -> tuple[bytes, str]:
         return downloaded_file(resp, urls[0])
 
 
-async def _walk_workspace_files(workspace: dict, sem: asyncio.Semaphore) -> list[dict]:
+async def _walk_workspace_files(workspace: dict, sem: asyncio.Semaphore,
+                                operator_union_id: str | None = None) -> list[dict]:
     """并发深度遍历一个知识库，返回文件平铺列表（含目录路径、创建人等）。"""
     ws_name = workspace.get("name", "")
     ws_id = workspace.get("workspaceId")
@@ -460,7 +475,7 @@ async def _walk_workspace_files(workspace: dict, sem: asyncio.Semaphore) -> list
     async def walk(node_id: str, dir_path: str) -> None:
         async with sem:
             try:
-                nodes = await list_nodes(node_id)
+                nodes = await list_nodes(node_id, operator_union_id=operator_union_id)
                 _walk_info["requests"] += 1
             except Exception as e:
                 _walk_info["failed_folders"] += 1
@@ -494,15 +509,18 @@ async def _walk_workspace_files(workspace: dict, sem: asyncio.Semaphore) -> list
     return files
 
 
-async def get_all_knowledge_files() -> list[dict]:
-    """并发遍历全部团队知识库，返回所有文件的平铺列表。"""
-    workspaces = await list_workspaces()
+async def get_all_knowledge_files(operator_union_id: str | None = None) -> list[dict]:
+    """并发遍历全部团队知识库，返回所有文件的平铺列表。
+
+    operator_union_id：按登录用户维度遍历（仅其有权限的库/节点）；不传回退全局服务账号。
+    """
+    workspaces = await list_workspaces(operator_union_id=operator_union_id)
     teams = [w for w in workspaces if w.get("type") != "PERSONAL"]
     _walk_info["requests"] = 0
     _walk_info["failed_folders"] = 0
     sem = asyncio.Semaphore(_WALK_CONCURRENCY)
     results = await asyncio.gather(
-        *[_walk_workspace_files(w, sem) for w in teams],
+        *[_walk_workspace_files(w, sem, operator_union_id=operator_union_id) for w in teams],
         return_exceptions=True,
     )
     out: list[dict] = []
@@ -522,11 +540,11 @@ def get_last_walk_info() -> dict[str, int]:
 
 
 # ===================== 企业存储 / 运营统计 =====================
-async def get_corp_id() -> str:
+async def get_corp_id(operator_union_id: str | None = None) -> str:
     now = time.time()
     if _corp_id_cache["corp_id"] and _corp_id_cache["expire_at"] > now:
         return _corp_id_cache["corp_id"]
-    wss = await list_workspaces()
+    wss = await list_workspaces(operator_union_id=operator_union_id)
     corp_id = next((w.get("corpId") for w in wss if w.get("corpId")), "")
     if not corp_id:
         raise RuntimeError("未能从知识库列表中获取企业 corpId")
@@ -807,6 +825,47 @@ async def get_user_info_by_code(code: str) -> dict:
             "unionid": (r.get("unionid") or "").strip()}
 
 
+async def get_user_info_by_qr_code(code: str) -> dict:
+    """PC 扫码登录（统一登录码）：code → 用户级 token → unionId → 企业 userid。
+
+    1. POST /v1.0/oauth2/userAccessToken（clientId/clientSecret + 授权码）
+    2. GET  /v1.0/contact/users/me（用户级 token）→ unionId / nick
+    3. POST topapi/user/getbyunionid（企业 token）→ 企业内 userid（绑定表主键用）
+    失败抛 RuntimeError（调用方转 401）。
+    """
+    key, secret = _app_key(), _app_secret()
+    if not key or not secret:
+        raise RuntimeError("钉钉 AppKey/AppSecret 未配置")
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        r1 = await client.post(f"{API_BASE}/v1.0/oauth2/userAccessToken",
+                               json={"clientId": key, "clientSecret": secret,
+                                     "code": code, "grantType": "authorization_code"})
+        if r1.status_code != 200:
+            raise RuntimeError(f"钉钉扫码登录换 token 失败({r1.status_code})：{(r1.text or '')[:200]}")
+        user_token = (r1.json() or {}).get("accessToken") or ""
+        if not user_token:
+            raise RuntimeError(f"钉钉扫码登录未返回用户 accessToken：{(r1.text or '')[:200]}")
+        r2 = await client.get(f"{API_BASE}/v1.0/contact/users/me", headers=_headers(user_token))
+        if r2.status_code != 200:
+            raise RuntimeError(f"钉钉读取扫码用户信息失败({r2.status_code})：{(r2.text or '')[:200]}")
+        me = r2.json() or {}
+    unionid = (me.get("unionId") or "").strip()
+    name = (me.get("nick") or "").strip()
+    if not unionid:
+        raise RuntimeError(f"钉钉扫码登录未返回 unionId：{me}")
+    token = await _get_access_token()
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        r3 = await client.post(f"{OAPI_BASE}/topapi/user/getbyunionid",
+                               params={"access_token": token}, json={"unionid": unionid})
+        data = r3.json() or {}
+    userid = ""
+    if data.get("errcode") == 0:
+        userid = ((data.get("result") or {}).get("userid") or "").strip()
+    if not userid:
+        raise RuntimeError(f"unionId 反查企业 userid 失败(errcode={data.get('errcode')})：{data.get('errmsg')}")
+    return {"userid": userid, "name": name, "unionid": unionid}
+
+
 # ===================== 机器人回复（问答场景） =====================
 async def reply_session_webhook(webhook: str, title: str, text: str) -> None:
     """通过消息回调自带的 sessionWebhook 回复 markdown（单聊/群 @ 通用）。"""
@@ -865,9 +924,45 @@ async def send_group_markdown(open_conversation_id: str, title: str, text: str) 
             return {}
 
 
+async def send_action_card(user_ids: list[str], title: str, text: str,
+                           buttons: list[dict[str, str]], btn_orientation: str = "1") -> dict:
+    """企业内部机器人单聊动作卡片（msgKey=sampleActionCard），带按钮跳转。
+
+    buttons: [{"title": "通过", "actionURL": "https://..."}, ...]
+    btn_orientation: "0"=竖向排列，"1"=横向排列。
+    点击按钮跳转到 actionURL（审批页面），由页面内完成审批操作。
+    """
+    import json as _json
+    robot = _robot_code()
+    if not robot:
+        raise RuntimeError("钉钉 robotCode 未配置（系统配置 → 钉钉设置）")
+    if not user_ids:
+        raise RuntimeError("收件人为空，无法发送")
+    token = await _get_access_token()
+    url = f"{API_BASE}/v1.0/robot/oToMessages/send"
+    msg_param = {
+        "title": title,
+        "text": text,
+        "btnOrientation": btn_orientation,
+        "btns": buttons,
+    }
+    body = {"robotCode": robot, "userIds": user_ids, "msgKey": "sampleActionCard",
+            "msgParam": _json.dumps(msg_param, ensure_ascii=False)}
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        await _throttle()
+        resp = await _request_with_retry("POST", url, client=client, headers=_headers(token), json=body)
+        if resp.status_code != 200:
+            raise RuntimeError(f"钉钉动作卡片发送失败({resp.status_code})：{(resp.text or '')[:200]}")
+        try:
+            return resp.json() or {}
+        except Exception:
+            return {}
+
+
 # ===================== AI 表格（多维表） =====================
 async def list_aitable_records(base_id: str, sheet_id: str, timeout: float = 20.0,
-                               max_retry: int = 2) -> list[dict]:
+                               max_retry: int = 2,
+                               operator_union_id: str | None = None) -> list[dict]:
     """读取 AI 表格（多维表）指定数据表的全部记录，自动分页。
 
     返回 [{id, fields: {字段名: 值, ...}}, ...]。需「AI 表格应用读权限」。
@@ -875,13 +970,14 @@ async def list_aitable_records(base_id: str, sheet_id: str, timeout: float = 20.
     timeout/max_retry 默认取「交互接口」的短预算（20s × 2 次）：目前唯一调用方是
     治理标准页的同步等待接口，若沿用后台遍历的 60s × 5 次退避，
     一次钉钉限流就会变成界面上几十秒的白屏。
+    operator_union_id 不传回退全局服务账号。
     """
     if not base_id or not sheet_id:
         raise RuntimeError(
             "规范表 baseId/sheetId 未配置（请设置 DINGTALK_STANDARDS_BASE_ID / "
             "DINGTALK_STANDARDS_SHEET_ID）"
         )
-    operator = _operator_id()
+    operator = operator_union_id or _operator_id()
     token = await _get_access_token()
     url = f"{API_BASE}/v1.0/notable/bases/{base_id}/sheets/{sheet_id}/records/list"
     params = {"operatorId": operator}

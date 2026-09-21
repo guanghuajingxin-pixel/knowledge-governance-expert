@@ -151,6 +151,19 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(pollTimer) })
       <el-table-column label="同步源" min-width="120">
         <template #default="{ row }">{{ sourceName(row.source_id) }}</template>
       </el-table-column>
+      <el-table-column label="同步身份" width="120">
+        <template #default="{ row }">
+          <el-tag v-if="row.operator_source === 'owner_binding'" size="small" type="success">Owner 身份</el-tag>
+          <el-tooltip
+            v-else-if="row.operator_source === 'global_fallback'"
+            content="owner 未绑定钉钉，回退全局服务账号"
+            placement="top"
+          >
+            <el-tag size="small" type="warning">服务账号兜底</el-tag>
+          </el-tooltip>
+          <el-tag v-else size="small" type="info">—</el-tag>
+        </template>
+      </el-table-column>
       <el-table-column label="耗时" width="90">
         <template #default="{ row }"><span style="font-size:12px">{{ dur(row) }}</span></template>
       </el-table-column>

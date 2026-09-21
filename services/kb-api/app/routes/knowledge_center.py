@@ -7,12 +7,14 @@ import uuid as _uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 from sqlalchemy import select, func, case, and_, delete
 from sqlalchemy.ext.asyncio import AsyncSession
+from typing import Literal
 from kb_common.database import get_session
 from kb_common.models import (
     KnowledgeBase, Directory, Document, User, KnowledgeSource, DingtalkFileSnapshot,
-    DingtalkFolderStat,
+    DingtalkFolderStat, DingtalkFileReview,
 )
 from kb_common.clients import es_client
 from app.schemas import (
@@ -358,19 +360,50 @@ async def list_uploaders(
     return [{"id": str(r.id), "name": r.username} for r in rows]
 
 
+async def _visible_workspace_ids(user_id) -> tuple[set | None, str | None]:
+    """工作区级权限隔离：返回 (可见 workspaceId 集合, 错误文案)。
+
+    (None, None) 表示无需隔离（用户未绑定钉钉，沿用全局快照口径）；
+    集合为空且带错误 = 需要隔离但钉钉权限范围拉取失败，调用方按空列表+错误展示
+    （权限功能失败时宁可少看，不可越权看全量）。
+    """
+    from kb_common.clients import dingtalk_client
+    from kb_common.database import short_session
+    from app.services import dingtalk_operator
+
+    async with short_session() as ss:
+        union = await dingtalk_operator.user_union_id(ss, user_id)
+    if not union:
+        return None, None
+    try:
+        wss = await dingtalk_client.list_workspaces(operator_union_id=union)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("拉取登录用户钉钉权限范围失败，本次按空隔离: %s", e)
+        return set(), f"拉取钉钉权限范围失败：{e}"
+    return {w.get("workspaceId") for w in wss if w.get("workspaceId")}, None
+
+
 @router.get("/dingtalk/workspaces")
 async def list_dingtalk_workspaces(u=Depends(get_current_user)):
-    """实时列出操作人可见的钉钉团队知识库（单次 API 调用，含根节点 ID）。"""
+    """实时列出操作人可见的钉钉团队知识库（单次 API 调用，含根节点 ID）。
+
+    已绑定钉钉的登录用户用自己的 unionId 取可见范围（钉钉侧权限过滤）；
+    未绑定用户回退全局服务账号口径。
+    """
     from kb_common.clients import dingtalk_client
+    from kb_common.database import short_session
+    from app.services import dingtalk_operator
 
     try:
         await dingtalk_client.sync_runtime_config()
     except Exception as e:
         return {"items": [], "error": f"钉钉配置加载失败：{e}"}
-    if not dingtalk_client.is_configured():
+    async with short_session() as ss:
+        union = await dingtalk_operator.user_union_id(ss, u.id)
+    if not union and not dingtalk_client.is_configured():
         return {"items": [], "error": "钉钉 AppKey/AppSecret/操作人 未配置，请在「系统配置」中填写后重试"}
     try:
-        workspaces = await dingtalk_client.list_workspaces()
+        workspaces = await dingtalk_client.list_workspaces(operator_union_id=union)
     except Exception as e:
         return {"items": [], "error": f"获取钉钉知识库列表失败：{e}"}
     items = [
@@ -389,14 +422,19 @@ async def list_dingtalk_child_nodes(
 ):
     """实时列出某父节点下的直接子节点（单次 API 调用，用于按目录查询文档）。"""
     from kb_common.clients import dingtalk_client
+    from kb_common.database import short_session
+    from app.services import dingtalk_operator
 
     if not parent_node_id.strip():
         raise HTTPException(400, "parent_node_id 不能为空")
     try:
         await dingtalk_client.sync_runtime_config()
-        if not dingtalk_client.is_configured():
+        async with short_session() as ss:
+            union = await dingtalk_operator.user_union_id(ss, u.id)
+        if not union and not dingtalk_client.is_configured():
             raise HTTPException(400, "钉钉 AppKey/AppSecret/操作人 未配置，请在「系统配置」中填写后重试")
-        nodes = await dingtalk_client.list_nodes(parent_node_id.strip())
+        nodes = await dingtalk_client.list_nodes(parent_node_id.strip(),
+                                                 operator_union_id=union)
     except HTTPException:
         raise
     except Exception as e:
@@ -464,6 +502,9 @@ async def list_dingtalk_documents(
     await ensure_dingtalk_files_loaded(s)
     cached_files = _dingtalk_cache["files"]
 
+    # 工作区级权限隔离：已绑定钉钉的用户只看到自己有权限的库（快照为全量口径）
+    visible, scope_err = await _visible_workspace_ids(u.id)
+
     # 尚无快照：首次同步未完成时返回 loading 让前端轮询，否则为空列表（提示点「刷新」）
     if not cached_files:
         return {
@@ -475,6 +516,8 @@ async def list_dingtalk_documents(
         }
 
     files = list(cached_files)
+    if visible is not None:
+        files = [f for f in files if f.get("workspace_id") in visible]
     # 知识库 / 创建人过滤选项（从快照数据聚合，不额外调用钉钉）
     workspace_map: dict[str, str] = {}
     creator_names: dict[str, str] = {}
@@ -528,8 +571,16 @@ async def list_dingtalk_documents(
     total = len(files)
     start = (page - 1) * size
     page_items = files[start:start + size]
+    # 入库审核状态叠加：仅查当前页文件的审核记录（dingtalk_file_reviews 按 node_id 独立存储）
+    review_map: dict[str, DingtalkFileReview] = {}
+    node_ids = [f.get("node_id") for f in page_items if f.get("node_id")]
+    if node_ids:
+        reviews = (await s.execute(
+            select(DingtalkFileReview).where(DingtalkFileReview.node_id.in_(node_ids)))).scalars().all()
+        review_map = {r.node_id: r for r in reviews}
     items = []
     for f in page_items:
+        review = review_map.get(f.get("node_id") or "")
         items.append({
             "node_id": f.get("node_id"),
             "workspace_id": f.get("workspace_id"),
@@ -544,6 +595,9 @@ async def list_dingtalk_documents(
             "creator_name": f.get("creator_name") or creator_names.get(f.get("creator_id") or "") or None,
             "created_at": f.get("created_at"),
             "modified_at": f.get("modified_at"),
+            "review_status": review.review_status if review else "",
+            "reviewer": review.reviewer if review else "",
+            "reviewed_at": _to_utc_iso(review.reviewed_at) if review else None,
         })
 
     return {
@@ -554,9 +608,43 @@ async def list_dingtalk_documents(
         "workspaces": workspaces,
         "creators": creators,
         "loading": _dingtalk_cache["loading"],
-        "error": _dingtalk_cache["error"],
+        "error": _dingtalk_cache["error"] or scope_err,
         **_dingtalk_cache_meta(),
     }
+
+
+class DingtalkReviewIn(BaseModel):
+    node_id: str = Field(description="钉钉节点 ID")
+    workspace_id: str = Field(default="", max_length=128, description="钉钉知识库 ID（留痕）")
+    review_status: Literal["通过", "待确认", "待更正"]
+
+
+@router.put("/dingtalk/documents/review")
+async def review_dingtalk_document(
+    body: DingtalkReviewIn,
+    u=Depends(get_current_user),
+    s: AsyncSession = Depends(get_session),
+):
+    """入库审核：记录/变更钉钉文件的审核状态，审核人=当前登录用户名。
+
+    审核记录按 node_id 独立存储（dingtalk_file_reviews），快照刷新不覆盖；
+    重复提交等同变更状态，审核人与时间随之更新。
+    """
+    node_id = body.node_id.strip()
+    if not node_id:
+        raise HTTPException(400, "node_id 不能为空")
+    row = (await s.execute(
+        select(DingtalkFileReview).where(DingtalkFileReview.node_id == node_id))).scalar_one_or_none()
+    if row is None:
+        row = DingtalkFileReview(node_id=node_id, workspace_id=body.workspace_id or "")
+        s.add(row)
+    row.workspace_id = body.workspace_id or row.workspace_id
+    row.review_status = body.review_status
+    row.reviewer = u.username
+    row.reviewed_at = datetime.now()
+    await s.commit()
+    return {"ok": True, "node_id": node_id, "review_status": row.review_status,
+            "reviewer": row.reviewer, "reviewed_at": _to_utc_iso(row.reviewed_at)}
 
 
 @router.get("/documents/{doc_id}")

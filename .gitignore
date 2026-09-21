@@ -7,6 +7,9 @@ services/**/.venv
 # Env
 .env
 
+# 本地运行时 blob 存储（上传缓存，不入库）
+blobs/
+
 # 内网部署：模型文件与真实 env（含密码）不提交
 deploy/intranet/models/
 deploy/intranet/.env.infra
