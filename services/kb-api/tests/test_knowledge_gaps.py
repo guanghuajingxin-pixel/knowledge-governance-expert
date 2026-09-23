@@ -52,7 +52,7 @@ class CoverageTests(unittest.IsolatedAsyncioTestCase):
         key = str(uuid.uuid4())
         directory = SimpleNamespace(id=uuid.UUID(key), knowledge_owner='旧Owner')
         data = f'目录ID,知识Owner\n{key},新Owner\n{uuid.uuid4()},秘密\n'
-        session = SimpleNamespace(commit=AsyncMock())
+        session = SimpleNamespace(commit=AsyncMock(), execute=AsyncMock(return_value=SimpleNamespace(all=lambda: [])))
         with patch.object(gaps, 'inventory', AsyncMock(return_value=([],[directory],[]))):
             with self.assertRaises(HTTPException):
                 await gaps.import_owners(UploadFile(filename='a.csv', file=io.BytesIO(data.encode())), None, session)
@@ -67,7 +67,7 @@ class CoverageTests(unittest.IsolatedAsyncioTestCase):
         key=uuid.uuid4()
         directory=SimpleNamespace(id=key,knowledge_owner='')
         items=[dict(directory_id=str(key),kb_name='库',directory_path='父/子')]
-        session=SimpleNamespace(commit=AsyncMock())
+        session=SimpleNamespace(commit=AsyncMock(), execute=AsyncMock(return_value=SimpleNamespace(all=lambda: [])))
         with patch.object(gaps,'inventory',AsyncMock(return_value=(items,[directory],[]))):
             result=await gaps.import_owners(UploadFile(filename='a.xlsx',file=output),None,session)
         self.assertEqual(result,{'updated':1})

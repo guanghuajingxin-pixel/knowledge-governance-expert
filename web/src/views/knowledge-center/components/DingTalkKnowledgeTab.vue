@@ -208,7 +208,7 @@ onUnmounted(() => {
 
 <template>
   <div class="dt-manage" v-loading="loading" element-loading-text="正在从钉钉知识库同步数据，请稍候…">
-    <!-- 顶部状态栏：同步提示 + 文件总数 + 缓存时间 + 刷新 -->
+    <!-- 顶部状态栏：同步提示 + 文件总数 + 缓存时间 -->
     <div class="action-bar">
       <div class="action-left">
         <el-alert
@@ -226,11 +226,10 @@ onUnmounted(() => {
           <span class="cache-hint">数据更新于 {{ cachedAtText }}</span>
         </el-tooltip>
         <span v-if="refreshing" class="sync-hint">后台同步中…</span>
-        <el-button :icon="Refresh" :loading="refreshing" @click="handleRefresh">刷新</el-button>
       </div>
     </div>
 
-    <!-- 筛选栏：左侧条件自适应换行，右侧「查询 / 重置」成组固定，行尾对齐 -->
+    <!-- 筛选栏：左侧条件自适应换行，右侧「查询 / 重置 / 刷新」成组固定，行尾对齐 -->
     <div class="filter-bar">
       <div class="filter-fields">
         <el-input
@@ -291,13 +290,14 @@ onUnmounted(() => {
       <div class="filter-actions">
         <el-button type="primary" @click="handleSearch">查询</el-button>
         <el-button @click="handleReset">重置</el-button>
+        <el-button :icon="Refresh" :loading="refreshing" @click="handleRefresh">刷新</el-button>
       </div>
     </div>
 
     <!-- 表格：撑满剩余高度，表体内部滚动 -->
     <div class="table-fill">
       <el-table :data="documents" style="width: 100%" height="100%" stripe :empty-text="emptyText">
-      <el-table-column label="文件名称" min-width="240" prop="name" show-overflow-tooltip>
+      <el-table-column label="文件名称" min-width="360" prop="name" show-overflow-tooltip>
         <template #default="scope: any">
           <el-link type="primary" :underline="false" :href="scope.row.url" target="_blank" :disabled="!scope.row.url">
             <el-icon class="file-icon"><Document /></el-icon>
@@ -467,7 +467,7 @@ onUnmounted(() => {
   width: 210px;
 }
 
-/* 查询 / 重置：固定成组靠右，与上方「刷新」按钮同一竖向对齐线 */
+/* 查询 / 重置 / 刷新：固定成组靠右，行尾对齐 */
 .filter-actions {
   display: flex;
   align-items: center;
