@@ -14,7 +14,7 @@ from jose import jwt, jwk
 from kb_common import oidc
 from kb_common.models import User, UserIdentity
 from app.deps import get_current_user, get_principal
-from app.routes import auth, users
+from app.routes import auth
 
 
 class OidcTests(unittest.IsolatedAsyncioTestCase):
@@ -76,18 +76,12 @@ class OidcTests(unittest.IsolatedAsyncioTestCase):
                 oidc.role_from_claims({'realm_access': {'roles': ['super_admin']}, 'resource_access': resources})
             self.assertEqual(error.exception.status_code, 403)
 
-    async def test_no_password_or_local_user_admin_bypass(self):
+    async def test_password_login_cannot_bypass_sso(self):
         session = SimpleNamespace(execute=AsyncMock(), get=AsyncMock())
         with self.assertRaises(HTTPException) as error:
             await auth.login(auth.LoginIn(username='test', password='test'), session)
         self.assertEqual(error.exception.status_code, 409)
         session.execute.assert_not_called()
-        with self.assertRaises(HTTPException):
-            await users.create_user(users.UserCreate(username='test', password='test'), None, None, session)
-        with self.assertRaises(HTTPException):
-            await auth.dingtalk_login(auth.DingtalkLoginIn(auth_code='test'), session)
-        with self.assertRaises(HTTPException):
-            await users.create_key(users.ApiKeyIn(name='test'), None, session)
 
     async def test_legacy_api_key_cannot_bypass_central_user_disable(self):
         with self.assertRaises(HTTPException):

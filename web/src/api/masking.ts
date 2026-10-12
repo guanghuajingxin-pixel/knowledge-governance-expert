@@ -159,6 +159,10 @@ export const deleteMaskingPolicy = (id: number) =>
 export const listMaskingExemptions = () =>
   request.get<unknown, MaskingExemption[]>('/masking-exemptions')
 
+/** 豁免对象下拉的启用用户选项（账户管理已上收门户，脱敏模块自带业务化用户目录） */
+export const getExemptionUserOptions = () =>
+  request.get<unknown, { id: string; username: string; role: string }[]>('/masking-exemptions/user-options')
+
 export const createMaskingExemption = (data: MaskingExemptionPayload) =>
   request.post<unknown, MaskingExemption>('/masking-exemptions', data)
 

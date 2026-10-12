@@ -8,6 +8,7 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { Search, Refresh } from '@element-plus/icons-vue'
 import { fileIcon } from '@/utils/file-icon'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import KgPagination from '@/components/common/KgPagination.vue'
 import { fetchDingTalkDocuments, reviewDingTalkDocument } from '@/api/knowledge-center'
 import { formatDate, formatFileSize } from '@/utils/format'
 import { useUserStore } from '@/stores/user'
@@ -362,18 +363,9 @@ onUnmounted(() => {
     </div>
 
     <!-- 分页 -->
-    <div class="pagination-wrap">
-      <el-pagination
-        v-if="total > size"
-        v-model:current-page="page"
-        v-model:page-size="size"
-        :total="total"
-        :page-sizes="[20, 50, 100]"
-        layout="total, sizes, prev, pager, next, jumper"
-        @current-change="handlePageChange"
-        @size-change="handleSizeChange"
-      />
-    </div>
+    <KgPagination v-if="total > size" :page="page" :size="size" :total="total" :sizes="[20, 50, 100]"
+                  layout="total, sizes, prev, pager, next"
+                  @update:page="handlePageChange" @update:size="handleSizeChange" />
 
     <!-- 入库审核弹窗：选择审核状态，确认后操作列文案变为所选状态，可再次点击变更 -->
     <el-dialog v-model="reviewDialog" title="入库审核" width="min(420px, 90vw)" :close-on-click-modal="!reviewSaving">
@@ -497,14 +489,6 @@ onUnmounted(() => {
 .table-fill {
   flex: 1;
   min-height: 0;
-}
-
-.pagination-wrap {
-  display: flex;
-  justify-content: flex-end;
-  align-items: center;
-  margin-top: 12px;
-  flex-shrink: 0;
 }
 
 .total-hint {

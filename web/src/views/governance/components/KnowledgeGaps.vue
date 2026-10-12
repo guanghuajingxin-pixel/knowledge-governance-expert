@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
+import KgPagination from '@/components/common/KgPagination.vue'
 import { useUserStore } from '@/stores/user'
 import { getGaps, exportGaps, getOwnerTemplate, importGapOwners, saveGapOwner, saveDingtalkOwner,
   notifyGapOwner, refreshDingtalkFolders, getDingtalkRefreshStatus, type DingtalkRefreshStatus,
@@ -216,7 +217,7 @@ onUnmounted(stopPolling)
 </script>
 
 <template>
-  <el-card shadow="never">
+  <el-card shadow="never" class="gaps-card">
     <div class="filters">
       <!-- 筛选条件变更不自动查询，统一由「查询」按钮触发（钉钉知识库遍历耗时较长） -->
       <el-select v-model="filters.kb_id" placeholder="全部知识库" aria-label="知识库过滤" clearable filterable @change="onKbChange">
@@ -290,7 +291,8 @@ onUnmounted(stopPolling)
       </el-dropdown>
       <input ref="input" type="file" accept=".csv,.xlsx" hidden @change="importFile" />
     </div>
-    <el-table :data="rows" v-loading="loading" style="width: 100%">
+    <div class="table-fill">
+    <el-table :data="rows" v-loading="loading" style="width: 100%" height="100%">
       <el-table-column label="知识库" min-width="180" show-overflow-tooltip>
         <template #default="{ row }">
           <a v-if="row.kb_url" :href="row.kb_url" target="_blank" rel="noopener" class="cell-link">{{ row.kb_name }}</a>
@@ -324,7 +326,11 @@ onUnmounted(stopPolling)
         <el-empty :description="isDingtalkSelected && !dtStatus?.folder_count ? '该知识库还没有快照数据，请点击「刷新数据」' : '没有符合筛选条件的目录'" />
       </template>
     </el-table>
-    <el-pagination v-model:current-page="page" v-model:page-size="size" :total="total" :page-sizes="[20, 50, 100]" layout="total, sizes, prev, pager, next" @current-change="load()" @size-change="load(true)" />
+    </div>
+    <KgPagination :page="page" :size="size" :total="total" :sizes="[20, 50, 100]"
+                  layout="total, sizes, prev, pager, next"
+                  @update:page="(p: number) => { page = p; load() }"
+                  @update:size="(s: number) => { size = s; load(true) }" />
   </el-card>
   <el-dialog v-model="dialog" title="维护知识Owner" width="min(520px, 90vw)" :close-on-click-modal="!saving">
     <p class="owner-path">{{ editRow?.kb_name }} / {{ editRow?.directory_path }}</p>
@@ -343,7 +349,22 @@ onUnmounted(stopPolling)
 </template>
 
 <style scoped>
-.filters { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 16px; }
+/* 卡片撑满页签：筛选栏/分页固定，表格撑满剩余高度（表体内部滚动、表头吸顶） */
+.gaps-card {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.gaps-card :deep(.el-card__body) {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.filters { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 16px; flex-shrink: 0; }
+.table-fill { flex: 1; min-height: 0; }
 .filters .el-select { width: 200px; }
 .filters .path-input { width: 200px; }
 /* 漏斗弹层 teleport 到 body：需全局（:global）约束内部筛选项纵向排列、占满弹层宽度 */
@@ -358,7 +379,6 @@ onUnmounted(stopPolling)
 :global(.gap-tip) { width: min(50vw, 640px); }
 :global(.gap-tip .gap-tip-text) { margin: 0; line-height: 1.6; }
 .dt-status { color: #909399; font-size: 12.5px; }
-.el-pagination { margin-top: 20px; justify-content: flex-end; }
 .owner-path { overflow-wrap: anywhere; line-height: 1.6; margin-bottom: 20px; }
 .notify-text { line-height: 1.6; margin: 0 0 12px; }
 .notify-quote { overflow-wrap: anywhere; line-height: 1.7; margin: 0; padding: 12px 14px; background: #fdf6ec; border-radius: 4px; color: #b88230; }

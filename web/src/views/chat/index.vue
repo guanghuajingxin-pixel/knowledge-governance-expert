@@ -9,7 +9,6 @@ import { streamChat, cancelChat, type StreamEvent, type TokenUsage, type ChatRes
 import { listKnowledgeLibraries, type KnowledgeLibrary } from '@/api/knowledge-library'
 import { listEnabledLlmModels } from '@/api/settings'
 import { getGreeting } from '@/api/agent'
-import { getDingtalkConfig, dingtalkLogin } from '@/api/auth'
 import { useUserStore } from '@/stores/user'
 import type { SearchResult } from '@/types/search'
 import { citationUrl, linkEvidence } from '@/utils/chat-evidence'
@@ -41,31 +40,6 @@ const mobileSessionOpen = ref(false)
 
 function openStandalone() {
   window.open(router.resolve('/qa').href, '_blank')
-}
-
-/** 钉钉内免登：authCode → JWT；失败/非钉钉环境回退账号登录页。返回是否已登录可继续初始化。 */
-async function tryDingtalkAutoLogin(): Promise<boolean> {
-  if (userStore.token) return true
-  if (!/DingTalk/i.test(navigator.userAgent)) {
-    router.replace(`/login?redirect=${encodeURIComponent(route.fullPath)}`)
-    return false
-  }
-  try {
-    const cfg = await getDingtalkConfig()
-    if (!cfg.auto_login_enabled) {
-      router.replace(`/login?redirect=${encodeURIComponent(route.fullPath)}`)
-      return false
-    }
-    const dd = (await import('dingtalk-jsapi')).default
-    const auth = await dd.runtime.permission.requestAuthCode({ corpId: cfg.corp_id })
-    const res = await dingtalkLogin({ auth_code: auth.code, channel: 'h5' })
-    userStore.applyLogin(res)
-    return true
-  } catch {
-    // 免登失败（authCode 无效/应用未授权/网络）：回退账号登录，不静默
-    router.replace(`/login?redirect=${encodeURIComponent(route.fullPath)}`)
-    return false
-  }
 }
 
 // Markdown 渲染：marked 解析 + DOMPurify 消毒（允许图片/视频标签）
@@ -259,7 +233,6 @@ function typewriterReveal(msg: ChatMsg, full: string, sid: string) {
 // 会话上下文（用于多轮改写）已按会话隔离：见 sessionCtx（多会话并行时互不污染）
 
 onMounted(async () => {
-  if (standalone.value && !(await tryDingtalkAutoLogin())) return
   await Promise.all([loadKbSources(), (async () => { await loadGreeting(); await loadModels() })(), loadSessions()])
 })
 

@@ -4,17 +4,15 @@ import { useRoute, useRouter } from 'vue-router'
 import { useUserStore } from '@/stores/user'
 import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
 import { User, Lock, Reading } from '@element-plus/icons-vue'
-import { getDingtalkConfig, type DingtalkConfig } from '@/api/auth'
-import { gotoDingtalkAuth, loginDestination, safeRedirect } from '@/utils/dingtalk-auth'
 import type { LoginResponse } from '@/types/user'
 import { authConfig, authError, sso } from '@/auth/session'
+import { safeRedirect } from '@/utils/dingtalk-auth'
 import { ElAlert, ElButton } from 'element-plus'
 
 const router = useRouter()
 const route = useRoute()
 const userStore = useUserStore()
 
-const activeTab = ref('password')
 const formRef = ref<FormInstance>()
 const loading = ref(false)
 const form = reactive({
@@ -27,23 +25,19 @@ const rules: FormRules = {
   password: [{ required: true, message: '请输入密码', trigger: 'blur' }],
 }
 
-// 钉钉扫码配置：qr_login_enabled=true 时才展示「钉钉扫码」页签
-const dtConfig = ref<DingtalkConfig | null>(null)
 onMounted(async () => {
-  if (authConfig.value?.provider !== 'local') return
-  try {
-    dtConfig.value = await getDingtalkConfig()
-  } catch {
-    // 配置读取失败（后端未配钉钉）：仅保留密码登录，不打扰用户
-    dtConfig.value = null
+  if (authConfig.value?.provider === 'keycloak') {
+    // Direct opens and portal "open in new window" links must start the same
+    // Keycloak flow automatically; check-sso alone only checks for a session
+    // and otherwise leaves users on a login page that requires another click.
+    await handleSsoLogin()
   }
 })
 
-/** 登录成功统一落地：token/userInfo 入 store，需设密先去设密页，否则回原目标 */
+/** 登录成功统一落地：token/userInfo 入 store 后回原目标 */
 function postLogin(res: LoginResponse) {
   userStore.applyLogin(res)
-  const redirect = safeRedirect(route.query.redirect, '/chat')
-  router.push(loginDestination(res, redirect))
+  router.push(safeRedirect(route.query.redirect, '/chat'))
 }
 
 async function handleLogin() {
@@ -65,21 +59,6 @@ async function handleLogin() {
   })
 }
 
-/** 钉钉扫码登录：整页跳转钉钉统一授权页，回调 /login/callback 换 token（不引钉钉 JS SDK） */
-const dtLoading = ref(false)
-function handleDingtalkLogin() {
-  if (!dtConfig.value?.app_key) {
-    ElMessage.error('钉钉应用未配置，请联系管理员')
-    return
-  }
-  dtLoading.value = true
-  try {
-    gotoDingtalkAuth(dtConfig.value.app_key)
-  } catch {
-    dtLoading.value = false
-    ElMessage.error('跳转钉钉授权页失败，请重试')
-  }
-}
 function reloadPage() { window.location.reload() }
 async function handleSsoLogin() {
   try { await sso.login(safeRedirect(route.query.redirect, '/chat')) }
@@ -95,44 +74,32 @@ async function handleSsoLogin() {
         <h2>知识治理专家</h2>
       </div>
       <el-alert v-if="authError" :title="authError" type="error" :closable="false" show-icon />
-      <div v-if="authConfig?.provider === 'keycloak'" class="dt-pane">
-        <p class="dt-desc">使用杰克科技统一账号，与 AIGC 门户共享登录身份和权限。</p>
+      <div v-if="authConfig?.provider === 'keycloak'" class="sso-pane">
+        <p class="sso-desc">使用杰克科技统一账号，与 AIGC 门户共享登录身份和权限。</p>
         <el-button type="primary" style="width: 100%" @click="handleSsoLogin">使用企业统一账号登录</el-button>
       </div>
       <el-button v-if="!authConfig" style="width: 100%; margin-top: 16px" @click="reloadPage">重试连接</el-button>
-      <el-tabs v-if="authConfig?.provider === 'local'" v-model="activeTab" stretch>
-        <el-tab-pane label="密码登录" name="password">
-          <el-form
-            ref="formRef"
-            :model="form"
-            :rules="rules"
-            size="large"
-            @keyup.enter="handleLogin"
-          >
-            <el-form-item prop="username">
-              <el-input v-model="form.username" placeholder="用户名" :prefix-icon="User" />
-            </el-form-item>
-            <el-form-item prop="password">
-              <el-input v-model="form.password" type="password" show-password placeholder="密码" :prefix-icon="Lock" />
-            </el-form-item>
-            <el-form-item>
-              <el-button type="primary" :loading="loading" style="width: 100%" @click="handleLogin">
-                登录
-              </el-button>
-            </el-form-item>
-          </el-form>
-          <div class="login-tip">默认管理员：admin / admin123</div>
-        </el-tab-pane>
-        <el-tab-pane v-if="dtConfig?.qr_login_enabled" label="钉钉扫码" name="dingtalk">
-          <div class="dt-pane">
-            <p class="dt-desc">点击下方按钮跳转钉钉统一授权页，使用钉钉 App 扫码确认后自动登录。</p>
-            <el-button type="primary" size="large" :loading="dtLoading" style="width: 100%" @click="handleDingtalkLogin">
-              使用钉钉扫码登录
-            </el-button>
-            <div class="login-tip">首次扫码将自动创建账号，并引导设置本地密码</div>
-          </div>
-        </el-tab-pane>
-      </el-tabs>
+      <el-form
+        v-if="authConfig?.provider === 'local'"
+        ref="formRef"
+        :model="form"
+        :rules="rules"
+        size="large"
+        @keyup.enter="handleLogin"
+      >
+        <el-form-item prop="username">
+          <el-input v-model="form.username" placeholder="用户名" :prefix-icon="User" />
+        </el-form-item>
+        <el-form-item prop="password">
+          <el-input v-model="form.password" type="password" show-password placeholder="密码" :prefix-icon="Lock" />
+        </el-form-item>
+        <el-form-item>
+          <el-button type="primary" :loading="loading" style="width: 100%" @click="handleLogin">
+            登录
+          </el-button>
+        </el-form-item>
+        <div class="login-tip">本地开发登录通道；生产环境请使用统一账号登录。</div>
+      </el-form>
     </div>
   </div>
 </template>
@@ -166,10 +133,10 @@ async function handleSsoLogin() {
   font-size: 12px;
   margin-top: 8px;
 }
-.dt-pane {
+.sso-pane {
   padding: 8px 0 4px;
 }
-.dt-desc {
+.sso-desc {
   margin: 0 0 20px;
   color: #606266;
   font-size: 13px;

@@ -22,6 +22,10 @@ const currentApp = computed(() => applications.find(app => app.id === page.value
 const { conversations, activeId, draft, identity, isSending, isLoginOpen, isLoggingIn, loginError, error, username, password, messageArea, messages, newConversation, selectConversation, send, signIn, signOut, closeLogin, stop } = useChat()
 let frameTimer: ReturnType<typeof setTimeout> | undefined
 function navigate(id: PageId) { page.value = id; location.hash = id === 'home' ? '/' : `/${id}` }
+/** 应用中心统一行为：直接在新页签打开应用，门户内容保持当前页面不变 */
+function openApp(app: (typeof applications)[number]) {
+  window.open(app.url, '_blank', 'noopener,noreferrer')
+}
 function syncHash() { page.value = pageFromHash(location.hash) }
 window.addEventListener('hashchange', syncHash)
 function resetFrame() {
@@ -58,7 +62,7 @@ const prompts = ['帮我梳理一份产品知识文档', '如何评估智能体�
       <nav>
         <button class="nav-item" :class="{ active: page === 'home' }" :aria-current="page === 'home' ? 'page' : undefined" title="与小杰对话" @click="navigate('home')"><el-icon><MessageCircle /></el-icon><span>与小杰对话</span><span class="nav-dot" /></button>
         <div class="nav-section">应用中心</div>
-        <button v-for="app in applications" :key="app.id" class="nav-item" :class="{ active: page === app.id }" :aria-current="page === app.id ? 'page' : undefined" :title="app.name" @click="navigate(app.id)"><el-icon><component :is="lucideIconMap[app.icon]" /></el-icon><span>{{ app.name }}</span><el-icon class="nav-arrow"><ArrowUpRight /></el-icon></button>
+        <button v-for="app in applications" :key="app.id" class="nav-item" :class="{ active: page === app.id }" :aria-current="page === app.id ? 'page' : undefined" :title="`${app.name}（新页签打开）`" @click="openApp(app)"><el-icon><component :is="lucideIconMap[app.icon]" /></el-icon><span>{{ app.name }}</span><el-icon class="nav-arrow"><ArrowUpRight /></el-icon></button>
       </nav>
       <section class="history" aria-label="本次访问的对话">
         <div class="nav-section">最近对话 <el-tooltip content="对话仅保留在当前页面，刷新后清空"><span class="history-note">本次访问</span></el-tooltip></div>
@@ -106,7 +110,7 @@ const prompts = ['帮我梳理一份产品知识文档', '如何评估智能体�
           <div v-if="!messages.length" class="suggestions"><button v-for="prompt in prompts" :key="prompt" @click="usePrompt(prompt)">{{ prompt }}<el-icon><ArrowUpRight /></el-icon></button></div>
         </div>
 
-        <section v-if="!messages.length" class="application-section" aria-label="快捷应用入口"><div class="section-heading"><span>从这里，开启更多可能</span><span>探索企业 AI 应用</span></div><div class="application-grid"><button v-for="(app, index) in applications" :key="app.id" class="application-card" @click="navigate(app.id)"><div class="card-top"><span class="application-icon"><el-icon><component :is="lucideIconMap[app.icon]" /></el-icon></span><span class="card-number">0{{ index + 1 }}</span></div><div class="card-title">{{ app.name }}<el-icon><ArrowUpRight /></el-icon></div><p>{{ app.description }}</p></button></div></section>
+        <section v-if="!messages.length" class="application-section" aria-label="快捷应用入口"><div class="section-heading"><span>从这里，开启更多可能</span><span>探索企业 AI 应用</span></div><div class="application-grid"><button v-for="(app, index) in applications" :key="app.id" class="application-card" :title="`${app.name}（新页签打开）`" @click="openApp(app)"><div class="card-top"><span class="application-icon"><el-icon><component :is="lucideIconMap[app.icon]" /></el-icon></span><span class="card-number">0{{ index + 1 }}</span></div><div class="card-title">{{ app.name }}<el-icon><ArrowUpRight /></el-icon></div><p>{{ app.description }}</p></button></div></section>
         <footer class="chat-footer">小杰与你一起，智造更多可能<span>AI 生成内容仅供参考，请核实重要信息</span></footer>
       </section>
 

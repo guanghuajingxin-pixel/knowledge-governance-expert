@@ -5,6 +5,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Upload, ArrowLeft } from '@element-plus/icons-vue'
 import { useRouter } from 'vue-router'
 import PageContainer from '@/components/common/PageContainer.vue'
+import KgPagination from '@/components/common/KgPagination.vue'
 import StatusTag from '@/components/common/StatusTag.vue'
 import FaqEntryDialog from '@/components/faq/FaqEntryDialog.vue'
 import FaqImportDialog from '@/components/faq/FaqImportDialog.vue'
@@ -22,7 +23,7 @@ const kb = ref<KnowledgeBase | null>(null)
 const entries = ref<FaqEntry[]>([])
 const total = ref(0)
 const page = ref(1)
-const size = ref(10)
+const size = ref(20)
 const loading = ref(false)
 const keyword = ref('')
 const dialogVisible = ref(false)
@@ -71,6 +72,12 @@ function handlePageChange(p: number) {
   fetchEntries()
 }
 
+function handleSizeChange(s: number) {
+  size.value = s
+  page.value = 1
+  fetchEntries()
+}
+
 onMounted(() => {
   fetchKb()
   fetchEntries()
@@ -88,7 +95,8 @@ onMounted(() => {
       <el-input v-model="keyword" placeholder="搜索问题或答案" style="width: 300px;" clearable @keyup.enter="handleSearch" @clear="handleSearch" />
       <el-button type="primary" @click="handleSearch" style="margin-left: 8px;">搜索</el-button>
     </div>
-    <el-table :data="entries" v-loading="loading" style="width: 100%">
+    <div class="table-fill">
+    <el-table :data="entries" v-loading="loading" height="100%" style="width: 100%">
       <el-table-column type="index" label="#" width="50" />
       <el-table-column prop="question" label="问题" min-width="200" show-overflow-tooltip />
       <el-table-column prop="answer" label="答案" min-width="300" show-overflow-tooltip />
@@ -111,15 +119,15 @@ onMounted(() => {
         </template>
       </el-table-column>
     </el-table>
-    <el-pagination
-      v-if="total > size"
-      class="pagination"
-      background
-      layout="total, prev, pager, next"
+    </div>
+    <KgPagination
+      :page="page"
+      :size="size"
       :total="total"
-      :page-size="size"
-      :current-page="page"
-      @current-change="handlePageChange"
+      :sizes="[20, 50, 100]"
+      layout="total, sizes, prev, pager, next"
+      @update:page="handlePageChange"
+      @update:size="handleSizeChange"
     />
   </PageContainer>
   <FaqEntryDialog v-model="dialogVisible" :kb-id="kbId" :editing-entry="editingEntry" @success="fetchEntries" />
@@ -127,5 +135,8 @@ onMounted(() => {
 </template>
 
 <style scoped>
-.pagination { margin-top: 16px; justify-content: flex-end; }
+/* 表格撑满剩余高度（表体内部滚动、表头吸顶），搜索栏与分页固定 */
+.page-container :deep(.page-content) { display: flex; flex-direction: column; }
+.search-bar { flex-shrink: 0; }
+.table-fill { flex: 1; min-height: 0; }
 </style>

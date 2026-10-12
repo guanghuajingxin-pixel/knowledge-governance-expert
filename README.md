@@ -116,10 +116,13 @@ cd services/kb-common && uv sync && cd -
 cd services/kb-api && uv sync && cd -
 cd services/faq-service && uv sync && cd -
 
-# 4. 初始化数据库表 + 种子 admin
+# 4. 初始化数据库表 +（仅本地开发）初始化管理员
 cd services/kb-common && uv run alembic -c ../../alembic.ini upgrade head
-cd services/kb-common && uv run python ../../scripts/seed_admin.py
-# admin / admin123
+cd services/kb-common
+read -s KGE_BOOTSTRAP_ADMIN_PASSWORD
+export KGE_BOOTSTRAP_ADMIN_PASSWORD
+uv run python ../../scripts/seed_admin.py
+unset KGE_BOOTSTRAP_ADMIN_PASSWORD
 
 # 5. 启动 4 个应用进程（各开一个终端）
 cd services/kb-api && uv run uvicorn app.main:app --reload --port 8000
@@ -134,7 +137,7 @@ bash scripts/start-mineru.sh         # 本地 MinerU 文档解析引擎:2028（�
 cd web && pnpm install && pnpm dev   # http://localhost:3000
 ```
 
-登录：`admin` / `admin123` (super_admin)。
+本地开发管理员的用户名默认为 `admin`；初始化时必须通过 `KGE_BOOTSTRAP_ADMIN_PASSWORD` 显式提供强密码。生产环境使用统一身份中心创建和授权管理员，不运行本地种子脚本。
 
 ### 模式 2：Docker 全量模式（需基础设施已启动）
 
@@ -200,21 +203,21 @@ docker compose -f docker-compose.app.yml build deerflow
 # 6. 启动应用（kb-api:8001 / faq-service:8004 / deerflow:2027 / kb-worker）
 docker compose -f docker-compose.app.yml up -d
 
-# 7. 初始化 DB + 种子 admin
+# 7. 初始化 DB schema；生产管理员在 Keycloak 创建
 docker exec kge-kb-api sh -c "cd /app/services/kb-api && uv run alembic -c ../../alembic.ini upgrade head"
-docker exec kge-kb-api sh -c "cd /app/services/kb-api && uv run python ../../scripts/seed_admin.py"
 #    ⚠️ 模型变更必须伴随迁移：新增/修改 ORM 字段时先在本地补 alembic 迁移再部署，
 #    禁止依赖本地 create_all/手工改表（schema 漂移会导致线上 UndefinedColumnError 500），
 #    迁移号先 `alembic heads` 确认无并行冲突。部署后用受影响接口验证。
 
-# 8. 前端 nginx（8080 端口，反代 /api/v1/faq→8004、/api/v1→8001）
+# 8. 部署内网 KGE nginx（8080 仅作为网关上游，不直接开放公网）
 sudo cp nginx-kge.conf /etc/nginx/sites-enabled/kge && sudo nginx -t && sudo systemctl reload nginx
 
-# 9. 开放防火墙（ufw 只放行前端 8080；宿主机端口默认被 ufw 拦截）
-sudo ufw allow 8080/tcp comment "KGE 前端"
+# 9. 公网入口仅开放 HTTPS（80 只用于跳转）；域名入口配置见 deploy/intranet/nginx-portal.conf
+sudo ufw allow 443/tcp comment "Portal HTTPS ingress"
+sudo ufw allow 80/tcp comment "HTTP to HTTPS redirect"
 ```
 
-> **注意 ufw 与 Docker 的交互**：ufw 规则只作用于宿主机进程监听的端口（nginx 8080、kb-sync 80）；Docker 发布的端口（8001/8004/2027/8012/9000-9001/9200/5432/6379）经 iptables PREROUTING/FORWARD 链 DNAT，**会绕过 ufw 直接可访问**。若需限制这些端口，需另行配置 `DOCKER-USER` 链或去掉 compose 的宿主端口映射。
+> **注意 ufw 与 Docker 的交互**：公网规则只放行 80/443；不得开放 `3200/8080/8081/8082/3100/8001/8004/2027/4180/8180` 等应用、身份和管理端口。Docker 发布端口可能绕过 ufw 的常规 INPUT 规则，必须通过 `DOCKER-USER` 链、云安全组和应用绑定地址同步限制，外部扫描确认这些端口不可达。
 
 部署文件清单（`deploy/intranet/`）：`docker-compose.infra.yml`（基础设施）、`docker-compose.app.yml`（应用，build context 自动指向上两级 repo root）、`.env.infra.example` / `.env.app.example`（脱敏模板，部署时复制为 `.env.infra` / `.env.app` 填真实密码与外接模型 API 配置）、`nginx-kge.conf`（前端反代）。模型全部外接，无需物化模型文件；旧部署里的 `deploy/intranet/models/` 目录与 `BGE_EMBED_MODEL` / `BGE_RERANK_MODEL` 环境变量已废弃，升级时直接删除。
 
@@ -230,7 +233,7 @@ sudo ufw allow 8080/tcp comment "KGE 前端"
 4. **同步链路质量与性能**：① 源文档**原样直传 Dify**（不再经本地转换引擎，先备份 MinIO 再上传）；② 钉钉目录树并发遍历（≤3 并发）+ 服务端 10 分钟缓存，「同步列表」从数十秒降到秒级（缓存命中 <100ms）；③ 逐源统计 N+1 改批量聚合接口 + 前端 1 小时持久缓存（`kge:sync_sources_page_v1` / `kge:dify_datasets_v1` / `kge:dingtalk_workspaces_v1`）。
 5. **升级后老规矩**：app 容器重启后 `docker restart` nginx（避免上游 IP 缓存导致 502）。
 
-**访问**：`http://<服务器IP>:8080`，登录 `admin` / `admin123`。
+**访问**：生产用户统一从门户 HTTPS 域名进入；请按 [门户统一入口部署说明](portal/README.md#生产环境统一入口) 完成域名、TLS、认证代理和防火墙配置。不得直接开放应用端口。
 
 **端口规划**（服务器常已有服务占 80/8000，需错开）：
 
@@ -296,6 +299,8 @@ KB_API_INTERNAL_URL=http://kb-api:8000
 ./scripts/smoke_test.sh
 ```
 
+运行前设置 `SMOKE_USERNAME` 和 `SMOKE_PASSWORD` 为已注册的隔离测试账号凭据；脚本不再内置账号或密码。
+
 脚本自动启动 3 个应用进程（如未运行），覆盖完整链路：
 1. 登录 + `/users/me` 字段校验
 2. 创建文档知识库
@@ -304,8 +309,9 @@ KB_API_INTERNAL_URL=http://kb-api:8000
 5. 检索（hybrid: kNN + BM25 + RRF + rerank）
 6. 问答（LLM 未配则返回友好提示，非阻断）
 7. FAQ KB + 条目 + FAQ 检索（精准 + 语义融合）
-8. API Key 创建 + 列表
-9. 设置 GET（验证密钥掩码）
+8. 设置 GET（验证密钥掩码）
+
+> 账户管理已上收统一门户（Keycloak 账号中心）：冒烟不再覆盖本地用户 CRUD / 个人 API Key / 设密链路；`AUTH_PROVIDER=local` 仅供本地开发与应急回滚，建号走 `scripts/seed_admin.py`。
 
 预期输出末行：`SMOKE OK`。日志在 `/tmp/kb-smoke/{kb-api,faq-service,kb-worker}.log`。
 
@@ -634,8 +640,8 @@ knowledge-governance-expert/
 │       ├── docker-compose.yaml  # 完整 Dify 服务栈
 │       └── pull-images.sh       # 单镜像重试拉取脚本（国内网络续传）
 ├── scripts/
-│   ├── smoke_test.sh            # 端到端冒烟（覆盖 RAG + FAQ + API Key + 设置）
-│   └── seed_admin.py            # 种子 admin 用户
+│   ├── smoke_test.sh            # 端到端冒烟（凭据通过 SMOKE_USERNAME / SMOKE_PASSWORD 提供）
+│   └── seed_admin.py            # 仅本地开发使用，必须显式提供强密码
 ├── services/
 │   ├── kb-common/               # 共享：models/clients/rag/auth/config（含 dify_client）
 │   ├── kb-api/                  # FastAPI + Celery
@@ -647,7 +653,7 @@ knowledge-governance-expert/
     └── src/views/
         ├── chat/                # 智能问答（Dify 数据集多选 + Agent）
         ├── hiagent/             # HiAgent智能问答（火山 HiAgent WebSDK iframe 嵌入）
-        ├── governance/          # 知识治理（分组：知识缺口 /govern/gaps——原「知识治理」页，含知识缺口+治理标准页签、model.vue 接入配置；入库审核 /govern/review——原「知识打标」页迁入更名，钉钉知识列表操作列即审核状态字段：点击弹窗选择 通过/待确认/待更正 确认后文案变为所选状态、可再次点击变更，审核人列记录操作用户名，审核记录存 dingtalk_file_reviews 表按节点ID独立存储、快照刷新不覆盖；治理标准页实时读取钉钉多维表《杰克知识管理规范》，需应用开通 Notable.Base.Read.All 权限；知识缺口页知识库过滤选项取自知识源管理中已启用的钉钉知识库，选中钉钉知识库后查询读取 dingtalk_folder_stats 快照表（文件夹直属文档数=在线文档+本地上传文件（.dlink 文件夹快捷方式计为其所在文件夹的一个文档，不作为目录遍历——其子节点 API 无法列出）；「文件夹数量」列=该目录直属子文件夹数，不含目录本身与孙级——钉钉行由快照路径树推导、本地行走 parent_id，CSV 导出同口径）；筛选项：知识库、Owner、有无文档状态，以及「文档数量 / 文件夹数量」区间下拉（0 / 1-9 / 10-99 / 100+，按直属数量过滤，查询与 CSV 导出同口径，变更后由「查询」按钮触发），「刷新数据」按钮触发后台全量遍历并覆盖写入快照（几万文档的大库需数分钟，前端轮询进度，刷新保留已维护的 Owner）；知识Owner 支持行内编辑弹窗与批量导入（CSV/XLSX，按目录ID或知识库＋目录路径匹配，本地目录与钉钉文件夹均可），钉钉行另提供「通知」按钮——经钉钉企业机器人向 Owner 发单聊催补提醒（无文档行可点，正文预览见「知识Owner通知」说明）；新增钉钉知识源时自动触发该库快照预热，知识源列表显示「目录获取中」状态；知识采集的同步任务弹窗「目录选择」优先读取该快照表秒开（GET /knowledge-center/knowledge-sources/{id}/dingtalk-folder-snapshot，按路径树还原目录，快照缺失时自动回退实时遍历））
+        ├── governance/          # 知识治理（分组：知识缺口 /govern/gaps——原「知识治理」页，含知识缺口+治理标准页签、model.vue 接入配置；入库审核 /govern/review——原「知识打标」页迁入更名，钉钉知识列表操作列即审核状态字段：点击弹窗选择 通过/待确认/待更正 确认后文案变为所选状态、可再次点击变更，审核人列记录操作用户名，审核记录存 dingtalk_file_reviews 表按节点ID独立存储、快照刷新不覆盖；治理标准页实时读取钉钉多维表《杰克知识管理规范》，需应用开通 Notable.Base.Read.All 权限；知识缺口页知识库过滤选项取自知识源管理中已启用的钉钉知识库，选中钉钉知识库后查询读取 dingtalk_folder_stats 快照表（文件夹直属文档数=在线文档+本地上传文件（.dlink 文件夹快捷方式计为其所在文件夹的一个文档，不作为目录遍历——其子节点 API 无法列出）；「文件夹数量」列=该目录直属子文件夹数，不含目录本身与孙级——钉钉行由快照路径树推导、本地行走 parent_id，CSV 导出同口径）；筛选项：知识库、Owner、有无文档状态，以及「文档数量 / 文件夹数量」区间下拉（0 / 1-9 / 10-99 / 100+，按直属数量过滤，查询与 CSV 导出同口径，变更后由「查询」按钮触发），「刷新数据」按钮触发后台全量遍历并覆盖写入快照（几万文档的大库需数分钟，前端轮询进度，刷新保留已维护的 Owner）；kb-api 内置调度器**每日 0 点自动遍历全部已启用钉钉知识库**顺序刷新快照（与运营看板定时统计共用钉钉全局限流，单库失败不中断、正在手动刷新的库跳过；服务重启时当日快照缺失会自动补刷），运营看板「部门知识库上传进度」实时聚合同一快照表，随刷新自动更新；知识Owner 支持行内编辑弹窗与批量导入（CSV/XLSX，按目录ID或知识库＋目录路径匹配，本地目录与钉钉文件夹均可），钉钉行另提供「通知」按钮——经钉钉企业机器人向 Owner 发单聊催补提醒（无文档行可点，正文预览见「知识Owner通知」说明）；新增钉钉知识源时自动触发该库快照预热，知识源列表显示「目录获取中」状态；知识采集的同步任务弹窗「目录选择」优先读取该快照表秒开（GET /knowledge-center/knowledge-sources/{id}/dingtalk-folder-snapshot，按路径树还原目录，快照缺失时自动回退实时遍历））
         └── settings/            # 兼容旧路由的模型配置页（隐藏）
 ```
 

@@ -6,6 +6,7 @@ import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowDown, ArrowUp, Collection as CollectionIcon, Refresh } from '@element-plus/icons-vue'
+import KgPagination from '@/components/common/KgPagination.vue'
 import { batchDeleteTasks, batchRetryTasks, listSources, listTasks, retryTask } from '@/api/sync'
 import type { Source, SyncTask } from '@/types/sync'
 import { formatDate, formatFileSize } from '@/utils/format'
@@ -94,7 +95,13 @@ function onTabChange() {
   load()
 }
 
-function onSizeChange() {
+function onPageChange(p: number) {
+  page.value = p
+  load()
+}
+
+function onSizeChange(s: number) {
+  size.value = s
   page.value = 1
   load()
 }
@@ -276,7 +283,8 @@ onBeforeUnmount(() => {
       </div>
 
       <!-- 任务表 -->
-      <el-table :data="items" v-loading="loading" border size="small" row-key="id"
+      <div class="table-fill">
+      <el-table :data="items" v-loading="loading" border size="small" row-key="id" height="100%"
                 @selection-change="(rows: unknown[]) => (selection = rows as SyncTask[])">
         <el-table-column type="selection" width="42" reserve-selection />
         <el-table-column label="任务名称" min-width="220" show-overflow-tooltip>
@@ -348,24 +356,37 @@ onBeforeUnmount(() => {
           </div>
         </template>
       </el-table>
+      </div>
 
       <!-- 分页 -->
-      <div class="pager">
-        <el-pagination background layout="total, sizes, prev, pager, next" :total="total"
-                       v-model:current-page="page" v-model:page-size="size" :page-sizes="[20, 50, 100]"
-                       @current-change="load" @size-change="onSizeChange" />
-      </div>
+      <KgPagination :page="page" :size="size" :total="total" :sizes="[20, 50, 100]"
+                    layout="total, sizes, prev, pager, next"
+                    @update:page="onPageChange" @update:size="onSizeChange" />
     </el-card>
   </div>
 </template>
 
 <style scoped>
-.queue-page {
-  overflow: auto;
-}
-
+/* 卡片撑满页面剩余高度：页签/筛选/批量栏/分页固定，表格撑满（表体内部滚动、表头吸顶） */
 .queue-card {
   border-radius: 12px;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.queue-card :deep(.el-card__body) {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.queue-tabs {
+  flex-shrink: 0;
 }
 
 .queue-tabs :deep(.el-tabs__header) {
@@ -382,6 +403,7 @@ onBeforeUnmount(() => {
   display: flex;
   flex-wrap: wrap;
   align-items: flex-start;
+  flex-shrink: 0;
 }
 
 .filter-bar :deep(.el-form-item) {
@@ -402,6 +424,7 @@ onBeforeUnmount(() => {
   font-size: 13px;
   cursor: pointer;
   user-select: none;
+  flex-shrink: 0;
 }
 
 .expand-toggle:hover {
@@ -413,6 +436,7 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 10px;
   margin-bottom: 10px;
+  flex-shrink: 0;
 }
 
 .batch-hint {
@@ -451,9 +475,8 @@ onBeforeUnmount(() => {
   font-size: 12px;
 }
 
-.pager {
-  display: flex;
-  justify-content: flex-end;
-  margin-top: 14px;
+.table-fill {
+  flex: 1;
+  min-height: 0;
 }
 </style>

@@ -19,8 +19,10 @@ cd services/faq-service && uv sync
 
 # 4. Init DB + seed admin user
 cd services/kb-common && uv run alembic -c ../../alembic.ini upgrade head
-cd services/kb-common && uv run python ../../scripts/seed_admin.py
-# → admin / admin123
+cd services/kb-common
+read -s KGE_BOOTSTRAP_ADMIN_PASSWORD && export KGE_BOOTSTRAP_ADMIN_PASSWORD
+uv run python ../../scripts/seed_admin.py
+unset KGE_BOOTSTRAP_ADMIN_PASSWORD
 
 # 5. Start 3 application processes (separate terminals)
 cd services/kb-api && uv run uvicorn app.main:app --reload --port 8000
@@ -58,6 +60,7 @@ pnpm test:run     # vitest run
 ./scripts/smoke_test.sh
 # KEEP_SERVICES=1 → keep procs after run
 # EXTERNAL_SERVICES=1 → services already running, skip launch
+# SMOKE_USERNAME / SMOKE_PASSWORD → 已注册的隔离测试账号凭据（必填）
 ```
 
 ## Architecture
@@ -79,7 +82,7 @@ Docker infrastructure (dev-services compose, external dev-network):
 
 | Process | Port | Stack | Responsibilities |
 |---------|------|-------|-----------------|
-| **kb-api** | 8000 | FastAPI + Celery app | Auth (JWT + API Key), user CRUD, document KB CRUD, directory tree, document upload, search (hybrid kNN+BM25+RRF+rerank), enterprise QA via DeerFlow sidecar (search routes → deerflow_runner → services/deerflow qa_server; sidecar tools call back agent_internal), settings, MinerU orchestration |
+| **kb-api** | 8000 | FastAPI + Celery app | Auth (JWT + API Key, 账户管理上收门户后仅 local 密码登录 + /users/me), document KB CRUD, directory tree, document upload, search (hybrid kNN+BM25+RRF+rerank), enterprise QA via DeerFlow sidecar (search routes → deerflow_runner → services/deerflow qa_server; sidecar tools call back agent_internal), settings, MinerU orchestration |
 | **faq-service** | 8004 | FastAPI | FAQ KB CRUD, FAQ directory tree, Q&A pair CRUD, CSV/Excel batch import, FAQ search (exact + semantic fusion) |
 | **kb-worker** | — | Celery (kb-api package) | Async ingestion pipeline: PENDING → PARSING (MinerU) → INDEXING (chunk+embed+ES) → COMPLETED |
 
@@ -130,7 +133,7 @@ ES index naming: `kb_{kb_id}` for document KBs, `faq_{kb_id}` for FAQ KBs.
 
 ### Layout Pattern
 
-Left sidebar (dark, 220px) + tab bar + main content (`#f5f7fa`). Navigation: 工作台 / 知识库 / 问答库 / 统一检索 / RAG 问答 / 模型配置 / 用户管理 / API Key 管理.
+Left sidebar (dark, 220px) + tab bar + main content (`#f5f7fa`). Navigation: 工作台 / 知识库 / 问答库 / 统一检索 / RAG 问答 / 模型配置 / API Key 管理（用户管理已上收统一门户）.
 
 The tab bar (`stores/tabs.ts` + `components/layout/TabBar.vue`) maintains open pages — tabs auto-add on route navigation, with close/close-others/close-all support. 工作台 is permanent (unclosable).
 
@@ -159,9 +162,10 @@ The tab bar (`stores/tabs.ts` + `components/layout/TabBar.vue`) maintains open p
 /search                   → Unified search (with traceability drawer)
 /chat                     → RAG Q&A
 /settings                 → Model config (LLM/MinerU keys)
-/admin/users              → User management (super_admin/admin)
 /admin/api-keys           → API Key management (super_admin/admin)
 ```
+
+> 账户管理已上收统一门户（Keycloak 账号中心）：系统内不提供用户管理/个人账户页面与本地用户 CRUD 接口；`AUTH_PROVIDER=local` 仅保留密码登录通道（建号走 `scripts/seed_admin.py`），`AUTH_PROVIDER=keycloak` 下用户由门户统一登录自动建档。
 
 ### API Layer
 
@@ -175,7 +179,6 @@ API modules in `web/src/api/`:
 - `chat.ts` — RAG chat
 - `faq.ts` — FAQ KB/entry CRUD
 - `settings.ts` — runtime settings
-- `users.ts` — admin user management
 
 ### Key Implementation Rules
 

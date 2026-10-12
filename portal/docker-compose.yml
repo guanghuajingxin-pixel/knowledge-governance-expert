@@ -1,8 +1,44 @@
 services:
   jack-portal:
-    build: .
+    build:
+      context: .
+      args:
+        VITE_KNOWLEDGE_URL: ${VITE_KNOWLEDGE_URL:-/kge/chat}
+        VITE_EVALUATION_URL: ${VITE_EVALUATION_URL:-/evaluation/datasets}
+        VITE_SKILLHUB_URL: ${VITE_SKILLHUB_URL:-/skillhub/}
     ports:
-      - "3200:80"
+      - "127.0.0.1:3200:80"
     environment:
-      PORTAL_API_TARGET: ${PORTAL_API_TARGET:-http://10.10.166.2:8080}
+      PORTAL_API_TARGET: ${PORTAL_API_TARGET:-http://host.docker.internal:8000}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  oauth2-proxy:
+    image: quay.io/oauth2-proxy/oauth2-proxy:v7.15.0
+    profiles: [sso-gateway]
+    command:
+      - --provider=keycloak-oidc
+      - --oidc-issuer-url=${OIDC_ISSUER:-}
+      - --client-id=jack-gateway
+      - --client-secret=${GATEWAY_CLIENT_SECRET:-}
+      - --redirect-url=${PORTAL_PUBLIC_ORIGIN:-}/oauth2/callback
+      - --http-address=127.0.0.1:4180
+      - --upstream=static://202
+      - --email-domain=*
+      - --allowed-role=kb-api:viewer
+      - --allowed-role=kb-api:editor
+      - --allowed-role=kb-api:admin
+      - --allowed-role=kb-api:super_admin
+      - --reverse-proxy=true
+      - --trusted-proxy-ip=127.0.0.1/32
+      - --set-xauthrequest=true
+      - --skip-provider-button=true
+      - --cookie-secret=${OAUTH2_PROXY_COOKIE_SECRET:-}
+      - --cookie-secure=true
+      - --cookie-httponly=true
+      - --cookie-samesite=lax
+      - --cookie-domain=${SSO_COOKIE_DOMAIN:-}
+      - --whitelist-domain=${SSO_COOKIE_DOMAIN:-}
+    network_mode: host
     restart: unless-stopped

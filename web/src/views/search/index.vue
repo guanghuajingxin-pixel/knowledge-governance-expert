@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { computed, ref, onMounted } from 'vue'
 import { Search } from '@element-plus/icons-vue'
 import PageContainer from '@/components/common/PageContainer.vue'
+import KgPagination from '@/components/common/KgPagination.vue'
 import SearchTraceDrawer from '@/components/common/SearchTraceDrawer.vue'
 import { search } from '@/api/search'
 import { listKnowledgeBases } from '@/api/knowledge-base'
@@ -16,6 +17,10 @@ const results = ref<SearchResult[]>([])
 const tookMs = ref(0)
 const loading = ref(false)
 const hasSearched = ref(false)
+// 检索结果一次返回全量，客户端分页切片展示
+const page = ref(1)
+const size = ref(20)
+const pagedResults = computed(() => results.value.slice((page.value - 1) * size.value, page.value * size.value))
 const kbOptions = ref<KnowledgeBase[]>([])
 const drawerVisible = ref(false)
 const selectedResult = ref<SearchResult | null>(null)
@@ -37,6 +42,7 @@ async function handleSearch() {
   if (!query.value.trim() || selectedKbIds.value.length === 0) return
   loading.value = true
   hasSearched.value = true
+  page.value = 1
   try {
     const req: SearchRequest = {
       query: query.value,
@@ -86,7 +92,8 @@ function showTrace(result: SearchResult) {
       <div v-if="hasSearched && !loading" class="result-meta">
         共找到 {{ results.length }} 条结果，耗时 {{ tookMs }}ms
       </div>
-      <el-table v-if="results.length" :data="results" style="width: 100%; margin-top: 12px;">
+      <div v-if="results.length" class="table-fill">
+        <el-table :data="pagedResults" height="100%" style="width: 100%;">
         <el-table-column label="内容" min-width="400">
           <template #default="{ row }">
             <div class="result-text">{{ row.text }}</div>
@@ -110,19 +117,33 @@ function showTrace(result: SearchResult) {
             <el-button link type="primary" size="small" @click="showTrace(row as SearchResult)">溯源</el-button>
           </template>
         </el-table-column>
-      </el-table>
+        </el-table>
+      </div>
       <el-empty v-else-if="hasSearched && !loading" description="未找到相关结果" />
+      <KgPagination
+        :page="page"
+        :size="size"
+        :total="results.length"
+        :sizes="[20, 50, 100]"
+        layout="total, sizes, prev, pager, next"
+        @update:page="page = $event"
+        @update:size="(s: number) => { size = s; page = 1 }"
+      />
     </div>
   </PageContainer>
   <SearchTraceDrawer v-model="drawerVisible" :result="selectedResult" />
 </template>
 
 <style scoped>
-.search-panel { background: #fff; padding: 20px; border-radius: 4px; margin-bottom: 16px; }
+/* 表格撑满剩余高度（表体内部滚动、表头吸顶），检索面板与分页固定 */
+.page-container :deep(.page-content) { display: flex; flex-direction: column; }
+.search-panel { background: #fff; padding: 20px; border-radius: 4px; margin-bottom: 16px; flex-shrink: 0; }
 .search-input-row { display: flex; gap: 12px; margin-bottom: 16px; }
 .search-filters { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .filter-label { font-size: 14px; color: #606266; }
-.result-meta { font-size: 13px; color: #909399; }
+.result-section { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.result-meta { font-size: 13px; color: #909399; flex-shrink: 0; }
+.table-fill { flex: 1; min-height: 0; margin-top: 12px; }
 .result-text { font-size: 14px; line-height: 1.6; color: #303133; }
 .faq-answer { font-size: 13px; color: #67c23a; margin-top: 6px; }
 </style>

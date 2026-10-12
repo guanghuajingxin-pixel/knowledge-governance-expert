@@ -16,9 +16,9 @@ export interface UserInfo {
   role: UserRole
   is_active: boolean
   created_at: string
-  /** 下次登录必须设置新密码（钉钉首次建档 / 管理员重置密码后为 true） */
+  /** 后端兼容字段：账户管理已上收门户，前端不再消费 */
   must_change_password?: boolean
-  /** 钉钉绑定；未绑定为 null（列表接口需带 include_binding=true 才返回） */
+  /** 钉钉绑定；未绑定为 null */
   dingtalk_binding?: DingtalkBinding | null
 }
 
@@ -31,9 +31,4 @@ export interface LoginResponse {
   access_token: string
   token_type: string
   user: UserInfo
-  /** true 表示首次登录（无本地密码），前端须跳设密页 */
-  must_set_password?: boolean
 }
-
-/** 钉钉登录渠道：h5 = 钉钉工作台内免登，qr = PC 浏览器扫码 */
-export type DingtalkLoginChannel = 'h5' | 'qr'

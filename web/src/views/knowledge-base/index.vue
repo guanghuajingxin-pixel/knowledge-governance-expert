@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Search, Delete, Setting, ArrowDown, List, Grid } from '@element-plus/icons-vue'
 import PageContainer from '@/components/common/PageContainer.vue'
+import KgPagination from '@/components/common/KgPagination.vue'
 import KbCard from '@/components/kb/KbCard.vue'
 import KbCreateDialog from '@/components/kb/KbCreateDialog.vue'
 import { listKnowledgeBases, deleteKnowledgeBase } from '@/api/knowledge-base'
@@ -219,14 +220,15 @@ onMounted(fetchData)
     </div>
 
     <!-- Table View -->
-    <el-table
-      v-else
-      v-loading="loading"
-      :data="list"
-      stripe
-      style="width: 100%"
-      empty-text="暂无知识库"
-    >
+    <div v-else class="table-fill">
+      <el-table
+        v-loading="loading"
+        :data="list"
+        stripe
+        height="100%"
+        style="width: 100%"
+        empty-text="暂无知识库"
+      >
       <el-table-column label="知识库名称" min-width="180" prop="name">
         <template #default="{ row }: any">
           <el-link type="primary" @click="openDetail(row)">{{ row.name }}</el-link>
@@ -267,30 +269,32 @@ onMounted(fetchData)
           </el-button>
         </template>
       </el-table-column>
-    </el-table>
+      </el-table>
+    </div>
 
     <!-- Pagination -->
-    <div v-if="total > size" class="pagination-wrap">
-      <el-pagination
-        v-model:current-page="page"
-        v-model:page-size="size"
-        :total="total"
-        :page-sizes="[10, 20, 50]"
-        layout="total, sizes, prev, pager, next, jumper"
-        @current-change="onPageChange"
-        @size-change="onSizeChange"
-      />
-    </div>
+    <KgPagination
+      :page="page"
+      :size="size"
+      :total="total"
+      :sizes="[20, 50, 100]"
+      layout="total, sizes, prev, pager, next"
+      @update:page="onPageChange"
+      @update:size="onSizeChange"
+    />
   </PageContainer>
 
   <KbCreateDialog v-model="dialogVisible" @success="fetchData" />
 </template>
 
 <style scoped>
+/* 表格视图撑满剩余高度（表体内部滚动、表头吸顶）；搜索栏/工具栏固定；卡片视图保持自然流式布局由容器滚动 */
+.page-container :deep(.page-content) { display: flex; flex-direction: column; }
 .search-wrap {
   display: flex;
   justify-content: center;
   margin-bottom: 16px;
+  flex-shrink: 0;
 }
 
 .search-input {
@@ -303,6 +307,12 @@ onMounted(fetchData)
   justify-content: space-between;
   align-items: center;
   margin-bottom: 16px;
+  flex-shrink: 0;
+}
+
+.table-fill {
+  flex: 1;
+  min-height: 0;
 }
 
 .toolbar-left {
@@ -345,11 +355,5 @@ onMounted(fetchData)
 .desc-text {
   color: #909399;
   font-size: 13px;
-}
-
-.pagination-wrap {
-  display: flex;
-  justify-content: flex-end;
-  margin-top: 16px;
 }
 </style>

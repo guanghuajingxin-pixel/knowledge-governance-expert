@@ -4,6 +4,7 @@ import TabBar from '@/components/layout/TabBar.vue'
 import { useTabsStore } from '@/stores/tabs'
 
 const tabsStore = useTabsStore()
+const year = new Date().getFullYear()
 </script>
 
 <template>
@@ -20,6 +21,7 @@ const tabsStore = useTabsStore()
           </keep-alive>
         </router-view>
       </div>
+      <footer class="app-footer">Copyright © {{ year }} 杰克科技</footer>
     </div>
   </div>
 </template>
@@ -40,6 +42,16 @@ const tabsStore = useTabsStore()
   min-height: 0;
   /* 滚动权下放给页面内部（页签 pane / page-content），外框只负责按比例分配高度 */
   overflow: hidden;
+  background: #f5f7fa;
+}
+.app-footer {
+  flex: none;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  color: #909399;
   background: #f5f7fa;
 }
 </style>

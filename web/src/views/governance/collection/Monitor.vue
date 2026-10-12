@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { formatDate } from '@/utils/format'
+import KgPagination from '@/components/common/KgPagination.vue'
 import {
   listFailures, listLogs, listRuns, listSources, retryAllFailures, retryFailure, sourcesStatsAll,
 } from '@/api/sync'
@@ -19,6 +20,14 @@ const loadingRuns = ref(false)
 const loadingFail = ref(false)
 const loadingLogs = ref(false)
 
+// ===== 列表前端分页（接口按 limit 返回，这里按页切片展示） =====
+const failPage = ref(1)
+const failSize = ref(20)
+const pagedFailures = computed(() => failures.value.slice((failPage.value - 1) * failSize.value, failPage.value * failSize.value))
+const runPage = ref(1)
+const runSize = ref(20)
+const pagedRuns = computed(() => runs.value.slice((runPage.value - 1) * runSize.value, runPage.value * runSize.value))
+
 // ===== 日志筛选 =====
 const lv = ref('')
 const srcKeyword = ref('')
@@ -34,6 +43,11 @@ const filteredLogs = computed(() => logs.value.filter((l) => {
   }
   return true
 }))
+// 日志筛选条件变化时回到第 1 页
+watch([lv, srcKeyword, date], () => { logPage.value = 1 })
+const logPage = ref(1)
+const logSize = ref(20)
+const pagedLogs = computed(() => filteredLogs.value.slice((logPage.value - 1) * logSize.value, logPage.value * logSize.value))
 
 // ===== 工具 =====
 function sourceName(id: number) { return sources.value.find((s) => s.id === id)?.name || `#${id}` }
@@ -109,13 +123,14 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(pollTimer) })
 </script>
 
 <template>
-  <div>
+  <div class="monitor-page">
     <!-- ① 失败清单 -->
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+    <div class="sec-head" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
       <h3 style="margin:0">失败清单（待处理）</h3>
       <el-button size="small" @click="retryAll">全部重试</el-button>
     </div>
-    <el-table :data="failures" v-loading="loadingFail" size="small" border style="margin-bottom:18px">
+    <div class="table-fill fill-fail">
+    <el-table :data="pagedFailures" v-loading="loadingFail" size="small" border height="100%">
       <el-table-column label="时间" width="150">
         <template #default="{ row }"><span style="font-size:12px">{{ formatDate(row.created_at) }}</span></template>
       </el-table-column>
@@ -136,10 +151,16 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(pollTimer) })
       </el-table-column>
       <template #empty><div style="padding:16px;color:var(--el-text-color-secondary)">暂无待处理失败，全部同步正常</div></template>
     </el-table>
+    </div>
+    <KgPagination :page="failPage" :size="failSize" :total="failures.length" :sizes="[20, 50, 100]"
+                  layout="total, sizes, prev, pager, next"
+                  @update:page="(p: number) => (failPage = p)"
+                  @update:size="(s: number) => { failSize = s; failPage = 1 }" />
 
     <!-- ② 同步历史 -->
     <h3 style="margin:0 0 8px">同步历史</h3>
-    <el-table :data="runs" v-loading="loadingRuns" size="small" border style="margin-bottom:18px">
+    <div class="table-fill fill-runs">
+    <el-table :data="pagedRuns" v-loading="loadingRuns" size="small" border height="100%">
       <el-table-column label="开始时间" width="150">
         <template #default="{ row }"><span style="font-size:12px">{{ formatDate(row.started_at) }}</span></template>
       </el-table-column>
@@ -181,9 +202,14 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(pollTimer) })
       </el-table-column>
       <template #empty><div style="padding:16px;color:var(--el-text-color-secondary)">暂无同步历史</div></template>
     </el-table>
+    </div>
+    <KgPagination :page="runPage" :size="runSize" :total="runs.length" :sizes="[20, 50, 100]"
+                  layout="total, sizes, prev, pager, next"
+                  @update:page="(p: number) => (runPage = p)"
+                  @update:size="(s: number) => { runSize = s; runPage = 1 }" />
 
     <!-- ③ 运行日志 -->
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+    <div class="sec-head" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
       <h3 style="margin:0">运行日志</h3>
       <div style="display:flex;gap:8px">
         <el-select v-model="lv" placeholder="全部级别" clearable size="small" style="width:120px">
@@ -195,13 +221,51 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(pollTimer) })
         </el-select>
       </div>
     </div>
-    <div v-loading="loadingLogs" style="border:1px solid var(--el-border-color);border-radius:6px;max-height:360px;overflow:auto;background:var(--el-fill-color-blank)">
+    <div v-loading="loadingLogs" class="log-box">
       <div v-if="!filteredLogs.length" style="padding:20px;color:var(--el-text-color-secondary);text-align:center">无匹配日志</div>
-      <div v-for="l in filteredLogs" :key="l.id" style="display:flex;gap:10px;padding:6px 12px;border-bottom:1px solid var(--el-border-color-lighter);font-size:12px">
+      <div v-for="l in pagedLogs" :key="l.id" style="display:flex;gap:10px;padding:6px 12px;border-bottom:1px solid var(--el-border-color-lighter);font-size:12px">
         <span style="color:var(--el-text-color-secondary);min-width:130px">{{ formatDate(l.created_at) }}</span>
         <el-tag size="small" :type="lvClass(l.level)" style="min-width:50px;text-align:center">{{ l.level.toLowerCase() }}</el-tag>
         <span style="flex:1;word-break:break-all">{{ l.message }}</span>
       </div>
     </div>
+    <KgPagination :page="logPage" :size="logSize" :total="filteredLogs.length" :sizes="[20, 50, 100]"
+                  layout="total, sizes, prev, pager, next"
+                  @update:page="(p: number) => (logPage = p)"
+                  @update:size="(s: number) => { logSize = s; logPage = 1 }" />
   </div>
 </template>
+
+<style scoped>
+/* 监控页撑满视口：三个区块的标题/分页固定，列表区平分剩余高度、内部滚动 */
+.monitor-page {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.monitor-page > .sec-head,
+.monitor-page > h3 {
+  flex-shrink: 0;
+}
+.table-fill {
+  flex: 1;
+  min-height: 0;
+}
+.fill-fail,
+.fill-runs {
+  margin-bottom: 2px;
+}
+.log-box {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid var(--el-border-color);
+  border-radius: 6px;
+  background: var(--el-fill-color-blank);
+}
+.monitor-page :deep(.kg-pagination) {
+  margin-bottom: 12px;
+}
+</style>

@@ -5,9 +5,10 @@
  * 系统内所有「选择知识库」的地方均从此处取数。
  * 其它模块可通过知识库 ID 获取其下的目录与文档。
  */
-import { ref, onMounted, reactive, computed } from 'vue'
+import { ref, onMounted, reactive, computed, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Refresh, Edit, Delete, MoreFilled } from '@element-plus/icons-vue'
+import KgPagination from '@/components/common/KgPagination.vue'
 import {
   listKnowledgeSources,
   createKnowledgeSource,
@@ -48,6 +49,12 @@ const sources = ref<KnowledgeSource[]>([])
 const loading = ref(false)
 const filterType = ref<string>('')
 const viewMode = ref<'table' | 'card'>('card')
+// 列表前端分页（接口一次返回全量，卡片/表格两种视图共用，这里按页切片展示）
+const page = ref(1)
+const pageSize = ref(20)
+const pagedSources = computed(() => sources.value.slice((page.value - 1) * pageSize.value, page.value * pageSize.value))
+// 类型筛选变化时回到第 1 页
+watch(filterType, () => { page.value = 1 })
 
 // 外部系统访问地址（从 settings 读取，用于构造「跳转到原知识库」链接）
 const difyUiUrl = ref('')   // Dify 前端（从 dify_base_url 剥离 /v1 得到）
@@ -424,7 +431,7 @@ onMounted(async () => {
       <!-- ======== 卡片视图（默认） ======== -->
       <div v-if="viewMode === 'card'" class="ks-grid" v-loading="loading">
         <el-card
-          v-for="src in sources"
+          v-for="src in pagedSources"
           :key="src.id"
           shadow="hover"
           class="ks-card"
@@ -467,12 +474,13 @@ onMounted(async () => {
       </div>
 
       <!-- ======== 列表视图 ======== -->
+      <div v-else class="table-fill">
       <el-table
-        v-else
-        :data="sources"
+        :data="pagedSources"
         v-loading="loading"
         stripe
         style="width: 100%"
+        height="100%"
         empty-text="暂无知识库登记，点击「新增知识库」新增"
       >
         <el-table-column prop="name" label="知识库名称" min-width="180">
@@ -513,6 +521,13 @@ onMounted(async () => {
           </template>
         </el-table-column>
       </el-table>
+      </div>
+
+      <!-- 分页（卡片/表格两种视图共用） -->
+      <KgPagination :page="page" :size="pageSize" :total="sources.length" :sizes="[20, 50, 100]"
+                    layout="total, sizes, prev, pager, next"
+                    @update:page="(p: number) => (page = p)"
+                    @update:size="(s: number) => { pageSize = s; page = 1 }" />
     </div>
 
     <!-- 新增/编辑弹窗 -->
@@ -682,8 +697,10 @@ onMounted(async () => {
   background: #fff;
   border-radius: 8px;
   padding: 16px;
-  overflow: auto;
+  overflow: hidden;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  display: flex;
+  flex-direction: column;
 }
 
 .filter-bar {
@@ -691,6 +708,13 @@ onMounted(async () => {
   align-items: center;
   gap: 12px;
   margin-bottom: 16px;
+  flex-shrink: 0;
+}
+
+/* 视图区撑满剩余高度：表格/卡片网格内部滚动，分页固定吸底 */
+.table-fill {
+  flex: 1;
+  min-height: 0;
 }
 
 .filter-label {
@@ -811,7 +835,10 @@ onMounted(async () => {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
   gap: 14px;
-  min-height: 120px;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  align-content: start;
 }
 
 .ks-card {

@@ -8,6 +8,7 @@ import ImageComponentsPanel from '@/components/library/ImageComponentsPanel.vue'
 import MaterialImagePicker from '@/components/library/MaterialImagePicker.vue'
 import MaterialImageView from '@/components/library/MaterialImageView.vue'
 import MaterialSearchPanel from '@/components/library/MaterialSearchPanel.vue'
+import KgPagination from '@/components/common/KgPagination.vue'
 const canEdit = computed(() => ['super_admin', 'admin', 'editor'].includes(useUserStore().userInfo?.role || ''))
 const libraries = ref<api.MaterialLibrary[]>([]), selectedId = ref<number | null>(null), components = ref<api.ImageComponent[]>([])
 const selected = computed(() => libraries.value.find(l => l.id === selectedId.value))
@@ -129,7 +130,8 @@ async function bind() { if (!selectedId.value || !binding.value) return; saving.
       <el-tabs v-model="tab">
         <el-tab-pane label="物料管理" name="materials">
           <div class="section-toolbar"><el-input v-model="query" placeholder="搜索物料编码或名称" clearable style="width: 280px" @input="page = 1" /><div class="spacer" /><el-button v-if="canEdit" type="primary" @click="openMaterial()">新增物料</el-button></div>
-          <el-table v-loading="loading" :data="materials">
+          <div class="table-fill">
+          <el-table v-loading="loading" :data="materials" height="100%">
             <el-table-column prop="code" label="物料编码" min-width="150" show-overflow-tooltip />
             <el-table-column prop="name" label="物料名称" min-width="220" show-overflow-tooltip />
             <el-table-column prop="specification" label="规格" min-width="160" show-overflow-tooltip />
@@ -139,7 +141,8 @@ async function bind() { if (!selectedId.value || !binding.value) return; saving.
             <el-table-column label="操作" width="190"><template #default="{ row }"><el-button link type="primary" @click="showMaterialImages(row.id)">查看图片</el-button><el-button v-if="canEdit" link type="primary" @click="openMaterial(row as api.Material)">编辑</el-button><el-dropdown v-if="canEdit" @command="(c: string) => materialCommand(c, row as api.Material)"><el-button link :icon="MoreFilled" aria-label="更多物料操作" /><template #dropdown><el-dropdown-menu><el-dropdown-item command="toggle">{{ row.enabled ? '停用物料' : '启用物料' }}</el-dropdown-item><el-dropdown-item command="delete" divided>删除物料</el-dropdown-item></el-dropdown-menu></template></el-dropdown></template></el-table-column>
             <template #empty><el-empty description="暂无物料，点击「新增物料」录入料号与规格" /></template>
           </el-table>
-          <el-pagination v-model:current-page="page" :total="total" :page-size="30" layout="total, prev, pager, next" />
+          </div>
+          <KgPagination :page="page" :size="30" :total="total" layout="total, prev, pager, next" @update:page="page = $event" />
         </el-tab-pane>
         <el-tab-pane label="图片管理" name="images">
           <div class="section-toolbar"><el-select v-model="imageFilter" style="width: 300px" @change="imagePage = 1"><el-option value="" label="全部图片" /><el-option value="unassigned" label="未关联物料" /><el-option v-if="imageFilter && imageFilter !== 'unassigned'" :value="imageFilter" :label="filterName || '当前物料'" /></el-select><el-button @click="loadImages">刷新状态</el-button><div class="spacer" /><el-button v-if="canEdit" type="primary" @click="openUpload">上传图片</el-button></div>
@@ -152,7 +155,7 @@ async function bind() { if (!selectedId.value || !binding.value) return; saving.
               <div class="image-actions"><el-button link type="primary" @click="detailImage = img; detailDialog = true">查看对比</el-button><el-button v-if="canEdit" link type="primary" @click="retry(img)">重新处理</el-button><el-dropdown v-if="canEdit" @command="(c: string) => imageCommand(c, img)"><el-button link :icon="MoreFilled" aria-label="更多图片操作" /><template #dropdown><el-dropdown-menu><el-dropdown-item command="bind">关联物料</el-dropdown-item><el-dropdown-item command="toggle">{{ img.enabled ? '停用图片' : '启用图片' }}</el-dropdown-item><el-dropdown-item command="delete" divided>删除图片</el-dropdown-item></el-dropdown-menu></template></el-dropdown></div>
             </article></div>
           </div>
-          <el-pagination v-model:current-page="imagePage" :total="imageTotal" :page-size="12" layout="total, prev, pager, next" />
+          <KgPagination :page="imagePage" :size="12" :total="imageTotal" layout="total, prev, pager, next" @update:page="imagePage = $event" />
         </el-tab-pane>
         <el-tab-pane label="检索测试" name="search" lazy><MaterialSearchPanel :key="selected.id" :library-id="selected.id" :enabled="selected.enabled" @material="showMaterialImages" /></el-tab-pane>
       </el-tabs>
@@ -190,11 +193,16 @@ async function bind() { if (!selectedId.value || !binding.value) return; saving.
   </div>
 </template>
 <style scoped>
-.material-libraries { padding: 20px; background: white; min-height: 100%; box-sizing: border-box; }
-.library-toolbar, .section-toolbar { display: flex; gap: 12px; align-items: center; margin-bottom: 20px; }
+/* 根容器纵向 flex：工具栏/页签栏固定，页签内容占满剩余高度，物料表体内部滚动、分页吸底 */
+.material-libraries { padding: 20px; background: white; height: 100%; min-height: 0; display: flex; flex-direction: column; overflow: hidden; box-sizing: border-box; }
+.library-toolbar, .section-toolbar { display: flex; gap: 12px; align-items: center; margin-bottom: 20px; flex-shrink: 0; }
 .spacer { flex: 1; }
-.setup-alert { margin-bottom: 16px; }
-.el-pagination { margin-top: 20px; justify-content: flex-end; }
+.setup-alert { margin-bottom: 16px; flex-shrink: 0; }
+.material-libraries :deep(.el-tabs) { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.material-libraries :deep(.el-tabs__header) { flex-shrink: 0; }
+.material-libraries :deep(.el-tabs__content) { flex: 1; min-height: 0; overflow: hidden; }
+.material-libraries :deep(.el-tabs__content > .el-tab-pane) { height: 100%; min-height: 0; display: flex; flex-direction: column; overflow: auto; }
+.table-fill { flex: 1; min-height: 0; }
 .image-area { min-height: 320px; }
 .image-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 16px; }
 .image-card { min-width: 0; padding: 12px; border: 1px solid var(--el-border-color-light); border-radius: 8px; }

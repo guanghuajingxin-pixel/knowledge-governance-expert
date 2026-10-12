@@ -1,6 +1,6 @@
 # 10.10.166.2 统一身份中心上线与切换手册
 
-> 状态：身份服务已在内网机跑通并完成链路验证，**人类登录仍是本地模式**（按 2026-10-09 的决定「先只上身份服务，晚点再切」）。
+> 状态：身份服务已在内网机跑通并完成链路验证，**生产服务器仍未切换人类登录**。本次仓库已补统一入口、OAuth2 Proxy、注册审批策略和 KGE Keycloak 强制配置；这些仓库变更尚未部署到服务器，现网状态不会自动改变。
 > 平台 API Key 页面（`/settings/api-keys`）现在仍会报「请先启用 Keycloak 统一认证」，因为签发与校验都以 `AUTH_PROVIDER=keycloak` 为门禁；切换它就是把下面第 3 节的开关翻开。
 
 ## 1. 当前已完成
@@ -75,6 +75,16 @@ ISSUER=https://sso.<域名>/realms/jack bash /home/jack/kc-build-scripts/verify-
 #   浏览器：https://kge.<域名>/ 统一登录 → 首登改密 → 平台配置 → API Key → 签发一个 → curl OpenAPI
 ```
 
+## 3.1 门户统一入口与注册策略
+
+本仓库提供 [`deploy/intranet/nginx-portal.conf`](../intranet/nginx-portal.conf) 作为外网入口样例。生产部署时必须先把示例主机名和证书路径换成正式值，并将门户、KGE、测评、SkillHub 的 HTTPS 主机路由到该入口；OAuth2 Proxy 配置见 [`portal/docker-compose.yml`](../../portal/docker-compose.yml)。
+
+对于已运行的 Realm，导入文件不会更新现有对象。需要手动创建 confidential OIDC 客户端 `jack-gateway`，回调地址只允许 `https://<门户域名>/oauth2/callback`，并将客户端密钥和独立随机 Cookie Secret 安全放入服务器 `portal/.env`。门户、OAuth2 Proxy、Keycloak 管理端及所有源站端口都不得直接暴露到公网。
+
+新 Realm 配置允许邮箱验证后的自助注册，但不给注册用户默认业务角色；管理员必须确认身份并授予 `kb-api` 客户端角色后，应用和网关才会放行。现有 Realm 需手动开启 `registrationAllowed`、`verifyEmail` 并配置 SMTP。钉钉作为 Keycloak 身份提供方仍需使用组织的钉钉应用凭据完成配置；本次没有伪造该外部配置。
+
+对 `8082` 测评和 `3100` SkillHub，源代码不在当前仓库。入口样例会代理它们并验证 Keycloak 会话，但正式开放前还要确认两个应用信任网关传来的身份信息或原生接入 OIDC，同时由服务器防火墙阻止源站端口直连。另需旋转仓库历史中曾出现过的数据库、XXL-Job 和运维密钥；替换代码/compose 默认值不会自动轮换现网凭据。
+
 第 4 步生效后，`/settings/api-keys` 立刻可用，不需要再改代码。
 
 ## 4. 实测踩到的坑（新环境按此顺序检查）
@@ -99,8 +109,8 @@ docker compose -f docker-compose.app.yml up -d kb-api kb-worker faq-service
 
 回滚后本地密码登录立刻恢复（业务库凭据未被改动）。代价：Keycloak 模式下签发的平台 API Key 在本地模式不被接受，需要重新接入时再切回来。若只要停掉身份服务而不影响业务：`docker compose -f /opt/kge/deploy/keycloak/docker-compose.yml stop`（`identity-db` 卷保留身份数据，禁止删卷重建）。
 
-## 6. 还没接的部分
+## 6. 仍需环境侧完成
 
-- 智能体测评、SkillHub 后端的统一登录不在本次范围，入口保留。
-- 钉钉作为登录方式需要在身份中心配身份代理（本次只把钉钉姓名用于补全账号资料）。
+- 智能体测评、SkillHub 源代码不在本仓库；需完成应用侧身份头/OIDC 校验、角色授权和源站防火墙限制。
+- 钉钉作为登录方式需要在身份中心配置身份提供方，需提供钉钉应用凭据及已登记的回调地址。
 - 逐应用知识库 ACL 未实现：持 `knowledge:retrieve` 的应用可检索所有 enabled 非素材库。

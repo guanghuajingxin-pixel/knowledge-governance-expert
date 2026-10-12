@@ -27,9 +27,9 @@ service.interceptors.response.use(
     const detail = error.response?.data?.detail
     const message = (typeof detail === 'string' ? detail : '') || error.response?.data?.message || error.message || '请求失败'
     if (error.response?.status === 401) {
-      // 登录/免登接口 401（凭证错误）：不登出/不重载，交由调用方 catch 提示或回退
+      // 登录接口 401（凭证错误）：不登出/不重载，交由调用方 catch 提示或回退
       const reqUrl = error.config?.url || ''
-      if (reqUrl.includes('/auth/login') || reqUrl.includes('/auth/dingtalk-login')) {
+      if (reqUrl.includes('/auth/login')) {
         return Promise.reject(error)
       }
       const userStore = useUserStore()

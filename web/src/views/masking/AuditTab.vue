@@ -6,6 +6,7 @@
 import { ref, reactive, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Refresh, Search } from '@element-plus/icons-vue'
+import KgPagination from '@/components/common/KgPagination.vue'
 import {
   listMaskingLogs,
   type MaskingLog,
@@ -63,7 +64,7 @@ function fmtTime(iso: string): string {
 </script>
 
 <template>
-  <div class="at-wrap">
+  <div class="at-wrap kge-fill">
     <div class="tab-intro">
       记录实际检索/问答链路中的脱敏行为：命中规则、脱敏数量、豁免与阻断；日志不含敏感原文，可放心用于治理复盘。
     </div>
@@ -84,7 +85,8 @@ function fmtTime(iso: string): string {
       </div>
     </div>
 
-    <el-table :data="logs" v-loading="loading" stripe style="width: 100%"
+    <div class="table-fill">
+    <el-table :data="logs" v-loading="loading" stripe style="width: 100%" height="100%"
       empty-text="暂无脱敏记录，实际检索/问答命中策略后自动写入">
       <el-table-column label="时间" width="165">
         <template #default="{ row }">
@@ -137,16 +139,17 @@ function fmtTime(iso: string): string {
         </template>
       </el-table-column>
     </el-table>
+    </div>
 
     <div class="pager">
-      <el-pagination
-        v-model:current-page="filters.page"
-        v-model:page-size="filters.pageSize"
+      <KgPagination
+        :page="filters.page"
+        :size="filters.pageSize"
         :total="total"
-        :page-sizes="[20, 50, 100]"
+        :sizes="[20, 50, 100]"
         layout="total, sizes, prev, pager, next"
-        @current-change="loadLogs"
-        @size-change="filters.page = 1; loadLogs()"
+        @update:page="(p: number) => { filters.page = p; loadLogs() }"
+        @update:size="(s: number) => { filters.pageSize = s; filters.page = 1; loadLogs() }"
       />
     </div>
   </div>
@@ -169,6 +172,13 @@ function fmtTime(iso: string): string {
   display: flex;
   align-items: center;
   gap: 10px;
+  flex-shrink: 0;
+}
+
+/* 表格撑满剩余高度（表体内部滚动、表头吸顶），说明/工具行/分页固定 */
+.table-fill {
+  flex: 1;
+  min-height: 0;
 }
 
 .filter-select {
@@ -203,5 +213,6 @@ function fmtTime(iso: string): string {
 .pager {
   display: flex;
   justify-content: flex-end;
+  flex-shrink: 0;
 }
 </style>

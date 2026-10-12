@@ -161,6 +161,14 @@ class ExemptionOut(ExemptionIn):
         from_attributes = True
 
 
+@router.get("/masking-exemptions/user-options", dependencies=ADMIN_ONLY)
+async def exemption_user_options(s: AsyncSession = Depends(get_session)):
+    """豁免对象下拉的启用用户选项（账户管理已上收门户，脱敏模块自带业务化用户目录）。"""
+    rows = (await s.execute(
+        select(User).where(User.is_active == True).order_by(User.username))).scalars().all()
+    return [{"id": str(u.id), "username": u.username, "role": u.role} for u in rows]
+
+
 @router.get("/masking-exemptions", response_model=list[ExemptionOut], dependencies=ADMIN_ONLY)
 async def list_exemptions(s: AsyncSession = Depends(get_session)):
     rows = (await s.execute(select(MaskingExemption).order_by(MaskingExemption.id.desc()))).scalars().all()

@@ -156,7 +156,7 @@ uv run alembic -c ../../alembic.ini upgrade head
 
 # 种子管理员
 uv run python ../../scripts/seed_admin.py
-# → admin / admin123 (super_admin)
+# → admin / REPLACE_WITH_A_STRONG_REGISTERED_ACCOUNT_PASSWORD (super_admin)
 ```
 
 ### 设计决策

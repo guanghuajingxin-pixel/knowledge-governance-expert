@@ -3,6 +3,7 @@ import { computed, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { syncSource, updatePreviewSettings } from '@/api/sync'
 import type { PreviewItem } from '@/types/sync'
+import KgPagination from '@/components/common/KgPagination.vue'
 
 const props = defineProps<{ visible: boolean; name: string; sourceId: number; items: PreviewItem[]; loading?: boolean }>()
 const emit = defineEmits<{ (e: 'update:visible', v: boolean): void; (e: 'done'): void; (e: 'refresh'): void }>()
@@ -60,16 +61,13 @@ async function confirm() {
       </el-table-column>
       <template #empty><div style="padding:20px;color:var(--el-text-color-secondary)">该目录下没有可同步的文档</div></template>
     </el-table>
-    <div style="display:flex;justify-content:flex-end;margin-top:10px">
-      <el-pagination
-        v-model:current-page="page"
-        :total="items.length"
-        :page-size="pageSize"
-        layout="total, prev, pager, next, jumper"
-        background
-        size="small"
-      />
-    </div>
+    <KgPagination
+      :page="page"
+      :size="pageSize"
+      :total="items.length"
+      layout="total, prev, pager, next"
+      @update:page="(p: number) => page = p"
+    />
     <template #footer>
       <div style="display:flex;justify-content:space-between;align-items:center;width:100%">
         <el-tooltip content="绕过缓存，重新遍历钉钉目录树（会保留已调整的开关状态）" placement="top">

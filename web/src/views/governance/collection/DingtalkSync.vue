@@ -3,6 +3,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import type { CascaderOption } from 'element-plus'
 import { listDifyDatasets, listSupportedExtensions, syncDingTalkFile, type DifyDataset } from '@/api/dify'
+import KgPagination from '@/components/common/KgPagination.vue'
 import { fileIcon } from '@/utils/file-icon'
 import { fetchDingTalkWorkspaces, fetchDingTalkNodes } from '@/api/knowledge-center'
 import type { DingTalkWorkspace, DingTalkNode } from '@/types/knowledge-center'
@@ -278,7 +279,7 @@ watch(activeTab, (tab) => {
         <Sources />
       </el-tab-pane>
       <el-tab-pane label="文档同步" name="docs" lazy>
-        <el-card shadow="never">
+        <el-card shadow="never" class="docs-card">
           <template #header>
             <div class="card-header">
               <div><b>从钉钉选择文档</b><span class="hint">选择知识库下的指定文件夹后查询，仅加载该目录的文档。</span></div>
@@ -322,14 +323,19 @@ watch(activeTab, (tab) => {
               <span class="hint">共 {{ filteredFiles.length }} 个文档</span>
               <el-input v-model="search" clearable placeholder="过滤文件名" style="width:200px; margin-left:auto" @input="page = 1" />
             </div>
-            <el-table :data="pageFiles" v-loading="loading" row-key="node_id" @selection-change="changeSelection">
+            <div class="table-fill">
+            <el-table :data="pageFiles" v-loading="loading" row-key="node_id" height="100%" @selection-change="changeSelection">
               <el-table-column type="selection" width="48" :selectable="isSyncable" />
               <el-table-column prop="name" label="文档名称" min-width="300" show-overflow-tooltip><template #default="{ row }"><div class="doc-name-cell"><img class="file-ico" :src="fileIcon(row.name)" alt="" />{{ row.name }}</div></template></el-table-column>
               <el-table-column label="格式" width="90"><template #default="{ row }"><el-tag size="small" :type="isSyncable(row) ? 'success' : 'info'">{{ (row.extension || '—').toUpperCase() }}</el-tag></template></el-table-column>
               <el-table-column label="大小" width="100"><template #default="{ row }">{{ formatSize(row.size) }}</template></el-table-column>
               <el-table-column label="同步状态" width="100"><template #default="{ row }"><el-tag size="small" :type="isSyncable(row) ? 'success' : 'warning'">{{ isSyncable(row) ? '可同步' : '暂不支持' }}</el-tag></template></el-table-column>
             </el-table>
-            <div class="pagination"><el-pagination v-model:current-page="page" v-model:page-size="size" :total="filteredFiles.length" :page-sizes="[20, 50, 100]" layout="total, sizes, prev, pager, next" /></div>
+            </div>
+            <KgPagination :page="page" :size="size" :total="filteredFiles.length" :sizes="[20, 50, 100]"
+                          layout="total, sizes, prev, pager, next"
+                          @update:page="(p: number) => (page = p)"
+                          @update:size="(s: number) => { size = s; page = 1 }" />
           </template>
           <div v-if="results.length" class="result-list"><div v-for="item in results" :key="item.name" :class="['result', item.ok ? 'success' : 'failed']">{{ item.ok ? '✓' : '×' }} <b>{{ item.name }}</b> · {{ item.message }}</div></div>
         </el-card>
@@ -343,12 +349,19 @@ watch(activeTab, (tab) => {
 .doc-name-cell { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .file-ico { width: 22px; height: 22px; flex: none; object-fit: contain; }
 .sync-tabs :deep(.el-tabs__item) { font-size: 15px; font-weight: 600; }
+/* 页签 pane 纵向 flex：内部列表组件（kge-fill）/卡片得以撑满 pane 高度 */
+.sync-tabs :deep(.el-tab-pane) { display: flex; flex-direction: column; }
+/* 「文档同步」卡片撑满页签：头部/配置区/分页固定，表格撑满剩余高度（表体内部滚动、表头吸顶） */
+.docs-card { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+.docs-card :deep(.el-card__header) { flex-shrink: 0; }
+.docs-card :deep(.el-card__body) { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+.docs-card :deep(.el-card__body > *) { flex-shrink: 0; }
+.docs-card :deep(.el-card__body > .table-fill) { flex: 1; min-height: 0; }
 .card-header { display:flex; align-items:center; justify-content:space-between; gap:16px; }
 .hint { margin-left: 10px; color: var(--el-text-color-secondary); font-size: 12px; }
 .target-actions, .filters { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
 .filters { margin-bottom:12px; }
 .list-meta { display:flex; align-items:center; gap:12px; margin-bottom:10px; font-size:13px; }
-.pagination { display:flex; justify-content:flex-end; margin-top:12px; }
 .result-list { margin-top:16px; }
 .result { padding:9px 12px; border-radius:6px; margin-top:6px; font-size:13px; }
 .result.success { color:#166534; background:#f0fdf4; }

@@ -187,8 +187,9 @@ onMounted(() => {
         </el-form-item>
       </el-form>
 
-      <!-- 文档表（border 开启表头列宽拖拽） -->
-      <el-table :data="items" v-loading="loading" size="small" border row-key="id">
+      <!-- 文档表（border 开启表头列宽拖拽；撑满剩余高度，表体内部滚动） -->
+      <div class="table-fill">
+      <el-table :data="items" v-loading="loading" size="small" border row-key="id" height="100%">
         <el-table-column label="知识标题" min-width="280" show-overflow-tooltip>
           <template #default="{ row }">
             <div class="doc-name">
@@ -242,6 +243,7 @@ onMounted(() => {
           </el-empty>
         </template>
       </el-table>
+      </div>
 
       <KgPagination :page="page" :size="size" :total="total" :sizes="[20, 50, 100]"
                     layout="total, sizes, prev, pager, next"
@@ -273,12 +275,22 @@ onMounted(() => {
 </template>
 
 <style scoped>
-.kc-page {
-  overflow: auto;
-}
-
+/* 卡片撑满页面剩余高度：筛选栏/分页固定，表格撑满（表体内部滚动、表头吸顶） */
 .kc-card {
   border-radius: 12px;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.kc-card :deep(.el-card__body) {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 /* 筛选栏：flex 布局 + 查询/重置按钮组靠右（与其他列表页统一） */
@@ -286,6 +298,12 @@ onMounted(() => {
   display: flex;
   flex-wrap: wrap;
   align-items: flex-start;
+  flex-shrink: 0;
+}
+
+.table-fill {
+  flex: 1;
+  min-height: 0;
 }
 
 .filter-bar :deep(.el-form-item) {

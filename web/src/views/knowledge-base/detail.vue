@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Refresh } from '@element-plus/icons-vue'
 import PageContainer from '@/components/common/PageContainer.vue'
+import KgPagination from '@/components/common/KgPagination.vue'
 import DirectoryTree from '@/components/kb/DirectoryTree.vue'
 import AddKnowledgeDialog from '@/components/kb/AddKnowledgeDialog.vue'
 import StatusTag from '@/components/common/StatusTag.vue'
@@ -21,7 +22,7 @@ const kb = ref<KnowledgeBase | null>(null)
 const documents = ref<Document[]>([])
 const total = ref(0)
 const page = ref(1)
-const size = ref(10)
+const size = ref(20)
 const loading = ref(false)
 const selectedDirectory = ref<string | null>(null)
 const addKnowledgeVisible = ref(false)
@@ -54,6 +55,12 @@ function handleDirectorySelect(dirId: string | null) {
 
 function handlePageChange(p: number) {
   page.value = p
+  fetchDocuments()
+}
+
+function handleSizeChange(s: number) {
+  size.value = s
+  page.value = 1
   fetchDocuments()
 }
 
@@ -94,7 +101,8 @@ onMounted(() => {
     <div class="detail-layout">
       <DirectoryTree :kb-id="kbId" @select="handleDirectorySelect" />
       <div class="doc-section">
-        <el-table :data="documents" v-loading="loading" style="width: 100%">
+        <div class="table-fill">
+        <el-table :data="documents" v-loading="loading" height="100%" style="width: 100%">
           <el-table-column prop="original_filename" label="文件名" min-width="200" show-overflow-tooltip />
           <el-table-column prop="file_type" label="类型" width="80" />
           <el-table-column label="大小" width="100">
@@ -116,15 +124,15 @@ onMounted(() => {
             </template>
           </el-table-column>
         </el-table>
-        <el-pagination
-          v-if="total > size"
-          class="pagination"
-          background
-          layout="total, prev, pager, next"
+        </div>
+        <KgPagination
+          :page="page"
+          :size="size"
           :total="total"
-          :page-size="size"
-          :current-page="page"
-          @current-change="handlePageChange"
+          :sizes="[20, 50, 100]"
+          layout="total, sizes, prev, pager, next"
+          @update:page="handlePageChange"
+          @update:size="handleSizeChange"
         />
       </div>
     </div>
@@ -133,7 +141,10 @@ onMounted(() => {
 </template>
 
 <style scoped>
-.detail-layout { display: flex; gap: 16px; }
-.doc-section { flex: 1; }
-.pagination { margin-top: 16px; justify-content: flex-end; }
+/* 表格撑满剩余高度（表体内部滚动、表头吸顶），分页固定吸底；目录树满高内部滚动 */
+.page-container :deep(.page-content) { display: flex; flex-direction: column; }
+.detail-layout { display: flex; gap: 16px; flex: 1; min-height: 0; }
+.doc-section { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.table-fill { flex: 1; min-height: 0; }
+.page-container :deep(.directory-tree) { overflow: auto; }
 </style>

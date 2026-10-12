@@ -19,8 +19,10 @@ cd services/faq-service && uv sync
 
 # 4. Init DB + seed admin user
 cd services/kb-common && uv run alembic -c ../../alembic.ini upgrade head
-cd services/kb-common && uv run python ../../scripts/seed_admin.py
-# → admin / admin123
+cd services/kb-common
+read -s KGE_BOOTSTRAP_ADMIN_PASSWORD && export KGE_BOOTSTRAP_ADMIN_PASSWORD
+uv run python ../../scripts/seed_admin.py
+unset KGE_BOOTSTRAP_ADMIN_PASSWORD
 
 # 5. Start 3 application processes (separate terminals)
 cd services/kb-api && uv run uvicorn app.main:app --reload --port 8000

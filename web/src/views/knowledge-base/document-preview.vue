@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ArrowLeft } from '@element-plus/icons-vue'
 import PageContainer from '@/components/common/PageContainer.vue'
 import StatusTag from '@/components/common/StatusTag.vue'
+import KgPagination from '@/components/common/KgPagination.vue'
 import { getDocument, getDocumentSegments } from '@/api/document'
 import type { Document, Segment } from '@/types/document'
 import { formatFileSize, formatDate } from '@/utils/format'
@@ -17,7 +18,7 @@ const doc = ref<Document | null>(null)
 const segments = ref<Segment[]>([])
 const total = ref(0)
 const page = ref(1)
-const size = ref(10)
+const size = ref(20)
 const loading = ref(false)
 
 async function fetchDoc() {
@@ -73,15 +74,14 @@ onMounted(() => {
         <div class="seg-content">{{ seg.content }}</div>
       </div>
     </div>
-    <el-pagination
-      v-if="total > size"
-      class="pagination"
-      background
-      layout="total, prev, pager, next"
+    <KgPagination
+      :page="page"
+      :size="size"
       :total="total"
-      :page-size="size"
-      :current-page="page"
-      @current-change="handlePageChange"
+      :sizes="[20, 50, 100]"
+      layout="total, sizes, prev, pager, next"
+      @update:page="handlePageChange"
+      @update:size="(s: number) => { size = s; page = 1; fetchSegments() }"
     />
   </PageContainer>
 </template>
@@ -93,5 +93,4 @@ onMounted(() => {
 .seg-index { font-weight: 600; color: var(--el-color-primary); }
 .seg-meta { font-size: 12px; color: #909399; }
 .seg-content { padding: 16px; font-size: 14px; line-height: 1.8; color: #303133; white-space: pre-wrap; }
-.pagination { margin-top: 16px; justify-content: flex-end; }
 </style>

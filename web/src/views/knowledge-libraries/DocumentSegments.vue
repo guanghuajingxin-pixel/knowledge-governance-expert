@@ -13,6 +13,7 @@ import { rewriteChunkImages } from '@/utils/chunk-images'
 import { useTabsStore } from '@/stores/tabs'
 import ParsedContentView from '@/components/common/ParsedContentView.vue'
 import ChunkEnhancements from '@/components/library/ChunkEnhancements.vue'
+import KgPagination from '@/components/common/KgPagination.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -316,7 +317,7 @@ onMounted(() => { loadMeta(); load() })
             <div v-if="chunk.important_keywords?.length" class="hint">关键词：{{ chunk.important_keywords.join('、') }}</div>
           </article>
         </div>
-        <el-pagination v-if="total > 20" :current-page="page" :page-size="20" :total="total" layout="prev, pager, next, total" @current-change="p => { page = p; load() }" />
+        <KgPagination :page="page" :size="20" :total="total" layout="total, prev, pager, next" @update:page="(p: number) => { page = p; load() }" />
       </div>
 
       <!-- 右侧：源文件预览面板 -->
@@ -430,7 +431,6 @@ onMounted(() => { loadMeta(); load() })
 .child-content :deep(img) { max-width: 100%; border-radius: 4px; }
 .child-content :deep(table) { border-collapse: collapse; }
 .child-content :deep(td), .child-content :deep(th) { border: 1px solid var(--el-border-color-lighter); padding: 4px; }
-.el-pagination { margin-top: 16px; justify-content: flex-end; }
 
 /* 右侧预览面板 */
 .preview-col {

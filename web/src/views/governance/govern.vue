@@ -3,6 +3,7 @@ import { onMounted, ref, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import KnowledgeGaps from './components/KnowledgeGaps.vue'
+import KgPagination from '@/components/common/KgPagination.vue'
 import { useUserStore } from '@/stores/user'
 import {
   getStandards, createStandard, updateStandard, deleteStandard,
@@ -21,6 +22,10 @@ const activeTab = ref('gaps')
 // ===== 列表数据 =====
 const standards = ref<StandardDoc[]>([])
 const standardsLoading = ref(false)
+// 标准列表前端分页（接口一次返回全量，这里按页切片展示）
+const stdPage = ref(1)
+const stdSize = ref(20)
+const pagedStandards = computed(() => standards.value.slice((stdPage.value - 1) * stdSize.value, stdPage.value * stdSize.value))
 
 async function loadStandards() {
   standardsLoading.value = true
@@ -264,7 +269,8 @@ const canSubmit = (row: any) => ['draft', 'rejected'].includes(row.status)
               </div>
             </div>
           </template>
-          <el-table :data="standards" v-loading="standardsLoading" style="width: 100%">
+          <div class="table-fill">
+          <el-table :data="pagedStandards" v-loading="standardsLoading" style="width: 100%" height="100%">
             <el-table-column prop="doc_type" label="文档类型" min-width="150" show-overflow-tooltip />
             <el-table-column prop="code" label="类型编号" width="170" show-overflow-tooltip />
             <el-table-column prop="version" label="版本号" width="90" />
@@ -299,6 +305,11 @@ const canSubmit = (row: any) => ['draft', 'rejected'].includes(row.status)
               </template>
             </el-table-column>
           </el-table>
+          </div>
+          <KgPagination :page="stdPage" :size="stdSize" :total="standards.length" :sizes="[20, 50, 100]"
+                        layout="total, sizes, prev, pager, next"
+                        @update:page="(p: number) => (stdPage = p)"
+                        @update:size="(s: number) => { stdSize = s; stdPage = 1 }" />
         </el-card>
       </el-tab-pane>
     </el-tabs>
@@ -394,7 +405,16 @@ const canSubmit = (row: any) => ['draft', 'rejected'].includes(row.status)
 </template>
 
 <style scoped>
-.card { margin-bottom: 16px; }
+/* 「治理标准」卡片撑满页签：头部/分页固定，表格撑满剩余高度（表体内部滚动、表头吸顶） */
+.card {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.card :deep(.el-card__header) { flex-shrink: 0; }
+.card :deep(.el-card__body) { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+.card .table-fill { flex: 1; min-height: 0; }
 .card-header { display: flex; align-items: center; justify-content: space-between; }
 .src { display: flex; align-items: center; gap: 8px; }
 .tip { font-size: 12px; color: #909399; margin-top: -8px; }

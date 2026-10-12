@@ -27,6 +27,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox, type UploadInstance } from 'element-plus'
 import { marked } from 'marked'
 import request from '@/api/request'
+import KgPagination from '@/components/common/KgPagination.vue'
 import {
   Connection,
   Delete,
@@ -517,6 +518,15 @@ const filteredQueue = computed(() =>
     return true
   }),
 )
+
+// 队列前端分页（本地任务视图切片展示）；筛选变化回到第 1 页
+const queuePage = ref(1)
+const queueSize = ref(20)
+const pagedQueue = computed(() => {
+  const start = (queuePage.value - 1) * queueSize.value
+  return filteredQueue.value.slice(start, start + queueSize.value)
+})
+watch(queueFilter, () => { queuePage.value = 1 })
 
 function isTerminal(st: string): boolean {
   return st === 'completed' || st === 'partial' || st === 'failed' || st === 'canceled'
@@ -1263,7 +1273,7 @@ onBeforeUnmount(() => {
         </div>
 
         <el-table
-          :data="filteredQueue"
+          :data="pagedQueue"
           size="small"
           :empty-text="jobRows.length ? '无匹配任务：调整筛选条件' : '队列为空：到「解析测试」上传文件提交任务'"
           max-height="520"
@@ -1371,6 +1381,16 @@ onBeforeUnmount(() => {
             </template>
           </el-table-column>
         </el-table>
+
+        <KgPagination
+          :page="queuePage"
+          :size="queueSize"
+          :total="filteredQueue.length"
+          :sizes="[20, 50, 100]"
+          layout="total, sizes, prev, pager, next"
+          @update:page="(p: number) => queuePage = p"
+          @update:size="(s: number) => { queueSize = s; queuePage = 1 }"
+        />
       </el-tab-pane>
     </el-tabs>
   </div>

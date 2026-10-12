@@ -21,7 +21,7 @@ def origin(value):
     return value.rstrip('/')
 
 
-def realm_config(portal, knowledge):
+def realm_config(portal, knowledge, gateway_secret):
     clients = []
     for client_id, app_origin in [('jack-portal', origin(portal)), ('knowledge-web', origin(knowledge))]:
         clients.append({
@@ -40,9 +40,20 @@ def realm_config(portal, knowledge):
         })
     clients.append({'clientId': 'kb-api', 'name': '知识治理 API 权限', 'protocol': 'openid-connect',
                     'bearerOnly': True, 'standardFlowEnabled': False, 'directAccessGrantsEnabled': False})
+    clients.append({
+        'clientId': 'jack-gateway', 'name': '小杰门户统一入口',
+        'protocol': 'openid-connect', 'publicClient': False,
+        'clientAuthenticatorType': 'client-secret', 'secret': gateway_secret,
+        'standardFlowEnabled': True, 'directAccessGrantsEnabled': False,
+        'implicitFlowEnabled': False, 'serviceAccountsEnabled': False,
+        'redirectUris': [origin(portal) + '/oauth2/callback'],
+        'webOrigins': [origin(portal)],
+        'defaultClientScopes': ['basic', 'web-origins', 'roles', 'profile', 'email'],
+    })
     return {
         'realm': 'jack', 'displayName': '杰克科技 · 统一身份中心', 'enabled': True,
-        'sslRequired': 'external', 'registrationAllowed': False, 'loginWithEmailAllowed': True,
+        'sslRequired': 'external', 'registrationAllowed': True, 'verifyEmail': True,
+        'loginWithEmailAllowed': True,
         'duplicateEmailsAllowed': False, 'resetPasswordAllowed': True, 'rememberMe': True,
         'bruteForceProtected': True, 'accessTokenLifespan': 120,
         'ssoSessionIdleTimeout': 1800, 'ssoSessionMaxLifespan': 28800,
@@ -63,12 +74,22 @@ def realm_config(portal, knowledge):
 def main():
     env_path = ROOT / '.env'
     if not env_path.exists():
-        content = (ROOT / '.env.example').read_text().replace('replace-with-random-secret', secrets.token_urlsafe(32)).replace('replace-with-another-random-secret', secrets.token_urlsafe(32))
+        content = (ROOT / '.env.example').read_text()
+        content = content.replace('replace-with-random-secret', secrets.token_urlsafe(32))
+        content = content.replace('replace-with-another-random-secret', secrets.token_urlsafe(32))
+        content = content.replace('replace-with-random-gateway-client-secret', secrets.token_urlsafe(32))
         with env_path.open('x') as file:
             os.chmod(env_path, 0o600)
             file.write(content)
     env = dict(line.split('=', 1) for line in env_path.read_text().splitlines() if line and not line.startswith('#'))
-    data = realm_config(os.getenv('PORTAL_ORIGIN', env['PORTAL_ORIGIN']), os.getenv('KNOWLEDGE_ORIGIN', env['KNOWLEDGE_ORIGIN']))
+    if not env.get('GATEWAY_CLIENT_SECRET') or env['GATEWAY_CLIENT_SECRET'].startswith('replace-'):
+        secret = secrets.token_urlsafe(32)
+        with env_path.open('a') as file:
+            file.write(f'\nGATEWAY_CLIENT_SECRET={secret}\n')
+        env['GATEWAY_CLIENT_SECRET'] = secret
+    data = realm_config(os.getenv('PORTAL_ORIGIN', env['PORTAL_ORIGIN']),
+                        os.getenv('KNOWLEDGE_ORIGIN', env['KNOWLEDGE_ORIGIN']),
+                        env['GATEWAY_CLIENT_SECRET'])
     output = ROOT / 'import' / 'jack-realm.json'
     output.parent.mkdir(exist_ok=True)
     with output.open('x') as file:

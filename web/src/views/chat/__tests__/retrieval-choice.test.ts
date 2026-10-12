@@ -10,7 +10,6 @@ vi.mock('@/api/chat', () => ({ streamChat: vi.fn(), cancelChat: vi.fn() }))
 vi.mock('@/api/knowledge-center', () => ({ listKnowledgeSources: vi.fn().mockResolvedValue([]) }))
 vi.mock('@/api/settings', () => ({ listEnabledLlmModels: vi.fn().mockResolvedValue({ models: [] }) }))
 vi.mock('@/api/agent', () => ({ getGreeting: vi.fn().mockResolvedValue({ models: ['test-model'], long_memory_enabled: true }) }))
-vi.mock('@/api/auth', () => ({ getDingtalkConfig: vi.fn(), dingtalkLogin: vi.fn() }))
 vi.mock('@/api/qa', () => ({ submitFeedback: vi.fn(), ERROR_TYPES: [] }))
 vi.mock('@/api/chat-sessions', () => ({
   listChatSessions: vi.fn().mockImplementation(async () => []),

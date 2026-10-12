@@ -3,9 +3,10 @@
  * 敏感词典：脱敏策略的词典识别来源（复用 sensitive_items）。
  * 在策略里勾选「敏感词典」类型后，命中此处的词条会被识别为对应实体类型并按策略动作脱敏。
  */
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Refresh, Edit, Delete, Search } from '@element-plus/icons-vue'
+import KgPagination from '@/components/common/KgPagination.vue'
 import {
   listSensitiveItems,
   createSensitiveItem,
@@ -28,6 +29,15 @@ const filteredItems = computed(() => {
   if (kw) list = list.filter((i) => i.content.toLowerCase().includes(kw))
   return list
 })
+
+// 前端分页（接口一次返回全量，这里按页切片展示）；筛选/关键词变化回到第 1 页
+const page = ref(1)
+const size = ref(20)
+const pagedItems = computed(() => {
+  const start = (page.value - 1) * size.value
+  return filteredItems.value.slice(start, start + size.value)
+})
+watch([filterType, keyword], () => { page.value = 1 })
 
 async function loadItems() {
   loading.value = true
@@ -141,7 +151,7 @@ function fmtTime(iso: string): string {
 </script>
 
 <template>
-  <div class="dt-wrap">
+  <div class="dt-wrap kge-fill">
     <div class="tab-intro">
       登记企业敏感词条（客户名、项目代号、内部编号等），作为策略「敏感词典」识别方式的来源；
       条目仅在此维护，是否脱敏、如何脱敏由策略页控制。
@@ -165,11 +175,13 @@ function fmtTime(iso: string): string {
       </div>
     </div>
 
+    <div class="table-fill">
     <el-table
-      :data="filteredItems"
+      :data="pagedItems"
       v-loading="loading"
       stripe
       style="width: 100%"
+      height="100%"
       empty-text="暂无词条，点击「添加词条」登记"
     >
       <el-table-column prop="content" label="词条内容" min-width="260" show-overflow-tooltip>
@@ -209,6 +221,17 @@ function fmtTime(iso: string): string {
         </template>
       </el-table-column>
     </el-table>
+    </div>
+
+    <KgPagination
+      :page="page"
+      :size="size"
+      :total="filteredItems.length"
+      :sizes="[20, 50, 100]"
+      layout="total, sizes, prev, pager, next"
+      @update:page="(p: number) => page = p"
+      @update:size="(s: number) => { size = s; page = 1 }"
+    />
 
     <el-dialog
       v-model="dialogVisible"
@@ -268,6 +291,18 @@ function fmtTime(iso: string): string {
   align-items: center;
   gap: 12px;
   flex-wrap: wrap;
+  flex-shrink: 0;
+}
+
+/* 表格撑满剩余高度（表体内部滚动、表头吸顶），说明/工具行/分页固定 */
+.table-fill {
+  flex: 1;
+  min-height: 0;
+}
+
+.dt-wrap > .kg-pagination {
+  flex-shrink: 0;
+  margin-top: 0;
 }
 
 .filter-label {

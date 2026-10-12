@@ -51,15 +51,15 @@ KB_API_TARGET=http://127.0.0.1:8015 FAQ_API_TARGET=http://127.0.0.1:8016 pnpm de
 
 ## 角色和账号管理
 
-在 Keycloak「Users → 用户 → Role mapping」分配 **kb-api 客户端角色**：`viewer`、`editor`、`admin`、`super_admin`。应用只信任这一客户端下的角色；其他客户端或 Realm 同名角色不会提升应用权限。未分配任何业务角色的账号默认拒绝访问，不自动赋予管理员。
+新生成的 Realm 允许自助注册并要求验证邮箱；请先配置企业 SMTP。注册仅创建身份中心账号，不自动分配任何业务角色。管理员在确认员工身份后，在 Keycloak「Users → 用户 → Role mapping」分配 **kb-api 客户端角色**：`viewer`、`editor`、`admin`、`super_admin`。未分配业务角色的账号会被应用和统一入口拒绝，不能因为注册成功直接访问系统。
 
-管理员在门户「企业账号 → 管理统一账号」或知识治理专家「用户管理 → 打开账号管理」维护账号。业务管理员与身份中心管理员是两个授权维度：业务 `admin`/`super_admin` 仅控制应用权限及入口可见性；操作 Keycloak 用户仍需单独授予 `realm-management` 中相应管理角色。本机初始化账号只授予 manage-users、view-users、query-users、view-clients、query-groups，不赋予 master Realm 管理权限。
+管理员在门户「企业账号 → 管理统一账号」维护账号（知识治理专家侧的用户管理页面已随账户管理上收移除）。业务管理员与身份中心管理员是两个授权维度：业务 `admin`/`super_admin` 仅控制应用权限及入口可见性；操作 Keycloak 用户仍需单独授予 `realm-management` 中相应管理角色。本机初始化账号只授予 manage-users、view-users、query-users、view-clients、query-groups，不赋予 master Realm 管理权限。
 
 统一认证启用后：
 
 - 本地密码登录、改密、设密、钉钉直接签发 JWT、本地账号增删改停止工作，返回明确的身份中心引导。
 - 旧本地 JWT 和旧 API Key 均不能访问接口；旧 API Key 不检查身份中心停用状态，因此不能作为绕过中央认证的入口。需要程序化访问时，应另行设计并授权服务账号。本次没有自动创建服务账号或扩大权限。
-- 原钉钉身份绑定保持不变，继续用于知识检索身份映射；如需钉钉作为登录方式，应后续在身份中心配置身份代理。
+- 原钉钉身份绑定保持不变，继续用于知识检索身份映射。钉钉作为身份中心登录源仍需管理员在 Keycloak 配置钉钉身份提供方、回调和账号匹配规则；本地钉钉绑定不等于钉钉 SSO。
 - 停用用户、退出其他设备或更改角色后，已签发访问令牌最长仍有效 120 秒；刷新时生效。已开始的请求不被追溯撤销。前端每 15 秒检查是否需刷新，使用接口前也刷新令牌。
 - 原本地 `is_active=false` 是额外的紧急封禁，不会被 SSO 自动恢复。中央恢复账号后如仍被拒绝，需管理员检查该本地封禁。
 
@@ -96,7 +96,11 @@ uv run python ../../scripts/keycloak_accounts.py --issuer https://sso.example.co
 
 ## 正式部署
 
-先确定三个稳定 HTTPS 地址：身份中心、门户、知识治理专家。内网裸 HTTP IP 不是浏览器安全上下文，不能直接使用 PKCE；不能通过关闭浏览器安全限制解决。调整 `.env` 的 origin 与 hostname，在新环境生成 realm import，再启动身份服务。TLS 可由已有反向代理终止，Keycloak HTTP 端口应仅允许可信反向代理访问；本配置默认绑定 loopback。`KC_PROXY_HEADERS=xforwarded` 要求入口覆盖转发头。
+先确定 HTTPS 地址：身份中心、门户、知识治理专家，以及测评和 SkillHub 的入口主机。内网裸 HTTP IP 不是浏览器安全上下文，不能直接使用 PKCE。调整 `.env` 的 origin 与 hostname，在新环境生成 realm import，再启动身份服务。新生成的 Realm 会创建 confidential 客户端 `jack-gateway`，其密钥由 `prepare.py` 生成并写入权限为 600 的 `deploy/keycloak/.env`。将该密钥安全复制到 `portal/.env`，并为 OAuth2 Proxy 单独生成随机 Cookie Secret。不要把密钥写入镜像、前端构建变量或仓库。
+
+入口样例 [`deploy/intranet/nginx-portal.conf`](../intranet/nginx-portal.conf) 对门户、知识治理专家、测评和 SkillHub 的所有页面与 API 执行 Keycloak 会话检查。网关 cookie 只覆盖受控的同一组织子域。门户与 OAuth2 Proxy 容器分别只绑定 loopback；源站端口也必须通过防火墙限制为入口代理可达。
+
+已有 Realm 不会因替换 import 文件而更新。需要在管理控制台手动开启自助注册和邮箱验证，并创建 confidential 客户端 `jack-gateway`：只开启 Standard Flow、关闭 Direct Access Grants 和 Implicit Flow，回调地址精确设为 `https://<门户域名>/oauth2/callback`。然后把其密钥放入服务器 `portal/.env`。SMTP 未配置时，邮箱验证/密码找回无法完成。自助注册者必须经管理员确认并分配 `kb-api` 业务角色后才能进入应用。
 
 已有 Realm 不会因替换 import 文件而更新。更新客户端回调白名单等应通过管理控制台完成，禁止删除卷来重新初始化。数据库卷 `identity-db` 保存身份数据。配置 SMTP 后「忘记密码」和邀请邮件才可用。Keycloak 镜像固定 `26.7.4`，使用独立 PostgreSQL 16。
 

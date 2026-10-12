@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowDown } from '@element-plus/icons-vue'
+import KgPagination from '@/components/common/KgPagination.vue'
 import { deleteSource, listSources, previewSource, sourcesStatsAll, syncSource, updateSource } from '@/api/sync'
 import type { SourceStatsItem } from '@/api/sync'
 import type { PreviewItem, Source, SourceStats, Workspace } from '@/types/sync'
@@ -16,6 +17,10 @@ const workspaces = ref<Workspace[]>([])
 const statsMap = ref<Record<number, SourceStats>>({})
 const loading = ref(false)
 const polling = ref<number | null>(null)
+// 同步源列表前端分页（接口一次返回全量，这里按页切片展示）
+const page = ref(1)
+const size = ref(20)
+const pagedSources = computed(() => sources.value.slice((page.value - 1) * size.value, page.value * size.value))
 
 const formVisible = ref(false)
 const editingSource = ref<Source | null>(null)
@@ -209,14 +214,15 @@ onBeforeUnmount(() => { if (polling.value !== null) { window.clearInterval(polli
 </script>
 
 <template>
-  <div>
+  <div class="kge-fill">
     <div class="sec-header">
       <b class="sec-title">从钉钉选择目录</b>
       <span class="sec-hint">维护钉钉知识库目录与目标知识库的映射，每个目录可独立配置定时同步</span>
       <el-button type="primary" style="margin-left:auto" @click="openAdd">+ 新增同步任务</el-button>
     </div>
 
-    <el-table :data="sources" v-loading="loading" border size="small">
+    <div class="table-fill">
+    <el-table :data="pagedSources" v-loading="loading" border size="small" height="100%">
       <el-table-column label="名称" min-width="140">
         <template #default="{ row }"><b>{{ row.name }}</b></template>
       </el-table-column>
@@ -269,6 +275,12 @@ onBeforeUnmount(() => { if (polling.value !== null) { window.clearInterval(polli
       </el-table-column>
     <template #empty><div style="padding:24px;color:var(--el-text-color-secondary)">暂无同步任务，点击右上角新增同步任务</div></template>
     </el-table>
+    </div>
+
+    <KgPagination :page="page" :size="size" :total="sources.length" :sizes="[20, 50, 100]"
+                  layout="total, sizes, prev, pager, next"
+                  @update:page="(p: number) => (page = p)"
+                  @update:size="(s: number) => { size = s; page = 1 }" />
 
     <SourceFormDialog v-model:visible="formVisible" :source="editingSource" @saved="onSaved" />
     <PreviewDialog v-model:visible="previewVisible" :source-id="previewSourceObj?.id || 0" :name="previewSourceObj?.name || ''" :items="previewItems" :loading="previewLoading" @refresh="refreshPreview" @done="onPreviewDone" />
@@ -282,6 +294,7 @@ onBeforeUnmount(() => { if (polling.value !== null) { window.clearInterval(polli
   align-items: center;
   gap: 10px;
   margin-bottom: 12px;
+  flex-shrink: 0;
 }
 .sec-title {
   font-size: 14px;

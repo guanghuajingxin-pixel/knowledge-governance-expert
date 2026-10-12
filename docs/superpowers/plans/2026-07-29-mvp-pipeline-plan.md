@@ -430,10 +430,10 @@ from kb_common.security import hash_password
 
 async def main():
     async with SessionLocal() as s:
-        admin = User(username="admin", password_hash=hash_password("admin123"),
+        admin = User(username="admin", password_hash=hash_password("REPLACE_WITH_A_STRONG_REGISTERED_ACCOUNT_PASSWORD"),
                      role="super_admin", email="admin@kb.local")
         s.add(admin); await s.commit()
-    print("admin / admin123 created")
+    print("admin / REPLACE_WITH_A_STRONG_REGISTERED_ACCOUNT_PASSWORD created")
 
 asyncio.run(main())
 ```
@@ -461,7 +461,7 @@ def decode_jwt(token: str) -> dict:
 ```bash
 uv run python scripts/seed_admin.py
 ```
-Expected: `admin / admin123 created`。
+Expected: `admin / REPLACE_WITH_A_STRONG_REGISTERED_ACCOUNT_PASSWORD created`。
 
 - [ ] **Step 5: Commit**
 
@@ -855,7 +855,7 @@ CMD ["uv", "run", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "800
 cd services/kb-api && uv run uvicorn app.main:app --reload --port 8000
 # 另一终端
 curl -s -X POST localhost:8000/api/v1/auth/login -H 'Content-Type: application/json' \
-  -d '{"username":"admin","password":"admin123"}' | python3 -m json.tool
+  -d '{"username":"admin","password":"REPLACE_WITH_A_STRONG_REGISTERED_ACCOUNT_PASSWORD"}' | python3 -m json.tool
 ```
 Expected: 返回 `access_token`。
 
@@ -1095,7 +1095,7 @@ app.include_router(document.router)
 ```
 ```bash
 # 启动后：登录拿 token，创建 KB，上传一个 txt
-TOKEN=$(curl -s -X POST localhost:8000/api/v1/auth/login -H 'Content-Type: application/json' -d '{"username":"admin","password":"admin123"}' | python3 -c "import sys,json;print(json.load(sys.stdin)['access_token'])")
+TOKEN=$(curl -s -X POST localhost:8000/api/v1/auth/login -H 'Content-Type: application/json' -d '{"username":"admin","password":"REPLACE_WITH_A_STRONG_REGISTERED_ACCOUNT_PASSWORD"}' | python3 -c "import sys,json;print(json.load(sys.stdin)['access_token'])")
 curl -s -X POST localhost:8000/api/v1/knowledge-bases -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{"name":"测试库","kb_type":"DOCUMENT"}'
 echo "hello world, this is a test doc for RAG pipeline." > /tmp/test.txt
 curl -s -X POST "localhost:8000/api/v1/documents/upload?kb_id=<上一步id>" -H "Authorization: Bearer $TOKEN" -F 'file=@/tmp/test.txt'
@@ -2156,7 +2156,7 @@ KB_API_INTERNAL_URL=http://kb-api:8000
 set -e
 BASE=http://localhost:8000
 TOKEN=$(curl -s -X POST $BASE/api/v1/auth/login -H 'Content-Type: application/json' \
-  -d '{"username":"admin","password":"admin123"}' | python3 -c "import sys,json;print(json.load(sys.stdin)['access_token'])")
+  -d '{"username":"admin","password":"REPLACE_WITH_A_STRONG_REGISTERED_ACCOUNT_PASSWORD"}' | python3 -c "import sys,json;print(json.load(sys.stdin)['access_token'])")
 H="Authorization: Bearer $TOKEN"
 
 echo "[1/5] 创建知识库"; KB=$(curl -s -X POST $BASE/api/v1/knowledge-bases -H "$H" -H 'Content-Type: application/json' -d '{"name":"冒烟库"}' | python3 -c "import sys,json;print(json.load(sys.stdin)['id'])")

@@ -3,24 +3,33 @@
  * 豁免管理：绑定人 + 范围 + 实体类型 + 有效期，到期自动失效。
  * 豁免后该用户在对应范围内检索/问答时，相关实体类型返回明文（实际访问走脱敏审计留痕）。
  */
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Refresh, Delete } from '@element-plus/icons-vue'
+import KgPagination from '@/components/common/KgPagination.vue'
 import {
   listMaskingExemptions,
   createMaskingExemption,
   deleteMaskingExemption,
+  getExemptionUserOptions,
   type MaskingExemption,
   type EntityType,
   type ScopeType,
 } from '@/api/masking'
-import { getUsers } from '@/api/users'
 import { listKnowledgeLibraries } from '@/api/knowledge-library'
 import { listKnowledgeBases } from '@/api/knowledge-base'
 import { ENTITY_TYPES, ENTITY_LABEL, ROLE_LABEL } from './constants'
 
 const exemptions = ref<MaskingExemption[]>([])
 const loading = ref(false)
+
+// 前端分页（接口一次返回全量，这里按页切片展示）
+const page = ref(1)
+const size = ref(20)
+const pagedExemptions = computed(() => {
+  const start = (page.value - 1) * size.value
+  return exemptions.value.slice(start, start + size.value)
+})
 
 const users = ref<{ id: string; username: string; role: string }[]>([])
 const libraries = ref<{ id: number; name: string }[]>([])
@@ -58,11 +67,11 @@ onMounted(async () => {
   loadExemptions()
   try {
     const [u, libs, kbPage] = await Promise.all([
-      getUsers(1, 100),
+      getExemptionUserOptions(),
       listKnowledgeLibraries(),
       listKnowledgeBases({ page: 1, size: 100 }),
     ])
-    users.value = (u.items || []).map((x) => ({ id: x.id, username: x.username, role: x.role }))
+    users.value = u.map((x) => ({ id: x.id, username: x.username, role: x.role }))
     libraries.value = libs.map((l) => ({ id: l.id, name: l.name }))
     kbs.value = (kbPage.items || []).map((k) => ({ id: k.id, name: k.name }))
   } catch {
@@ -141,7 +150,7 @@ function fmtTime(iso: string | null): string {
 </script>
 
 <template>
-  <div class="et-wrap">
+  <div class="et-wrap kge-fill">
     <div class="tab-intro">
       豁免绑定「人 + 范围 + 实体类型 + 有效期」，到期自动失效；被豁免的实体类型在该用户检索/问答时返回明文，
       每次明文访问均记录在「脱敏审计」。请谨慎授权，并定期复核到期时间。
@@ -151,7 +160,8 @@ function fmtTime(iso: string | null): string {
       <el-button type="primary" :icon="Plus" @click="openAdd">新增豁免</el-button>
     </div>
 
-    <el-table :data="exemptions" v-loading="loading" stripe style="width: 100%"
+    <div class="table-fill">
+    <el-table :data="pagedExemptions" v-loading="loading" stripe style="width: 100%" height="100%"
       empty-text="暂无豁免，点击「新增豁免」创建">
       <el-table-column label="豁免用户" width="170" show-overflow-tooltip>
         <template #default="{ row }">
@@ -193,6 +203,17 @@ function fmtTime(iso: string | null): string {
         </template>
       </el-table-column>
     </el-table>
+    </div>
+
+    <KgPagination
+      :page="page"
+      :size="size"
+      :total="exemptions.length"
+      :sizes="[20, 50, 100]"
+      layout="total, sizes, prev, pager, next"
+      @update:page="(p: number) => page = p"
+      @update:size="(s: number) => { size = s; page = 1 }"
+    />
 
     <el-dialog v-model="dialogVisible" title="新增豁免" width="560px" :close-on-click-modal="false">
       <el-form :model="form" label-width="100px" class="et-form">
@@ -262,6 +283,18 @@ function fmtTime(iso: string | null): string {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+  flex-shrink: 0;
+}
+
+/* 表格撑满剩余高度（表体内部滚动、表头吸顶），说明/工具行/分页固定 */
+.table-fill {
+  flex: 1;
+  min-height: 0;
+}
+
+.et-wrap > .kg-pagination {
+  flex-shrink: 0;
+  margin-top: 0;
 }
 
 .tab-toolbar .el-button + .el-button {

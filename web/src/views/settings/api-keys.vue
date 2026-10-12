@@ -140,7 +140,8 @@ onBeforeUnmount(closeSecret)
       <el-button :icon="BookOpen" @click="openApiGuide('authentication')">查看调用说明</el-button>
     </div>
     <el-alert v-if="error" :title="error" type="error" :closable="false" show-icon><el-button link type="primary" @click="load">重新加载</el-button></el-alert>
-    <el-table v-loading="isLoading" :data="visibleRows" border class="keys-table">
+    <div class="table-fill">
+    <el-table v-loading="isLoading" :data="visibleRows" border height="100%" class="keys-table">
       <el-table-column prop="name" label="应用名称" min-width="200" show-overflow-tooltip />
       <el-table-column label="API Key" min-width="250">
         <template #default="{ row }">
@@ -165,6 +166,7 @@ onBeforeUnmount(closeSecret)
       </template></el-table-column>
       <template #empty><el-empty :description="error ? '服务暂不可用，请重新加载' : (rows.length ? '没有符合筛选条件的 API Key' : '尚无 API Key，点击「签发 Key」添加接入应用')" /></template>
     </el-table>
+    </div>
     <KgPagination :total="filtered.length" :page="page" :size="size" layout="total, sizes, prev, pager, next" @update:page="page = $event" @update:size="size = $event; page = 1" />
     <el-dialog v-model="dialog" :title="editId ? '重命名应用' : '签发 API Key'" width="480px" :close-on-click-modal="false" :show-close="!isSaving" :close-on-press-escape="!isSaving">
       <el-form label-width="88px" @submit.prevent="save"><el-form-item label="应用名称" required><el-input v-model="name" maxlength="100" show-word-limit placeholder="例如：售后服务系统" :disabled="isSaving" /></el-form-item><el-form-item label="访问权限"><el-tag effect="plain">知识库检索</el-tag><el-tooltip content="可检索所有已启用的非素材知识库；同一 Key 在平台内统一使用"><el-button link class="scope-help">查看范围</el-button></el-tooltip></el-form-item></el-form>
@@ -179,14 +181,16 @@ onBeforeUnmount(closeSecret)
 </template>
 
 <style scoped lang="scss">
-.api-keys-page { padding: 24px; background: var(--el-bg-color); min-height: 100%; box-sizing: border-box; }
-.filter-bar { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; }
+/* 根容器纵向 flex：过滤栏/工具栏固定，表格撑满剩余高度（表体内部滚动、表头吸顶），分页吸底 */
+.api-keys-page { padding: 24px; background: var(--el-bg-color); height: 100%; min-height: 0; display: flex; flex-direction: column; overflow: hidden; box-sizing: border-box; }
+.filter-bar { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; flex-shrink: 0; }
 .filter-bar .el-form-item { margin: 0; }
 .filter-bar .el-input { width: 256px; }
 .filter-bar .el-select { width: 144px; }
 .filter-actions { margin-left: auto; display: flex; }
-.toolbar { display: flex; justify-content: space-between; margin: 24px 0 16px; }
-.keys-table { margin-top: 16px; min-height: 320px; }
+.toolbar { display: flex; justify-content: space-between; margin: 24px 0 16px; flex-shrink: 0; }
+.el-alert { flex-shrink: 0; }
+.table-fill { flex: 1; min-height: 0; margin-top: 16px; }
 .status-cell { display: flex; gap: 8px; align-items: center; white-space: nowrap; }
 .key-cell { display: flex; gap: 4px; align-items: center; }
 .key-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: Consolas, Monaco, monospace; font-size: 12px; color: var(--el-text-color-regular); }

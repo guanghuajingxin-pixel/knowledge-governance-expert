@@ -530,8 +530,9 @@ function shortSegId(id?: string): string {
         </div>
       </div>
 
-      <!-- ③ 数据表格（border 开启表头列宽拖拽） -->
-      <el-table :data="pagedLibraries" border size="small">
+      <!-- ③ 数据表格（border 开启表头列宽拖拽）：撑满剩余高度，表体内部滚动、表头吸顶 -->
+      <div class="table-fill">
+      <el-table :data="pagedLibraries" border size="small" height="100%">
         <el-table-column prop="name" label="知识库名称" min-width="240" show-overflow-tooltip>
           <template #default="{ row }">
             <span class="lib-name">{{ row.name }}</span>
@@ -585,6 +586,7 @@ function shortSegId(id?: string): string {
           </el-empty>
         </template>
       </el-table>
+      </div>
 
       <!-- ④ 分页 -->
       <KgPagination
@@ -966,14 +968,26 @@ function shortSegId(id?: string): string {
 </template>
 
 <style scoped>
-/* 列表卡片：撑满剩余高度、内部滚动（kge-page 布局约定） */
+/* 列表卡片：撑满剩余高度（kge-page 布局约定）：过滤栏/工具栏固定，表格撑满、表体内部滚动，分页吸底 */
 .content {
   flex: 1;
   min-height: 0;
+  display: flex;
+  flex-direction: column;
   background: var(--el-bg-color);
   border-radius: 8px;
   padding: 16px;
-  overflow: auto;
+  overflow: hidden;
+}
+
+.filter-bar,
+.toolbar {
+  flex-shrink: 0;
+}
+
+.table-fill {
+  flex: 1;
+  min-height: 0;
 }
 
 /* ① 过滤栏：查询/重置按钮组靠右（§1.5 范式） */

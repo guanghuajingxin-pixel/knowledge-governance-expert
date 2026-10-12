@@ -9,11 +9,13 @@ services:
     container_name: kge-kb-api
     restart: unless-stopped
     ports:
-      - "8001:8000"
+      - "127.0.0.1:8001:8000"
       # XXL-Job 执行器回调端口（admin 回调 XXL_JOB_EXECUTOR_IP:9998 → 容器）
       - "9998:9998"
     env_file: .env.app
     environment:
+      # 认证模式开关在 .env.app 的 AUTH_PROVIDER（keycloak/local）；HTTPS 证书
+      # 就位前保持 local，切换步骤见 deploy/keycloak/INTRANET-CUTOVER.md 第 3 节。
       MINERU_LOCAL_URL: ""
       # 文档库解析引擎：留空 → 走 MinerU 云 SaaS（Key 在「模型配置」页/settings 表），
       # 非空则指向本地 mineru-kit V1（http://host:8010）。生产未部署本地 kit，故留空。
@@ -30,7 +32,7 @@ services:
     container_name: kge-deerflow
     restart: unless-stopped
     ports:
-      - "2027:2027"
+      - "127.0.0.1:2027:2027"
     env_file: .env.app
     environment:
       KB_API_URL: http://kb-api:8000
@@ -48,8 +50,10 @@ services:
     container_name: kge-faq-service
     restart: unless-stopped
     ports:
-      - "8004:8004"
+      - "127.0.0.1:8004:8004"
     env_file: .env.app
+    environment:
+      AUTH_PROVIDER: keycloak
     networks: [kge-network]
 
   kb-worker:

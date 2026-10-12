@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { formatDate } from '@/utils/format'
+import KgPagination from '@/components/common/KgPagination.vue'
 import { listSources, sourcesStatsAll, syncSource } from '@/api/sync'
 import type { Run, Source, SourceStats } from '@/types/sync'
 import type { SourceStatsItem } from '@/api/sync'
@@ -11,6 +12,10 @@ const sources = ref<Source[]>([])
 const stats = ref<Record<number, SourceStats>>({})
 const loading = ref(false)
 const polling = ref<number | null>(null)
+// 同步源列表前端分页（接口一次返回全量，这里按页切片展示）
+const page = ref(1)
+const size = ref(20)
+const pagedSources = computed(() => sources.value.slice((page.value - 1) * size.value, page.value * size.value))
 const emit = defineEmits<{ (e: 'refresh-monitor'): void }>()
 
 function lastRun(sourceId: number): Run | null { return stats.value[sourceId]?.last_run || null }
@@ -69,12 +74,13 @@ onBeforeUnmount(() => { if (polling.value !== null) window.clearInterval(polling
 </script>
 
 <template>
-  <div>
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+  <div class="kge-fill">
+    <div class="ws-header" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
       <div><h3 style="margin:0 0 4px">同步工作台</h3><div style="font-size:12px;color:var(--el-text-color-secondary)">在这里启动同步并实时查看本次结果</div></div>
       <el-button size="small" @click="refresh">刷新</el-button>
     </div>
-    <el-table :data="sources" v-loading="loading" border size="small">
+    <div class="table-fill">
+    <el-table :data="pagedSources" v-loading="loading" border size="small" height="100%">
       <el-table-column label="同步源" min-width="150"><template #default="{ row }"><b>{{ row.name }}</b></template></el-table-column>
       <el-table-column label="Dify 知识库" min-width="150" prop="dify_dataset_name" />
       <el-table-column label="文档数" width="90"><template #default="{ row }">{{ stats[row.id]?.doc_count ?? '—' }}</template></el-table-column>
@@ -85,5 +91,18 @@ onBeforeUnmount(() => { if (polling.value !== null) window.clearInterval(polling
       <el-table-column label="状态 / 操作" width="165" fixed="right"><template #default="{ row }"><StatusPill :status="lastRun(row.id)?.status || (row.enabled ? 'enabled' : 'disabled')" /><el-button size="small" link type="primary" :disabled="!row.enabled || isRunning(row.id)" @click="run(row as Source)">{{ isRunning(row.id) ? '同步中' : '立即同步' }}</el-button></template></el-table-column>
       <template #empty><div style="padding:24px;color:var(--el-text-color-secondary)">暂无同步源，请先在“同步源管理”中创建</div></template>
     </el-table>
+    </div>
+
+    <KgPagination :page="page" :size="size" :total="sources.length" :sizes="[20, 50, 100]"
+                  layout="total, sizes, prev, pager, next"
+                  @update:page="(p: number) => (page = p)"
+                  @update:size="(s: number) => { size = s; page = 1 }" />
   </div>
 </template>
+
+<style scoped>
+/* 标题行固定；表格撑满剩余高度（kge-fill 约定） */
+.ws-header {
+  flex-shrink: 0;
+}
+</style>

@@ -38,6 +38,13 @@ const docFilters = reactive({status: '', source: '', enabled: '', updated_after:
 const timeFilterCount = computed(() => [docFilters.updated_after, docFilters.trained_after].filter(Boolean).length)
 function resetDocFilters() { Object.assign(docFilters, {status: '', source: '', enabled: '', updated_after: null, trained_after: null}) }
 const visibleLibraries = computed(() => libraries.value.filter(l => l.name.includes(keyword.value)))
+// 知识库列表前端分页（接口一次返回全量，这里按页切片展示）
+const libPage = ref(1)
+const libSize = ref(20)
+const pagedLibraries = computed(() => {
+  const start = (libPage.value - 1) * libSize.value
+  return visibleLibraries.value.slice(start, start + libSize.value)
+})
 const visibleDocuments = computed(() => documents.value.filter(d => d.name.includes(keyword.value)
   && (!docFilters.status || d.status === docFilters.status)
   && (!docFilters.source || (d.source || 'local') === docFilters.source)
@@ -51,7 +58,7 @@ const pagedDocuments = computed(() => {
   const start = (docPage.value - 1) * docSize.value
   return visibleDocuments.value.slice(start, start + docSize.value)
 })
-watch(() => keyword.value, () => { docPage.value = 1 })
+watch(() => keyword.value, () => { libPage.value = 1; docPage.value = 1 })
 watch(docFilters, () => { docPage.value = 1 })
 
 // ===== 批量管理：复选框常显，选中≥1个后激活「批量管理」，下拉选择批量操作（移除需二次确认） =====
@@ -395,7 +402,8 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(timer) })
           </el-tooltip>
           <el-button type="primary" :icon="Plus" @click="openCreate()">创建知识库</el-button>
         </div>
-        <el-table :data="visibleLibraries" border empty-text="暂无文档库，点击创建知识库开始">
+        <div class="table-fill">
+          <el-table :data="pagedLibraries" border height="100%" empty-text="暂无文档库，点击创建知识库开始">
           <el-table-column label="知识库名称" min-width="240" show-overflow-tooltip><template #default="{row}"><el-button link type="primary" @click="openLibrary(row as DocumentLibrary)">{{ row.name }}</el-button></template></el-table-column>
           <el-table-column prop="description" label="描述" min-width="220" show-overflow-tooltip />
           <el-table-column prop="document_count" label="文档数" width="90" />
@@ -403,7 +411,17 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(timer) })
           <el-table-column label="创建时间" width="150"><template #default="{row}">{{ fmtTime((row as DocumentLibrary).created_at) }}</template></el-table-column>
           <el-table-column label="开放检索" width="140"><template #default="{row}"><div class="switch-line"><el-switch :model-value="row.enabled" :disabled="busy || !canPublish" :aria-label="`${row.name}开放检索`" @change="toggle(row as DocumentLibrary)" /><span>{{ row.enabled ? '已开放' : '已停用' }}</span></div></template></el-table-column>
           <el-table-column label="操作" width="145"><template #default="{row}"><el-button link type="primary" @click="openCreate(row as DocumentLibrary)">设置</el-button><el-tooltip content="先停用并清空文档后可删除空库"><el-button v-if="canPublish" link type="danger" :disabled="busy || row.enabled || row.document_count > 0" @click="removeLibrary(row as DocumentLibrary)">删除</el-button></el-tooltip></template></el-table-column>
-        </el-table>
+          </el-table>
+        </div>
+        <KgPagination
+          :page="libPage"
+          :size="libSize"
+          :total="visibleLibraries.length"
+          :sizes="[20, 50, 100]"
+          layout="total, sizes, prev, pager, next"
+          @update:page="(p: number) => libPage = p"
+          @update:size="(s: number) => { libSize = s; libPage = 1 }"
+        />
       </template>
       <template v-else>
         <!-- 库信息页头：图标 + 名称 + 元信息；右侧主操作（对齐参考稿布局） -->
@@ -496,7 +514,8 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(timer) })
             <el-button :icon="RefreshCw" :loading="loading" aria-label="刷新列表" @click="load" />
           </el-tooltip>
         </div>
-        <el-table :data="pagedDocuments" border empty-text="暂无文档，请上传文件" @selection-change="onSelectionChange">
+        <div class="table-fill">
+          <el-table :data="pagedDocuments" border height="100%" empty-text="暂无文档，请上传文件" @selection-change="onSelectionChange">
           <el-table-column type="selection" width="42" />
           <el-table-column label="文档名称" min-width="260" show-overflow-tooltip><template #default="{row}"><div class="doc-name-cell"><img class="file-ico" :src="fileIcon(row.name)" alt="" /><el-button link type="primary" :disabled="row.status === 'PARSING' || row.status === 'PENDING'" @click="goSegments(row as LibraryDocument)">{{ row.name }}</el-button></div></template></el-table-column>
           <el-table-column label="标签" min-width="220"><template #default="{row}">
@@ -529,7 +548,8 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(timer) })
               </el-dropdown>
             </div>
           </template></el-table-column>
-        </el-table>
+          </el-table>
+        </div>
         <KgPagination
           :page="docPage"
           :size="docSize"
@@ -658,7 +678,11 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(timer) })
 <style scoped>
 .document-libraries { padding: 24px; }
 p, .hint { color: #909399; font-size: 13px; }
-.content { background: white; padding: 20px; border-radius: 8px; flex: 1; min-height: 0; overflow: auto; }
+.content { background: white; padding: 20px; border-radius: 8px; flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+/* 表格撑满剩余高度（表体内部滚动、表头吸顶），工具行/分页固定 */
+.toolbar, .lib-header, .doc-toolbar { flex-shrink: 0; }
+.content > .table-fill { flex: 1; min-height: 0; }
+.content > .kg-pagination { flex-shrink: 0; margin-top: 12px; }
 .toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
 .toolbar-spacer { flex: 1; min-width: 12px; }
 .switch-line { display: flex; align-items: center; gap: 8px; white-space: nowrap; }

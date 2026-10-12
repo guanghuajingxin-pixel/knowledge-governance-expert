@@ -85,6 +85,11 @@ async def lifespan(app: FastAPI):
     from app.routes import operate
     operate.start_operate_scheduler()
 
+    # 知识缺口：每日 0 点遍历全部钉钉知识库刷新文件夹快照
+    # （看板「部门知识库上传进度」实时聚合该快照表，随刷新自动更新）
+    from app.routes import knowledge_gaps
+    knowledge_gaps.start_gap_refresh_scheduler()
+
     # 钉钉知识库 → Dify 定时增量同步调度器（按各同步源 cron 字段注册任务）
     try:
         from app.services.sync.scheduler import start_sync_scheduler

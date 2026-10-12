@@ -69,3 +69,6 @@ ragflow/
 # VitePress generated site / cache
 web/public/api-guide/
 web/api-guide/.vitepress/cache/
+
+# IDE 会话本地目录
+.trae/

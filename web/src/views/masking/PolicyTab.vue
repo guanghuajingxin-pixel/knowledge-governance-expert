@@ -21,6 +21,7 @@ import {
 } from '@/api/masking'
 import { listKnowledgeLibraries } from '@/api/knowledge-library'
 import { listKnowledgeBases } from '@/api/knowledge-base'
+import KgPagination from '@/components/common/KgPagination.vue'
 import {
   ENTITY_TYPES, ENTITY_LABEL, ACTIONS, ACTION_LABEL, ACTION_EXAMPLE,
   ROLE_OPTIONS, SCENE_OPTIONS, FAILURE_OPTIONS,
@@ -31,6 +32,14 @@ const emit = defineEmits<{ changed: [] }>()
 // ===== 列表 =====
 const policies = ref<MaskingPolicy[]>([])
 const loading = ref(false)
+
+// 前端分页（接口一次返回全量，这里按页切片展示）
+const page = ref(1)
+const size = ref(20)
+const pagedPolicies = computed(() => {
+  const start = (page.value - 1) * size.value
+  return policies.value.slice(start, start + size.value)
+})
 
 const libraries = ref<{ id: number; name: string }[]>([])
 const kbs = ref<{ id: string; name: string }[]>([])
@@ -268,7 +277,7 @@ async function handleSave() {
 </script>
 
 <template>
-  <div class="pt-wrap">
+  <div class="pt-wrap kge-fill">
     <div class="tab-intro">
       一条策略回答五个问题：对哪类用户（条件）、识别什么敏感实体（识别）、变成什么返回形态（动作）、
       在链路哪个节点生效（执行节点）、识别异常时如何兜底（失败策略）。多策略命中同一实体类型时自动取最严格动作。
@@ -278,7 +287,8 @@ async function handleSave() {
       <el-button type="primary" :icon="Plus" @click="openAdd">新建策略</el-button>
     </div>
 
-    <el-table :data="policies" v-loading="loading" stripe style="width: 100%"
+    <div class="table-fill">
+    <el-table :data="pagedPolicies" v-loading="loading" stripe style="width: 100%" height="100%"
       empty-text="暂无脱敏策略，点击「新建策略」创建">
       <el-table-column label="策略名称" min-width="200" show-overflow-tooltip>
         <template #default="{ row }">
@@ -333,6 +343,17 @@ async function handleSave() {
         </template>
       </el-table-column>
     </el-table>
+    </div>
+
+    <KgPagination
+      :page="page"
+      :size="size"
+      :total="policies.length"
+      :sizes="[20, 50, 100]"
+      layout="total, sizes, prev, pager, next"
+      @update:page="(p: number) => page = p"
+      @update:size="(s: number) => { size = s; page = 1 }"
+    />
 
     <el-dialog v-model="dialogVisible" :title="isEdit ? '编辑策略' : '新建策略'" width="720px"
       :close-on-click-modal="false" top="4vh" class="policy-dialog">
@@ -481,6 +502,18 @@ async function handleSave() {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+  flex-shrink: 0;
+}
+
+/* 表格撑满剩余高度（表体内部滚动、表头吸顶），说明/工具行/分页固定 */
+.table-fill {
+  flex: 1;
+  min-height: 0;
+}
+
+.pt-wrap > .kg-pagination {
+  flex-shrink: 0;
+  margin-top: 0;
 }
 
 .tab-toolbar .el-button + .el-button {

@@ -1,6 +1,5 @@
 import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 import { useUserStore } from '@/stores/user'
-import { sso } from '@/auth/session'
 
 const routes: RouteRecordRaw[] = [
   {
@@ -8,21 +7,6 @@ const routes: RouteRecordRaw[] = [
     name: 'Login',
     component: () => import('@/views/login/index.vue'),
     meta: { public: true },
-  },
-  {
-    // 钉钉扫码授权回调：读 ?code=&state= → /auth/dingtalk-login（已登录时改为绑定当前账号）
-    path: '/login/callback',
-    name: 'LoginCallback',
-    component: () => import('@/views/login/Callback.vue'),
-    meta: { public: true, hidden: true },
-  },
-  {
-    // 首次登录 / 管理员重置后强制设密页：独立居中布局，不挂 AppLayout
-    // allowWhenMustChange：must_change_password=true 时守卫只放行本页与公开页
-    path: '/onboarding/set-password',
-    name: 'OnboardingSetPassword',
-    component: () => import('@/views/onboarding/SetPassword.vue'),
-    meta: { title: '设置密码', hidden: true, standalone: true, allowWhenMustChange: true },
   },
   {
     // 独立问答页：全屏复用问答视图（会话历史+问答区），供新窗口/钉钉 H5 微应用接入
@@ -228,13 +212,6 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '系统配置', icon: 'Cpu', group: 'config' },
       },
       {
-        // 个人账户：所有登录角色可见（基本信息 / 钉钉绑定 / 修改密码）
-        path: 'settings/account',
-        name: 'AccountSettings',
-        component: () => import('@/views/settings/Account.vue'),
-        meta: { title: '个人账户', icon: 'User', group: 'config' },
-      },
-      {
         path: 'agent-config',
         name: 'AgentConfig',
         component: () => import('@/views/agent/config.vue'),
@@ -247,12 +224,6 @@ const routes: RouteRecordRaw[] = [
         name: 'PlatformApiKeys',
         component: () => import('@/views/settings/api-keys.vue'),
         meta: { title: 'API Key', icon: 'KeyRound', roles: ['super_admin', 'admin'], group: 'config' },
-      },
-      {
-        path: 'admin/users',
-        name: 'AdminUsers',
-        component: () => import('@/views/admin/users.vue'),
-        meta: { title: '用户管理', icon: 'Users', roles: ['super_admin', 'admin'], group: 'admin' },
       },
 
       // ===== 原有路由（保留，隐藏导航） =====
@@ -322,18 +293,7 @@ router.beforeEach((to, _from, next) => {
   }
 
   if (!userStore.token) {
-    // 独立页：钉钉内放行由视图免登；浏览器回登录页并记录回跳地址
-    if (!sso.isSso && to.meta.standalone && /DingTalk/i.test(navigator.userAgent)) {
-      next()
-      return
-    }
     next(to.meta.standalone ? `/login?redirect=${encodeURIComponent(to.fullPath)}` : '/login')
-    return
-  }
-
-  // 强制改密：首次建档 / 管理员重置密码后，除设密页（allowWhenMustChange）外一律先设密
-  if (userStore.userInfo?.must_change_password && !to.meta.allowWhenMustChange) {
-    next({ path: '/onboarding/set-password', query: { redirect: to.fullPath } })
     return
   }
 
