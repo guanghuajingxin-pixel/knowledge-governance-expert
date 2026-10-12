@@ -126,12 +126,13 @@ class SchedulerJobSyncTest(unittest.TestCase):
             self.enabled_id, self.disabled_id = self.enabled.id, self.disabled.id
         self.addCleanup(self.sql.dispose)
 
-        self.client = XxlJobAdminClient("http://127.0.0.1:18100", "admin", "123456")
+        self.client = XxlJobAdminClient("http://127.0.0.1:18100", "test-admin", "TestOnlyPass123!")
         self.patches = [
             patch.object(scheduler, "SyncSessionLocal", self.sessions),
             patch.object(scheduler, "get_admin_client", lambda: self.client),
             patch.object(scheduler, "get_settings", lambda: SimpleNamespace(
-                xxl_job_executor_appname="kge-sync-executor", xxl_job_enabled=True)),
+                xxl_job_executor_appname="kge-sync-executor", xxl_job_enabled=True,
+                sync_batch_cron="0/30 * * * * ?")),
             patch.object(scheduler, "_group_id", None),
         ]
         for p in self.patches:

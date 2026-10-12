@@ -11,7 +11,7 @@ from kb_common.rag.scoring import cosine, term_similarity
 
 def chunk(text, parent=None, ident=None):
     return NS(id=ident or uuid4(), parent_id=parent, document_id=uuid4(),
-              content=text, important_keywords=[])
+              content=text, important_keywords=[], retrieval_enhancements={})
 
 
 def session_for(rows):

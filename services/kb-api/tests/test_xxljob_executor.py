@@ -70,9 +70,11 @@ class ExecutorProtocolTest(unittest.TestCase):
         _FakeAdmin.received = {"registry": 0, "registry_value": None, "callback": []}
         fake = ThreadingHTTPServer(("127.0.0.1", 18099), _FakeAdmin)
         threading.Thread(target=fake.serve_forever, daemon=True).start()
+        # 执行器端口避开生产/本地 dev 默认的 9998，否则与在跑的 kb-api 进程冲突
+        executor_port = 18998
         with tempfile.TemporaryDirectory() as tmp:
             ex = XxlJobExecutor("http://127.0.0.1:18099", "", "test-exec",
-                                "127.0.0.1", 9998, Path(tmp))
+                                "127.0.0.1", executor_port, Path(tmp))
 
             def echo_handler(param, job_log):
                 job_log.log(f"handler echo param={param}")
@@ -82,20 +84,20 @@ class ExecutorProtocolTest(unittest.TestCase):
             try:
                 time.sleep(1.5)
                 now_ms = int(time.time() * 1000)
-                ack = _post("http://127.0.0.1:9998/run", {
+                ack = _post(f"http://127.0.0.1:{executor_port}/run", {
                     "jobId": 1, "executorHandler": "echo", "executorParams": "42",
                     "glueType": "BEAN", "logId": 1001, "logDateTim": now_ms})
                 self.assertEqual(ack["code"], 200)
-                bad = _post("http://127.0.0.1:9998/run", {
+                bad = _post(f"http://127.0.0.1:{executor_port}/run", {
                     "jobId": 2, "executorHandler": "nope", "glueType": "BEAN",
                     "logId": 1002, "logDateTim": now_ms})
                 self.assertEqual(bad["code"], 500)
-                self.assertEqual(_post("http://127.0.0.1:9998/beat", {})["code"], 200)
+                self.assertEqual(_post(f"http://127.0.0.1:{executor_port}/beat", {})["code"], 200)
 
                 deadline = time.time() + 5
                 content = ""
                 while time.time() < deadline:
-                    resp = _post("http://127.0.0.1:9998/log", {"logId": 1001, "fromLineNum": 1})
+                    resp = _post(f"http://127.0.0.1:{executor_port}/log", {"logId": 1001, "fromLineNum": 1})
                     content = resp["content"]["logContent"]
                     if "任务结束" in content:
                         break
@@ -107,7 +109,7 @@ class ExecutorProtocolTest(unittest.TestCase):
                 while time.time() < deadline and not _FakeAdmin.received["callback"]:
                     time.sleep(0.3)
                 self.assertGreaterEqual(_FakeAdmin.received["registry"], 1)
-                self.assertEqual(_FakeAdmin.received["registry_value"], "http://127.0.0.1:9998")
+                self.assertEqual(_FakeAdmin.received["registry_value"], f"http://127.0.0.1:{executor_port}")
                 self.assertTrue(any(c["logId"] == 1001 and c["handleCode"] == 200
                                     for c in _FakeAdmin.received["callback"]))
             finally:
