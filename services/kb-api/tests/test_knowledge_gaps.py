@@ -77,3 +77,59 @@ class CoverageTests(unittest.IsolatedAsyncioTestCase):
         response=gaps.csv_response([['知识Owner'],['=HYPERLINK("x")']], 'a.csv')
         self.assertTrue(response.body.startswith(b'\xef\xbb\xbf'))
         self.assertIn("'=HYPERLINK", response.body.decode('utf-8-sig'))
+
+
+class _SessionCtx:
+    """把同步构造的假 session 适配成 async with SessionLocal() 形态。"""
+    def __init__(self, session):
+        self._session = session
+
+    async def __aenter__(self):
+        return self._session
+
+    async def __aexit__(self, *args):
+        return False
+
+
+def _fake_session_factory(session):
+    """patch SessionLocal 用：SessionLocal() 调用后返回 async with 兼容对象。"""
+    return lambda: _SessionCtx(session)
+
+
+class NightlyGapRefreshTests(unittest.IsolatedAsyncioTestCase):
+    async def test_refresh_all_iterates_enabled_sources_and_skips_running(self):
+        sources = [SimpleNamespace(id=1, external_id='kb-a'),
+                   SimpleNamespace(id=2, external_id='kb-b')]
+        result = SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: sources))
+        session = SimpleNamespace(execute=AsyncMock(return_value=result))
+        gaps._refresh_state.clear()
+        gaps._refresh_state['kb-a'] = {'running': True}  # 手动刷新中 → 跳过
+
+        with patch('kb_common.clients.dingtalk_client.sync_runtime_config', AsyncMock()), \
+             patch('kb_common.clients.dingtalk_client.is_configured', lambda: True), \
+             patch('kb_common.database.SessionLocal', _fake_session_factory(session)), \
+             patch.object(gaps, '_refresh_dingtalk_folders_task', AsyncMock()) as task:
+            await gaps._refresh_all_gap_snapshots('daily')
+        # 只刷新未在跑的 kb-b（id=2）
+        task.assert_awaited_once_with(2)
+
+    async def test_refresh_all_skips_when_dingtalk_not_configured(self):
+        with patch('kb_common.clients.dingtalk_client.sync_runtime_config', AsyncMock()), \
+             patch('kb_common.clients.dingtalk_client.is_configured', lambda: False), \
+             patch.object(gaps, '_refresh_dingtalk_folders_task', AsyncMock()) as task:
+            await gaps._refresh_all_gap_snapshots('daily')
+        task.assert_not_awaited()
+
+    async def test_snapshots_stale_by_latest_fetched_at(self):
+        from datetime import datetime, timedelta
+        fresh = datetime.now()
+        stale = fresh - timedelta(days=1)
+
+        async def check(latest):
+            session = SimpleNamespace(scalar=AsyncMock(return_value=latest))
+            with patch('kb_common.database.SessionLocal', _fake_session_factory(session)):
+                return await gaps._gap_snapshots_stale()
+
+        self.assertFalse(await check(fresh))
+        self.assertTrue(await check(stale))
+        self.assertTrue(await check(None))

@@ -4,7 +4,7 @@ import csv
 import io
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile
@@ -175,6 +175,101 @@ def start_dingtalk_refresh(loop: asyncio.AbstractEventLoop, source: KnowledgeSou
     state.update(running=True, done=0, error=None, truncated=False)
     loop.create_task(_refresh_dingtalk_folders_task(source.id))
     return True
+
+
+# ===== 每日 0 点全量刷新定时任务 =====
+_gap_scheduler_started = False
+
+
+async def _refresh_all_gap_snapshots(trigger: str = "daily") -> None:
+    """顺序刷新全部已启用钉钉知识库的文件夹快照。
+
+    逐库串行执行（钉钉 wiki 接口有全局 0.4s 节流，并发只会换来 403 重试）；
+    某库正在手动刷新则跳过，单库失败不中断后续。快照表（dingtalk_folder_stats）
+    更新后，运营看板「部门知识库上传进度」接口实时聚合同一批数据，无需额外刷新。
+    """
+    from kb_common.clients import dingtalk_client
+    from kb_common.database import SessionLocal
+
+    try:
+        await dingtalk_client.sync_runtime_config()
+    except Exception as e:
+        logger.warning("钉钉配置加载失败，跳过本轮知识缺口快照刷新: %s", e)
+        return
+    if not dingtalk_client.is_configured():
+        logger.info("钉钉未配置，跳过知识缺口快照刷新")
+        return
+
+    async with SessionLocal() as s:
+        sources = (await s.execute(
+            select(KnowledgeSource).where(
+                KnowledgeSource.source_type == "dingtalk_workspace",
+                KnowledgeSource.enabled.is_(True),
+            ).order_by(KnowledgeSource.id))).scalars().all()
+    if not sources:
+        logger.info("无已启用的钉钉知识库，跳过知识缺口快照刷新")
+        return
+
+    logger.info("知识缺口快照刷新开始（%d 个知识库，trigger=%s）", len(sources), trigger)
+    ok = fail = skip = 0
+    for src in sources:
+        state = _refresh_state.setdefault(src.external_id, {})
+        if state.get("running"):  # 该库手动刷新中，跳过避免并发遍历
+            skip += 1
+            continue
+        await _refresh_dingtalk_folders_task(src.id)
+        if state.get("error"):
+            fail += 1
+        else:
+            ok += 1
+    logger.info("知识缺口快照刷新完成（trigger=%s）：成功 %d、失败 %d、跳过 %d", trigger, ok, fail, skip)
+
+
+async def _gap_snapshots_stale() -> bool:
+    """已启用钉钉知识库的快照今天还没刷新过 → 过期（0 点窗口服务宕机重启后补刷）。"""
+    today0 = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    from kb_common.database import SessionLocal
+
+    async with SessionLocal() as s:
+        latest = await s.scalar(
+            select(func.max(DingtalkFolderStat.fetched_at))
+            .join(KnowledgeSource, KnowledgeSource.external_id == DingtalkFolderStat.external_id)
+            .where(KnowledgeSource.source_type == "dingtalk_workspace",
+                   KnowledgeSource.enabled.is_(True)))
+    return latest is None or latest < today0
+
+
+async def _daily_gap_refresh_scheduler() -> None:
+    while True:
+        now = datetime.now()
+        nxt = (now + timedelta(days=1)).replace(hour=0, minute=0, second=30, microsecond=0)
+        await asyncio.sleep(max(1.0, (nxt - now).total_seconds()))
+        logger.info("每日 0 点知识缺口快照刷新启动")
+        await _refresh_all_gap_snapshots("daily")
+
+
+def start_gap_refresh_scheduler() -> None:
+    """FastAPI 启动时调用：注册每日 0 点全量刷新；快照缺今日数据则启动即补刷。
+
+    与运营看板定时统计（0 点启动，走同一全局限流）错开 20 秒；两者均为网络
+    密集型任务，夜间并行执行互不影响正确性。
+    """
+    global _gap_scheduler_started
+    if _gap_scheduler_started:
+        return
+    _gap_scheduler_started = True
+
+    async def _bootstrap() -> None:
+        await asyncio.sleep(5)  # 等 DB / 事件循环就绪
+        try:
+            if await _gap_snapshots_stale():
+                logger.info("知识缺口快照缺少今日数据，启动补刷新")
+                await _refresh_all_gap_snapshots("startup")
+        except Exception as e:
+            logger.warning("知识缺口快照补刷新失败: %s", e)
+
+    asyncio.create_task(_bootstrap())
+    asyncio.create_task(_daily_gap_refresh_scheduler())
 
 
 @router.post('/dingtalk/refresh')
