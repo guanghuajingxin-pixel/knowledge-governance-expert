@@ -145,7 +145,7 @@ class Settings(BaseSettings):
     xxl_job_enabled: bool = True
     xxl_job_admin_url: str = "http://127.0.0.1:8080/xxl-job-admin"
     xxl_job_admin_user: str = "admin"
-    xxl_job_admin_password: str = "123456"
+    xxl_job_admin_password: str = ""
     # 与 admin 的 xxl.job.accessToken 保持一致；留空表示不启用 token 校验。
     xxl_job_access_token: str = ""
     xxl_job_executor_appname: str = "kge-sync-executor"

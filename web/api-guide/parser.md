@@ -71,7 +71,7 @@ Token 有效期默认 **24 小时**（`JWT_TTL_MINUTES`，可配）；过期后�
 ```bash
 curl -s -X POST http://127.0.0.1:8000/api/v1/auth/login \
   -H 'Content-Type: application/json' \
-  -d '{"username":"admin","password":"admin123"}'
+  -d '{"username":"admin","password":"REPLACE_WITH_A_STRONG_REGISTERED_ACCOUNT_PASSWORD"}'
 # → {"access_token":"eyJhbGciOi...","token_type":"bearer","user":{...},"must_set_password":false}
 ```
 
@@ -79,7 +79,7 @@ curl -s -X POST http://127.0.0.1:8000/api/v1/auth/login \
 import requests
 
 r = requests.post("http://127.0.0.1:8000/api/v1/auth/login",
-                  json={"username": "admin", "password": "admin123"})
+                  json={"username": "admin", "password": "REPLACE_WITH_A_STRONG_REGISTERED_ACCOUNT_PASSWORD"})
 r.raise_for_status()
 token = r.json()["access_token"]
 ```
@@ -103,7 +103,7 @@ XB='X-Mineru-Base: http://127.0.0.1:8010'     # 本地引擎；云端 SaaS 改�
 
 # ① 登录换 JWT（详见「鉴权与获取 Token」）
 TOKEN=$(curl -s -X POST $KB/api/v1/auth/login -H 'Content-Type: application/json' \
-  -d '{"username":"admin","password":"admin123"}' | python3 -c 'import json,sys;print(json.load(sys.stdin)["access_token"])')
+  -d '{"username":"admin","password":"REPLACE_WITH_A_STRONG_REGISTERED_ACCOUNT_PASSWORD"}' | python3 -c 'import json,sys;print(json.load(sys.stdin)["access_token"])')
 AUTH="Authorization: Bearer $TOKEN"
 
 # ② 创建上传会话
@@ -149,7 +149,7 @@ ENGINE = "http://127.0.0.1:8010"    # 本地引擎 Base URL；云端 SaaS 改为
 
 # 登录换 JWT（admin / super_admin）
 token = requests.post(f"{KB}/api/v1/auth/login",
-                      json={"username": "admin", "password": "admin123"}).json()["access_token"]
+                      json={"username": "admin", "password": "REPLACE_WITH_A_STRONG_REGISTERED_ACCOUNT_PASSWORD"}).json()["access_token"]
 
 def hdr(extra=None):
     h = {"Authorization": f"Bearer {token}", "X-Mineru-Base": ENGINE}
@@ -563,7 +563,7 @@ API=$KB/api/v1/mineru
 
 # 0) 登录换 JWT
 TOKEN=$(curl -s -X POST $KB/api/v1/auth/login -H 'Content-Type: application/json' \
-  -d "{\"username\":\"admin\",\"password\":\"admin123\"}" \
+  -d "{\"username\":\"admin\",\"password\":\"REPLACE_WITH_A_STRONG_REGISTERED_ACCOUNT_PASSWORD\"}" \
   | python3 -c 'import json,sys;print(json.load(sys.stdin)["access_token"])')
 AUTH="Authorization: Bearer $TOKEN"
 
@@ -615,7 +615,7 @@ API = f"{KB}/api/v1/mineru"
 
 # 0) 登录换 JWT
 token = requests.post(f"{KB}/api/v1/auth/login",
-                      json={"username": "admin", "password": "admin123"}).json()["access_token"]
+                      json={"username": "admin", "password": "REPLACE_WITH_A_STRONG_REGISTERED_ACCOUNT_PASSWORD"}).json()["access_token"]
 
 def hdr(extra=None):
     h = {"Authorization": f"Bearer {token}", "X-Mineru-Base": ENGINE}

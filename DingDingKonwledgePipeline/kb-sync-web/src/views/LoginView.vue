@@ -7,8 +7,8 @@ import { errMsg } from '@/api/http'
 
 const router = useRouter()
 const auth = useAuthStore()
-const username = ref('admin')
-const password = ref('admin123')
+const username = ref('')
+const password = ref('')
 const loading = ref(false)
 
 async function doLogin() {
@@ -33,7 +33,7 @@ async function doLogin() {
       <div class="label">密码</div>
       <el-input v-model="password" type="password" show-password placeholder="请输入密码" @keyup.enter="doLogin" />
       <el-button type="primary" class="login-btn" :loading="loading" @click="doLogin">登 录</el-button>
-      <div class="login-hint">默认账号 admin / admin123 · 生产环境请修改密码</div>
+      <div class="login-hint">请使用管理员分配的账号登录</div>
     </div>
   </div>
 </template>

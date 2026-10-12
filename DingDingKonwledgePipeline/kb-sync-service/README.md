@@ -64,7 +64,7 @@ vim .env   # 填入 AppKey / AppSecret / Dify Key 等
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-访问 `http://<ip>:8000/admin` 打开管理后台，`http://<ip>:8000/docs` 查看接口文档。默认后台账号 `admin` / `admin123`（请修改）。
+访问管理后台前，必须在 `.env` 显式配置 `ADMIN_USERNAME`、强密码 `ADMIN_PASSWORD` 和至少 32 位随机 `SECRET_KEY`；缺少配置时登录接口返回 503。该服务未纳入小杰门户 OIDC 代码接入范围，生产部署必须限制为可信内网或由统一入口保护。
 
 ## 配置项（.env）
 
@@ -78,8 +78,8 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 | `DIFY_DEFAULT_PERMISSION` | 新建数据集权限 | `all_team_members` |
 | `DWS_BIN` | dws 可执行文件 | `dws` |
 | `APP_PORT` | 服务端口 | `8000` |
-| `ADMIN_USERNAME` / `ADMIN_PASSWORD` | 后台账号 | `admin` / `admin123` |
-| `SECRET_KEY` | 登录 token 盐 | `change_me` |
+| `ADMIN_USERNAME` / `ADMIN_PASSWORD` | 后台账号凭据（必须显式配置） | 空（未配置时拒绝登录） |
+| `SECRET_KEY` | 登录 token 密钥，至少 32 位随机值 | 空（未配置时拒绝登录） |
 | `DINGTALK_WEBHOOK` | 钉钉群机器人 webhook | 空（不告警） |
 | `ALERT_FAILURE_THRESHOLD` | 失败数达到该值触发告警 | `1` |
 | `DEFAULT_DELETE_POLICY` | 默认删除策略 `keep`/`sync` | `keep` |

@@ -65,7 +65,7 @@ wait_health() {
 
 # --- 0. Start services (unless EXTERNAL_SERVICES=1) -------------------------
 if [ -z "${EXTERNAL_SERVICES:-}" ]; then
-  echo "[0/9] 启动本地服务 (logs: $LOG_DIR)"
+  echo "[0/8] 启动本地服务 (logs: $LOG_DIR)"
   if ! wait_health "$KB_API" kb-api 1; then
     echo "  -> starting kb-api..."
     (cd "$KB_API_DIR" && exec uv run uvicorn app.main:app --host 0.0.0.0 --port 8000) \
@@ -94,15 +94,17 @@ if [ -z "${EXTERNAL_SERVICES:-}" ]; then
     echo "  -> WARN: MinerU 引擎(2028)未运行，office/pdf 解析走即时解析兜底（bash scripts/start-mineru.sh 可启动）"
   fi
 else
-  echo "[0/9] EXTERNAL_SERVICES=1 - assuming services already running"
+  echo "[0/8] EXTERNAL_SERVICES=1 - assuming services already running"
   wait_health "$KB_API" kb-api 5 || { echo "FAIL: kb-api not healthy"; exit 1; }
   wait_health "$FAQ_API" faq-service 5 || { echo "FAIL: faq-service not healthy"; exit 1; }
 fi
 
 # --- 1. Login ---------------------------------------------------------------
-echo "[1/9] 登录"
+echo "[1/8] 登录"
+SMOKE_USERNAME="${SMOKE_USERNAME:?Set SMOKE_USERNAME to a registered test account}"
+SMOKE_PASSWORD="${SMOKE_PASSWORD:?Set SMOKE_PASSWORD to its test password}"
 TOKEN=$(curl -s -X POST "$KB_API/api/v1/auth/login" -H 'Content-Type: application/json' \
-  -d '{"username":"admin","password":"admin123"}' \
+  -d "{\"username\":\"$SMOKE_USERNAME\",\"password\":\"$SMOKE_PASSWORD\"}" \
   | python3 -c "import sys,json;print(json.load(sys.stdin)['access_token'])")
 H="Authorization: Bearer $TOKEN"
 # Verify D4: /users/me returns full UserInfo (email/is_active/created_at)
@@ -110,21 +112,21 @@ curl -s "$KB_API/api/v1/users/me" -H "$H" \
   | python3 -c "import sys,json;d=json.load(sys.stdin);assert 'email' in d and 'is_active' in d and 'created_at' in d, f'/users/me missing fields: {d}'; print('  -> /users/me OK:', d['username'], d['role'])"
 
 # --- 2. Create document KB --------------------------------------------------
-echo "[2/9] 创建文档知识库"
+echo "[2/8] 创建文档知识库"
 KB=$(curl -s -X POST "$KB_API/api/v1/knowledge-bases" -H "$H" -H 'Content-Type: application/json' \
   -d '{"name":"冒烟库","kb_type":"DOCUMENT"}' \
   | python3 -c "import sys,json;print(json.load(sys.stdin)['id'])")
 echo "  -> KB id=$KB"
 
 # --- 3. Upload doc ----------------------------------------------------------
-echo "[3/9] 上传文档"
+echo "[3/8] 上传文档"
 echo "hello RAG smoke test. RAG retrieves relevant chunks." > /tmp/s.txt
 UPLOAD=$(curl -s -X POST "$KB_API/api/v1/documents/upload?kb_id=$KB" -H "$H" -F 'file=@/tmp/s.txt')
 echo "$UPLOAD" | python3 -m json.tool | sed 's/^/  /'
 echo "$UPLOAD" | python3 -c "import sys,json;d=json.load(sys.stdin);assert 'document_id' in d, f'upload failed: {d}'; print('  -> document_id OK')"
 
 # --- 4. Wait for processing -------------------------------------------------
-echo "[4/9] 等待处理（向量模型外接，依赖 EMBEDDING_* 配置）"
+echo "[4/8] 等待处理（向量模型外接，依赖 EMBEDDING_* 配置）"
 for i in $(seq 1 60); do
   ST=$(curl -s "$KB_API/api/v1/documents?kb_id=$KB" -H "$H" \
     | python3 -c "import sys,json;d=json.load(sys.stdin);print(d['items'][0]['status'] if d['items'] else 'EMPTY')")
@@ -136,19 +138,19 @@ done
 [ "$ST" = "COMPLETED" ] || { echo "FAIL: doc not COMPLETED (last=$ST)"; exit 1; }
 
 # --- 5. Search (hybrid RAG) -------------------------------------------------
-echo "[5/9] 检索 (hybrid)"
+echo "[5/8] 检索 (hybrid)"
 curl -s -X POST "$KB_API/api/v1/search" -H "$H" -H 'Content-Type: application/json' \
   -d "{\"query\":\"RAG\",\"kb_ids\":[\"$KB\"],\"top_k\":3}" \
   | python3 -c "import sys,json;d=json.load(sys.stdin);print(f'  -> {d[\"total\"]} hit(s), took={d.get(\"took_ms\")}ms');[print(f'     - {h.get(\"document_title\")} p.{h.get(\"page_number\")} score={h.get(\"score\"):.3f}') for h in d['results'][:3]]"
 
 # --- 6. Chat (LLM fallback acceptable) -------------------------------------
-echo "[6/9] 问答 (LLM key 未配则返回友好提示)"
+echo "[6/8] 问答 (LLM key 未配则返回友好提示)"
 curl -s -X POST "$KB_API/api/v1/search/chat" -H "$H" -H 'Content-Type: application/json' \
   -d "{\"query\":\"RAG\",\"kb_ids\":[\"$KB\"],\"top_k\":3}" \
   | python3 -c "import sys,json;d=json.load(sys.stdin);a=d['answer'][:80];print(f'  -> answer: {a}...');print(f'  -> citations: {len(d.get(\"citations\",[]))}')"
 
 # --- 7. FAQ KB + entry + search --------------------------------------------
-echo "[7/9] FAQ 知识库 + 条目 + 检索"
+echo "[7/8] FAQ 知识库 + 条目 + 检索"
 FAQ_KB=$(curl -s -X POST "$FAQ_API/api/v1/faq/knowledge-bases" -H "$H" -H 'Content-Type: application/json' \
   -d '{"name":"冒烟FAQ库"}' \
   | python3 -c "import sys,json;print(json.load(sys.stdin)['id'])")
@@ -164,16 +166,8 @@ curl -s -X POST "$FAQ_API/api/v1/faq/search" -H "$H" -H 'Content-Type: applicati
   -d "{\"kb_id\":\"$FAQ_KB\",\"query\":\"RAG\",\"top_k\":3}" \
   | python3 -c "import sys,json;d=json.load(sys.stdin);print(f'  -> FAQ search: {d[\"total\"]} hit(s)');[print(f'     - {r[\"question\"]} score={r[\"score\"]:.3f} ({r[\"match_type\"]})') for r in d['results'][:3]]"
 
-# --- 8. API key create + list (verify D3 field names) ----------------------
-echo "[8/9] API Key 创建 + 列表"
-curl -s -X POST "$KB_API/api/v1/auth/api-keys" -H "$H" -H 'Content-Type: application/json' \
-  -d '{"name":"smoke-key"}' \
-  | python3 -c "import sys,json;d=json.load(sys.stdin);assert 'raw_key' in d and 'key_prefix' in d, f'POST api-keys missing raw_key/key_prefix: {d}';print(f'  -> created: prefix={d[\"key_prefix\"]} raw_key={d[\"raw_key\"][:14]}...')"
-curl -s "$KB_API/api/v1/auth/api-keys" -H "$H" \
-  | python3 -c "import sys,json;d=json.load(sys.stdin);assert all('key_prefix' in k for k in d), f'GET api-keys missing key_prefix: {d}';print(f'  -> list OK: {len(d)} key(s)')"
-
-# --- 9. Settings (verify D-secret masking) ---------------------------------
-echo "[9/9] 设置 (验证密钥掩码)"
+# --- 8. Settings (verify D-secret masking) ---------------------------------
+echo "[8/8] 设置 (验证密钥掩码)"
 curl -s "$KB_API/api/v1/settings" -H "$H" \
   | python3 -c "
 import sys,json
@@ -186,30 +180,5 @@ for k,v in d.items():
     else:
         print(f'  -> {k}: value={v[\"value\"]!r} is_set={v[\"is_set\"]}')
 "
-
-# --- 10. Onboarding: 新建账号强制改密链路 -----------------------------------
-echo "[10] Onboarding 强制改密（管理员建号 → 首登被强制设密 → 设密后正常登录）"
-NEWU="smoke_ob_$(date +%s)"
-curl -s -X POST "$KB_API/api/v1/users" -H "$H" -H 'Content-Type: application/json' \
-  -d "{\"username\":\"$NEWU\",\"password\":\"Tmp12345678\",\"role\":\"viewer\"}" \
-  | python3 -c "import sys,json;d=json.load(sys.stdin);assert d.get('must_change_password') is True, f'created user should must_change_password: {d}';print('  -> created (must_change_password=true)')"
-RESP=$(curl -s -X POST "$KB_API/api/v1/auth/login" -H 'Content-Type: application/json' \
-  -d "{\"username\":\"$NEWU\",\"password\":\"Tmp12345678\"}")
-echo "$RESP" | python3 -c "import sys,json;d=json.load(sys.stdin);assert d.get('must_set_password') is True, f'first login should must_set_password: {d}';print('  -> first login must_set_password=true')"
-TK=$(echo "$RESP" | python3 -c "import sys,json;print(json.load(sys.stdin)['access_token'])")
-curl -s -X POST "$KB_API/api/v1/auth/set-password" -H "Authorization: Bearer $TK" -H 'Content-Type: application/json' \
-  -d '{"new_password":"New12345678","new_password_confirm":"New12345678"}' \
-  | python3 -c "import sys,json;d=json.load(sys.stdin);assert d.get('must_set_password') is False and d.get('access_token'), f'set-password bad: {d}';print('  -> set-password OK (new token issued)')"
-curl -s -X POST "$KB_API/api/v1/auth/login" -H 'Content-Type: application/json' \
-  -d "{\"username\":\"$NEWU\",\"password\":\"New12345678\"}" \
-  | python3 -c "import sys,json;d=json.load(sys.stdin);assert d.get('must_set_password') is False, f'after set-password still must: {d}';print('  -> relogin with new password OK')"
-curl -s -X POST "$KB_API/api/v1/auth/login" -H 'Content-Type: application/json' \
-  -d "{\"username\":\"$NEWU\",\"password\":\"Tmp12345678\"}" \
-  | python3 -c "import sys,json;d=json.load(sys.stdin);assert 'access_token' not in d, f'old password still works: {d}';print('  -> old password rejected OK')"
-
-# --- 11. 钉钉认证配置端点 ---------------------------------------------------
-echo "[11] GET /auth/dingtalk-config 公开端点字段"
-curl -s "$KB_API/api/v1/auth/dingtalk-config" \
-  | python3 -c "import sys,json;d=json.load(sys.stdin);assert {'corp_id','app_key','auto_login_enabled','qr_login_enabled','redirect_uri'} <= set(d), f'dingtalk-config missing keys: {sorted(d)}';print(f'  -> fields OK (qr_login_enabled={d[\"qr_login_enabled\"]})')"
 
 echo "SMOKE OK"

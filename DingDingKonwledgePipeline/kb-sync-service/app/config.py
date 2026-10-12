@@ -25,9 +25,9 @@ class Settings(BaseSettings):
     # 服务
     app_host: str = "0.0.0.0"
     app_port: int = 8000
-    admin_username: str = "admin"
-    admin_password: str = "admin123"
-    secret_key: str = "change_me"
+    admin_username: str = ""
+    admin_password: str = ""
+    secret_key: str = ""
 
     # 告警
     dingtalk_webhook: str = ""

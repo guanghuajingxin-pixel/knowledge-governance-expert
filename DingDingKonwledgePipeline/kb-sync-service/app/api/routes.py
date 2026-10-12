@@ -39,7 +39,18 @@ def _make_token(username: str, password: str) -> str:
     return hashlib.sha256(f"{username}:{password}:{settings.secret_key}".encode()).hexdigest()
 
 
+def _require_auth_configured() -> None:
+    password = settings.admin_password
+    if (not settings.admin_username or len(password) < 12 or len(password) > 64
+            or not any(char.islower() for char in password)
+            or not any(char.isupper() for char in password)
+            or not any(char.isdigit() for char in password)
+            or len(settings.secret_key) < 32):
+        raise HTTPException(status_code=503, detail="管理员认证尚未配置")
+
+
 def require_auth(authorization: str | None = Header(default=None)) -> None:
+    _require_auth_configured()
     expected = _make_token(settings.admin_username, settings.admin_password)
     token = (authorization or "").removeprefix("Bearer ").strip()
     if not token or token != expected:
@@ -87,6 +98,7 @@ def dingtalk_tree(root_node_id: str = Query(...), depth: int = Query(5, le=20)):
 
 @router.post("/auth/login", response_model=LoginResponse)
 def login(payload: LoginRequest):
+    _require_auth_configured()
     if payload.username != settings.admin_username or payload.password != settings.admin_password:
         raise HTTPException(status_code=401, detail="用户名或密码错误")
     return LoginResponse(token=_make_token(payload.username, payload.password))

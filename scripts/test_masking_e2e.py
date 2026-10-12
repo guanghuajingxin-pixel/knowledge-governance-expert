@@ -12,7 +12,9 @@ from app.main import app  # noqa: E402
 
 with TestClient(app) as c:
     # 1. 登录
-    r = c.post("/api/v1/auth/login", json={"username": "admin", "password": "admin123"})
+    username = os.environ["SMOKE_USERNAME"]
+    password = os.environ["SMOKE_PASSWORD"]
+    r = c.post("/api/v1/auth/login", json={"username": username, "password": password})
     assert r.status_code == 200, r.text
     token = r.json()["access_token"]
     H = {"Authorization": f"Bearer {token}"}
