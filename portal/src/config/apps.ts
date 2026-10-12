@@ -4,8 +4,9 @@ export const applications = [
   { id: 'skillhub', name: 'SkillHub', caption: '让好用的能力随手可得', description: '发现、复用与共享智能体技能', icon: 'Blocks', url: import.meta.env.VITE_SKILLHUB_URL || '/skillhub/' },
 ] as const
 export type AppId = typeof applications[number]['id']
-export type PageId = 'home' | AppId
+export type PageId = 'home' | AppId | 'accounts'
 export function pageFromHash(hash: string): PageId {
   const id = hash.replace(/^#\/?/, '')
+  if (id === 'accounts') return 'accounts'
   return applications.some(app => app.id === id) ? id as AppId : 'home'
 }

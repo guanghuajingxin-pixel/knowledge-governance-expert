@@ -51,9 +51,9 @@ KB_API_TARGET=http://127.0.0.1:8015 FAQ_API_TARGET=http://127.0.0.1:8016 pnpm de
 
 ## 角色和账号管理
 
-新生成的 Realm 允许自助注册并要求验证邮箱；请先配置企业 SMTP。注册仅创建身份中心账号，不自动分配任何业务角色。管理员在确认员工身份后，在 Keycloak「Users → 用户 → Role mapping」分配 **kb-api 客户端角色**：`viewer`、`editor`、`admin`、`super_admin`。未分配业务角色的账号会被应用和统一入口拒绝，不能因为注册成功直接访问系统。
+新生成的 Realm 允许自助注册并要求验证邮箱；请先配置企业 SMTP。注册仅创建身份中心账号，不自动分配任何业务角色。未分配业务角色的账号会被应用和统一入口拒绝，不能因为注册成功直接访问系统。管理员确认员工身份后，通过门户「账号管理」页分配 **kb-api 客户端角色**（`viewer`、`editor`、`admin`、`super_admin`），也可在 Keycloak「Users → Role mapping」手工分配。
 
-管理员在门户「企业账号 → 管理统一账号」维护账号（知识治理专家侧的用户管理页面已随账户管理上收移除）。业务管理员与身份中心管理员是两个授权维度：业务 `admin`/`super_admin` 仅控制应用权限及入口可见性；操作 Keycloak 用户仍需单独授予 `realm-management` 中相应管理角色。本机初始化账号只授予 manage-users、view-users、query-users、view-clients、query-groups，不赋予 master Realm 管理权限。
+管理员在门户「系统管理 → 账号管理」维护账号：新增/停用/删除账号、分配角色、重置密码（知识治理专家侧的用户管理页面已随账户管理上收移除）。该页面由 kb-api 经 `platform-key-manager` 服务账号调用 Keycloak Admin API 实现，依赖 `build/provision-platform-keys.sh` 幂等授予的 manage-users、view-users、query-users 等 `realm-management` 角色。业务管理员与身份中心管理员是两个授权维度：业务 `admin`/`super_admin` 仅控制应用权限及入口可见性。本机初始化账号只授予 manage-users、view-users、query-users、view-clients、query-groups，不赋予 master Realm 管理权限。
 
 统一认证启用后：
 

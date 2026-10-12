@@ -139,6 +139,23 @@ cd web && pnpm install && pnpm dev   # http://localhost:3000
 
 本地开发管理员的用户名默认为 `admin`；初始化时必须通过 `KGE_BOOTSTRAP_ADMIN_PASSWORD` 显式提供强密码。生产环境使用统一身份中心创建和授权管理员，不运行本地种子脚本。
 
+### 本地统一登录（复用远端身份中心，无需本地 Keycloak）
+
+`.env` 开启 `AUTH_PROVIDER=keycloak` 后，本地开发登录走远端服务器（10.10.166.2）上的 Keycloak 身份中心，本地无需运行 Keycloak 容器（`jack-identity-*` 保持停止即可）：
+
+```bash
+# 1. 建立统一登录隧道（幂等；本地 8180 → 远端 Keycloak，需能 SSH 到 10.10.166.2）
+./scripts/dev-sso-tunnel.sh          # start / stop / status
+
+# 2. 确认仓库根 .env 已配置（首次切换时添加）：
+#    AUTH_PROVIDER=keycloak
+#    OIDC_ISSUER=http://127.0.0.1:8180/realms/jack
+
+# 3. 重启 kb-api / faq-service（settings 启动时加载），前端无需改动
+```
+
+原理：远端 Keycloak 的 hostname 即 `http://127.0.0.1:8180`，与隧道本地地址一致——浏览器登录回调、后端 JWKS 拉取、token issuer 校验三者天然对齐；远端 `knowledge-web` 客户端已放行 `http://localhost:3000/*` 回调。登录账号用远端身份中心的业务账号（如 `admin`，super_admin）。首次在本地库登录某账号时若报「该用户名已有本地账号」（409），需在本地 `user_identities` 表手工补绑该身份（issuer = `http://127.0.0.1:8180/realms/jack`，subject = Keycloak 用户 UUID）。
+
 ### 模式 2：Docker 全量模式（需基础设施已启动）
 
 **前提**：基础设施（dev-services compose）必须已启动，参考模式 1 步骤 1。
