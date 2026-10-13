@@ -94,7 +94,7 @@ async def dingtalk_folder_rows(s: AsyncSession, source: KnowledgeSource) -> list
 
 
 async def all_dingtalk_folder_rows(s: AsyncSession) -> list[dict]:
-    """「全部知识库」查询：合并所有已启用钉钉知识库的文件夹快照（不含本地/Dify 目录）。"""
+    """「全部知识库」查询：合并所有已启用钉钉知识库的文件夹快照（不含本地目录）。"""
     sources = (await s.execute(
         select(KnowledgeSource).where(
             KnowledgeSource.source_type == "dingtalk_workspace",

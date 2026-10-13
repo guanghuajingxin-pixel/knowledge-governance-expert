@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
 from kb_common.database import get_session
-from kb_common.models import Setting, DifyProfile, LLMProfile, RerankProfile, RagflowProfile, EmbeddingProfile
+from kb_common.models import Setting, LLMProfile, RerankProfile, EmbeddingProfile
 from app.deps import require_role, get_principal, get_current_user
 from kb_common.config import get_settings
 from kb_common.clients import llm_client
@@ -24,11 +24,6 @@ KEYS = {
     "llm_model": ("LLM 模型名", False),
     "llm_provider": ("LLM 供应商 (deepseek/zhipu/custom)", False),
     "mineru_api_key": ("MinerU API Key", True),
-    "dify_base_url": ("Dify 服务地址", False),
-    "dify_api_key": ("Dify API Key", True),
-    "dify_upload_max_mb": ("Dify 单文件上传上限（MB）", False),
-    "ragflow_base_url": ("RAGFlow 服务地址", False),
-    "ragflow_api_key": ("RAGFlow API Key", True),
     "embedding_base_url": ("Embedding 服务地址（OpenAI 兼容 /embeddings，需含 /v1）", False),
     "embedding_api_key": ("Embedding API Key", True),
     "embedding_model": ("Embedding 模型名（如 BAAI/bge-m3）", False),
@@ -58,9 +53,7 @@ def _mask_secret(val: str) -> str:
 # ==================== 密钥回显（管理员查看/复制完整密钥） ====================
 
 PROFILE_KIND_MODELS = {
-    "dify": DifyProfile,
     "llm": LLMProfile,
-    "ragflow": RagflowProfile,
     "embedding": EmbeddingProfile,
     "rerank": RerankProfile,
 }
@@ -114,13 +107,6 @@ async def set_settings_api(body: SettingIn, u=Depends(require_role("super_admin"
                           s: AsyncSession = Depends(get_session)):
     if body.key not in KEYS:
         raise HTTPException(400, "不支持的配置项")
-    if body.key == "dify_upload_max_mb":
-        try:
-            size = int(body.value)
-            if not 1 <= size <= 1024:
-                raise ValueError()
-        except ValueError:
-            raise HTTPException(422, "上传上限必须为 1～1024 MB 的整数")
     if body.key == "site_name":
         if len(body.value) > 30:
             raise HTTPException(422, "站点名称最多 30 个字符")
@@ -148,10 +134,6 @@ async def set_settings_api(body: SettingIn, u=Depends(require_role("super_admin"
         dingtalk_client.invalidate_runtime_config()
         await dingtalk_client.sync_runtime_config()
         asyncio.create_task(dingtalk_bot.refresh_bot())
-    if body.key in ("dify_base_url", "dify_api_key"):
-        # 改了 Dify 链接/密钥：数据集列表缓存立即失效，避免最多吃 60s 旧列表
-        from app.routes.dify_route import invalidate_datasets_cache
-        invalidate_datasets_cache()
     return {"ok": True}
 
 
@@ -366,59 +348,6 @@ def _friendly_dingtalk_error(e: httpx.HTTPStatusError) -> str:
     if status >= 500:
         return f"钉钉服务端错误（{status}），请稍后重试"
     return f"连接失败（{status}）：{detail or e}"
-
-
-# ============ Dify 多配置（多条只能生效一条） ============
-
-class TestDifyIn(BaseModel):
-    base_url: str = ""
-    api_key: str = ""
-    profile_id: str = ""   # 编辑态 Key 为掩码时，回退该 profile 已存 Key
-
-
-@router.post("/test-dify")
-async def test_dify_api(body: TestDifyIn, u=Depends(require_role("super_admin", "admin")),
-                        s: AsyncSession = Depends(get_session)):
-    """Dify 连通性测试：用给定端点+Key 调 /datasets，验证地址与 Key 有效性。"""
-    base_url = body.base_url.strip().rstrip("/")
-    api_key = body.api_key.strip()
-    if (not api_key or "****" in api_key) and body.profile_id:
-        try:
-            pid = uuid.UUID(body.profile_id)
-            row = (await s.execute(select(DifyProfile).where(DifyProfile.id == pid))).scalar_one_or_none()
-            if row and row.api_key:
-                api_key = row.api_key
-        except ValueError:
-            pass
-    if not api_key:
-        api_key = await _effective_setting(s, "dify_api_key")
-    if not base_url:
-        return {"ok": False, "message": "请先填写服务地址"}
-    if not api_key:
-        return {"ok": False, "message": "请先填写 API Key"}
-
-    t0 = time.perf_counter()
-    try:
-        async with httpx.AsyncClient(timeout=20) as c:
-            r = await c.get(f"{base_url}/datasets",
-                            headers={"Authorization": f"Bearer {api_key}"},
-                            params={"page": 1, "limit": 1})
-    except Exception:
-        return {"ok": False, "message": "无法连接到服务地址（网络不通/超时/DNS 失败），请检查地址"}
-    if r.status_code == 401:
-        return {"ok": False, "message": "API Key 无效或已过期，请检查后重试"}
-    if r.status_code == 403:
-        return {"ok": False, "message": "API Key 无访问知识库权限"}
-    if r.status_code == 404:
-        return {"ok": False, "message": "端点不存在，请检查地址（需含端口与 /v1，如 http://127.0.0.1:8088/v1）"}
-    if r.status_code >= 500:
-        return {"ok": False, "message": f"Dify 服务端错误（{r.status_code}），请检查服务状态"}
-    if r.status_code != 200:
-        return {"ok": False, "message": f"连接失败（{r.status_code}）：{r.text[:120]}"}
-    total = (r.json() or {}).get("total")
-    latency_ms = int((time.perf_counter() - t0) * 1000)
-    return {"ok": True, "latency_ms": latency_ms,
-            "message": f"连接成功，可见 {total if total is not None else '?'} 个数据集"}
 
 
 class TestMinerUIn(BaseModel):
@@ -705,130 +634,6 @@ def _safe_uuid(val: str) -> uuid.UUID:
         raise HTTPException(400, "无效的配置 ID")
 
 
-def _profile_to_dict(p: DifyProfile, mask: bool = True) -> dict:
-    return {
-        "id": str(p.id),
-        "name": p.name,
-        "base_url": p.base_url,
-        "api_key": _mask_api_key(p.api_key) if mask else p.api_key,
-        "dataset_ids": p.dataset_ids,
-        "enabled": p.enabled,
-        "created_at": p.created_at.isoformat() if p.created_at else None,
-    }
-
-
-class DifyProfileIn(BaseModel):
-    name: str
-    base_url: str = ""
-    api_key: str = ""
-    dataset_ids: str = ""
-
-
-@router.get("/dify-profiles")
-async def list_dify_profiles(u=Depends(require_role("super_admin", "admin")),
-                              s: AsyncSession = Depends(get_session)):
-    await seed_profiles_from_legacy_settings(s)
-    rows = (await s.execute(select(DifyProfile).order_by(DifyProfile.created_at))).scalars().all()
-    return [_profile_to_dict(r) for r in rows]
-
-
-@router.post("/dify-profiles")
-async def create_dify_profile(body: DifyProfileIn,
-                               u=Depends(require_role("super_admin", "admin")),
-                               s: AsyncSession = Depends(get_session)):
-    if not body.name.strip():
-        raise HTTPException(400, "配置名称不能为空")
-    profile = DifyProfile(
-        name=body.name.strip(),
-        base_url=body.base_url.strip(),
-        api_key=body.api_key.strip(),
-        dataset_ids=body.dataset_ids.strip(),
-        enabled=False,
-    )
-    s.add(profile)
-    await s.commit()
-    await s.refresh(profile)
-    return _profile_to_dict(profile)
-
-
-@router.put("/dify-profiles/{profile_id}")
-async def update_dify_profile(profile_id: str, body: DifyProfileIn,
-                               u=Depends(require_role("super_admin", "admin")),
-                               s: AsyncSession = Depends(get_session)):
-    try:
-        pid = uuid.UUID(profile_id)
-    except ValueError:
-        raise HTTPException(400, "无效的配置 ID")
-    row = (await s.execute(select(DifyProfile).where(DifyProfile.id == pid))).scalar_one_or_none()
-    if not row:
-        raise HTTPException(404, "配置不存在")
-    row.name = body.name.strip()
-    row.base_url = body.base_url.strip()
-    # 密钥含 **** 视为未修改
-    if body.api_key and "****" not in body.api_key:
-        row.api_key = body.api_key.strip()
-    row.dataset_ids = body.dataset_ids.strip()
-    await s.commit()
-    await s.refresh(row)
-    return _profile_to_dict(row)
-
-
-@router.delete("/dify-profiles/{profile_id}")
-async def delete_dify_profile(profile_id: str,
-                               u=Depends(require_role("super_admin", "admin")),
-                               s: AsyncSession = Depends(get_session)):
-    try:
-        pid = uuid.UUID(profile_id)
-    except ValueError:
-        raise HTTPException(400, "无效的配置 ID")
-    row = (await s.execute(select(DifyProfile).where(DifyProfile.id == pid))).scalar_one_or_none()
-    if not row:
-        raise HTTPException(404, "配置不存在")
-    was_enabled = row.enabled
-    await s.delete(row)
-    await s.commit()
-    # 若删除的是启用项，自动启用第一条
-    if was_enabled:
-        first = (await s.execute(select(DifyProfile).order_by(DifyProfile.created_at).limit(1))).scalar_one_or_none()
-        if first:
-            first.enabled = True
-            await s.commit()
-    return {"ok": True}
-
-
-@router.put("/dify-profiles/{profile_id}/enable")
-async def enable_dify_profile(profile_id: str,
-                               u=Depends(require_role("super_admin", "admin")),
-                               s: AsyncSession = Depends(get_session)):
-    """启用指定配置，同时禁用其他所有配置（只能生效一条）。"""
-    try:
-        pid = uuid.UUID(profile_id)
-    except ValueError:
-        raise HTTPException(400, "无效的配置 ID")
-    row = (await s.execute(select(DifyProfile).where(DifyProfile.id == pid))).scalar_one_or_none()
-    if not row:
-        raise HTTPException(404, "配置不存在")
-    # 先禁用全部，再启用目标
-    await s.execute(update(DifyProfile).values(enabled=False))
-    row.enabled = True
-    await s.commit()
-    # 同步写入 settings 表，使 dify_client 能立即读取
-    # 注意：只同步「连接」（base_url/api_key）；具体检索哪些库由知识源注册表决定，
-    # 不再回写 dify_dataset_ids（系统配置页已下线库列表）。
-    from kb_common.models import Setting as SettingModel
-    for k, v in [("dify_base_url", row.base_url), ("dify_api_key", row.api_key)]:
-        existing = (await s.execute(select(SettingModel).where(SettingModel.key == k))).scalar_one_or_none()
-        if existing:
-            existing.value = v
-        else:
-            s.add(SettingModel(key=k, value=v, is_secret=(k == "dify_api_key")))
-    await s.commit()
-    # 切换 Dify 链接后数据集列表缓存必须失效，否则会按旧配置返回最长 60s 的旧列表
-    from app.routes.dify_route import invalidate_datasets_cache
-    invalidate_datasets_cache()
-    return {"ok": True}
-
-
 # ==================== LLM 供应商配置（多供应商 × 多模型） ====================
 import json as _json
 
@@ -902,10 +707,9 @@ async def _sync_legacy_llm_settings(s: AsyncSession) -> None:
 async def seed_profiles_from_legacy_settings(s: AsyncSession) -> None:
     """一次性迁移：profiles 表为空时，用旧版单值设置生成对应 profile。
 
-    模型配置页下线后，存量的 LLM / Dify 单值配置若不在 profiles 表中，
+    模型配置页下线后，存量的 LLM 单值配置若不在 profiles 表中，
     将无法在系统配置页可见可管理；此处按「表空才迁移」幂等建档：
-    - LLM：需地址+Key+模型名齐全，默认模型标记为生效+默认；
-    - Dify：需地址存在，建档即生效（与迁移前运行时行为一致）。
+    LLM 需地址+Key+模型名齐全，默认模型标记为生效+默认。
     """
     if (await s.execute(select(LLMProfile).limit(1))).scalar_one_or_none() is None:
         base_url = await _effective_setting(s, "llm_base_url")
@@ -920,17 +724,6 @@ async def seed_profiles_from_legacy_settings(s: AsyncSession) -> None:
                 base_url=base_url.strip().rstrip("/"),
                 api_key=api_key,
                 models=_dump_models([{"name": model, "enabled": True, "is_default": True}]),
-            ))
-            await s.commit()
-    if (await s.execute(select(DifyProfile).limit(1))).scalar_one_or_none() is None:
-        base_url = await _effective_setting(s, "dify_base_url")
-        if base_url:
-            s.add(DifyProfile(
-                name="默认·旧配置迁移",
-                base_url=base_url.strip().rstrip("/"),
-                api_key=await _effective_setting(s, "dify_api_key"),
-                dataset_ids=await _effective_setting(s, "dify_dataset_ids"),
-                enabled=True,
             ))
             await s.commit()
 
@@ -1266,150 +1059,6 @@ async def enable_rerank_profile(profile_id: str,
         await s.execute(update(RerankProfile).values(enabled=False))
         row.enabled = True
     await _sync_rerank_settings(s)
-    await s.commit()
-    return {"ok": True}
-
-
-# ==================== RAGFlow 知识库多配置（多环境切换，只能生效一条） ====================
-
-def _ragflow_to_dict(p: RagflowProfile, mask: bool = True) -> dict:
-    return {
-        "id": str(p.id),
-        "name": p.name,
-        "base_url": p.base_url,
-        "api_key": _mask_api_key(p.api_key) if mask else p.api_key,
-        "has_key": bool(p.api_key),
-        "enabled": p.enabled,
-        "created_at": p.created_at.isoformat() if p.created_at else None,
-    }
-
-
-async def _seed_ragflow_profiles(s: AsyncSession) -> None:
-    """一次性迁移：ragflow_profiles 表为空且旧版单值已配置时，建档并标记生效。"""
-    if (await s.execute(select(RagflowProfile).limit(1))).scalar_one_or_none() is not None:
-        return
-    base_url = await _effective_setting(s, "ragflow_base_url")
-    if not base_url:
-        return
-    s.add(RagflowProfile(
-        name="默认·旧配置迁移",
-        base_url=base_url.strip(),
-        api_key=await _effective_setting(s, "ragflow_api_key"),
-        enabled=True,
-    ))
-    await s.commit()
-
-
-async def _sync_ragflow_settings(s: AsyncSession) -> None:
-    """生效配置回写旧版单值 settings，ragflow_route / ragflow_client / 知识源同步链路保持兼容。
-
-    无生效配置时清空旧键：RAGFlow 检索/同步提示未配置。
-    """
-    row = (await s.execute(select(RagflowProfile).where(RagflowProfile.enabled == True))).scalar_one_or_none()  # noqa: E712
-    values = ([("ragflow_base_url", row.base_url), ("ragflow_api_key", row.api_key)] if row
-              else [("ragflow_base_url", ""), ("ragflow_api_key", "")])
-    for k, v in values:
-        setting = (await s.execute(select(Setting).where(Setting.key == k))).scalar_one_or_none()
-        if setting:
-            setting.value = v
-        else:
-            s.add(Setting(key=k, value=v, is_secret=(k == "ragflow_api_key")))
-
-
-class RagflowProfileIn(BaseModel):
-    name: str
-    base_url: str = ""
-    api_key: str = ""
-
-
-@router.get("/ragflow-profiles")
-async def list_ragflow_profiles(u=Depends(require_role("super_admin", "admin")),
-                                s: AsyncSession = Depends(get_session)):
-    await _seed_ragflow_profiles(s)
-    rows = (await s.execute(select(RagflowProfile).order_by(RagflowProfile.created_at))).scalars().all()
-    return [_ragflow_to_dict(r) for r in rows]
-
-
-@router.post("/ragflow-profiles")
-async def create_ragflow_profile(body: RagflowProfileIn,
-                                 u=Depends(require_role("super_admin", "admin")),
-                                 s: AsyncSession = Depends(get_session)):
-    if not body.name.strip():
-        raise HTTPException(400, "配置名称不能为空")
-    if not body.base_url.strip():
-        raise HTTPException(400, "服务地址不能为空")
-    if not body.api_key.strip() or "****" in body.api_key:
-        raise HTTPException(400, "API Key 不能为空（RAGFlow 接口均需 Bearer 认证）")
-    profile = RagflowProfile(
-        name=body.name.strip(),
-        base_url=body.base_url.strip(),
-        api_key=body.api_key.strip(),
-        enabled=False,
-    )
-    s.add(profile)
-    await s.commit()
-    await s.refresh(profile)
-    return _ragflow_to_dict(profile)
-
-
-@router.put("/ragflow-profiles/{profile_id}")
-async def update_ragflow_profile(profile_id: str, body: RagflowProfileIn,
-                                 u=Depends(require_role("super_admin", "admin")),
-                                 s: AsyncSession = Depends(get_session)):
-    pid = _safe_uuid(profile_id)
-    row = (await s.execute(select(RagflowProfile).where(RagflowProfile.id == pid))).scalar_one_or_none()
-    if not row:
-        raise HTTPException(404, "配置不存在")
-    if not body.name.strip():
-        raise HTTPException(400, "配置名称不能为空")
-    if not body.base_url.strip():
-        raise HTTPException(400, "服务地址不能为空")
-    row.name = body.name.strip()
-    row.base_url = body.base_url.strip()
-    # Key 语义：新值非掩码 → 覆盖；留空/掩码 → 保留原值
-    new_key = body.api_key.strip()
-    if new_key and "****" not in new_key:
-        row.api_key = new_key
-    if row.enabled:
-        await _sync_ragflow_settings(s)
-    await s.commit()
-    await s.refresh(row)
-    return _ragflow_to_dict(row)
-
-
-@router.delete("/ragflow-profiles/{profile_id}")
-async def delete_ragflow_profile(profile_id: str,
-                                 u=Depends(require_role("super_admin", "admin")),
-                                 s: AsyncSession = Depends(get_session)):
-    pid = _safe_uuid(profile_id)
-    row = (await s.execute(select(RagflowProfile).where(RagflowProfile.id == pid))).scalar_one_or_none()
-    if not row:
-        raise HTTPException(404, "配置不存在")
-    was_enabled = row.enabled
-    await s.delete(row)
-    await s.commit()
-    if was_enabled:
-        # 删除生效配置后自动切到最早一条，避免知识源同步突然失联
-        first = (await s.execute(select(RagflowProfile).order_by(RagflowProfile.created_at).limit(1))).scalar_one_or_none()
-        if first:
-            first.enabled = True
-        await _sync_ragflow_settings(s)
-        await s.commit()
-    return {"ok": True}
-
-
-@router.put("/ragflow-profiles/{profile_id}/enable")
-async def enable_ragflow_profile(profile_id: str,
-                                 u=Depends(require_role("super_admin", "admin")),
-                                 s: AsyncSession = Depends(get_session)):
-    """启用指定配置（切换环境），同时禁用其他所有配置。"""
-    pid = _safe_uuid(profile_id)
-    row = (await s.execute(select(RagflowProfile).where(RagflowProfile.id == pid))).scalar_one_or_none()
-    if not row:
-        raise HTTPException(404, "配置不存在")
-    await s.execute(update(RagflowProfile).values(enabled=False))
-    row.enabled = True
-    await _sync_ragflow_settings(s)
     await s.commit()
     return {"ok": True}
 

@@ -84,7 +84,7 @@ def run_catalog(source_id: int, trigger: str = "manual", operator: str = "") -> 
                                 for ws in dt.list_workspaces() if ws.get("workspaceId")}
                 except Exception:  # noqa: BLE001 — 名称解析失败不阻断同步
                     ws_names = {}
-                dataset_name = source.dify_dataset_name or f"文档库-{library_id}"
+                dataset_name = source.dataset_name or f"文档库-{library_id}"
                 remote = {n["nodeId"]: n for n in nodes if n.get("nodeId")}
                 mappings = {m.node_id: m for m in
                             db.query(SyncDocumentMapping).filter_by(source_id=source.id).all()}
@@ -105,8 +105,8 @@ def run_catalog(source_id: int, trigger: str = "manual", operator: str = "") -> 
                         db.add(task)
                         db.commit()
                         try:
-                            if mapping.dify_document_id:
-                                backend.delete_document(str(library_id), mapping.dify_document_id)
+                            if mapping.document_id:
+                                backend.delete_document(str(library_id), mapping.document_id)
                             db.delete(mapping)
                             deleted += 1
                             task.status = "success"
@@ -141,7 +141,7 @@ def run_catalog(source_id: int, trigger: str = "manual", operator: str = "") -> 
                             and _meta_hash(node) == mapping.meta_hash):
                         skipped += 1
                         continue
-                    # action 判定依据 mapping 上轮状态（编目会提前写 dify_document_id，
+                    # action 判定依据 mapping 上轮状态（编目会提前写 document_id，
                     # 不能沿用直跑模式「有 document_id 即 update」的口径）
                     was_synced = mapping is not None and mapping.status == "synced"
                     if mapping is None:
@@ -151,10 +151,10 @@ def run_catalog(source_id: int, trigger: str = "manual", operator: str = "") -> 
                         db.add(mapping)
                     # 复用已存在的文档行（重同步 / 用户手删后重建）；缺失则预建新行
                     doc = None
-                    if mapping.dify_document_id:
+                    if mapping.document_id:
                         try:
                             doc = db.query(LibraryDocument).filter_by(
-                                id=uuid.UUID(mapping.dify_document_id),
+                                id=uuid.UUID(mapping.document_id),
                                 library_id=library_id).first()
                         except ValueError:
                             doc = None
@@ -167,7 +167,7 @@ def run_catalog(source_id: int, trigger: str = "manual", operator: str = "") -> 
                             source_url=f"https://alidocs.dingtalk.com/i/nodes/{node_id}" if node_id else None,
                             source_workspace_name=ws_names.get(node.get("workspaceId", "")) or None,
                             updated_by=run.operator or None))
-                        mapping.dify_document_id = str(doc_uuid)
+                        mapping.document_id = str(doc_uuid)
                     else:
                         doc.status = "PENDING"
                         doc.progress = 0
@@ -187,7 +187,7 @@ def run_catalog(source_id: int, trigger: str = "manual", operator: str = "") -> 
                         file_ext=node_extension(node),
                         dataset_id=str(library_id), dataset_name=dataset_name,
                         status="pending", trigger=run.trigger, operator=run.operator,
-                        library_document_id=mapping.dify_document_id))
+                        library_document_id=mapping.document_id))
                     queued += 1
                 db.commit()
 

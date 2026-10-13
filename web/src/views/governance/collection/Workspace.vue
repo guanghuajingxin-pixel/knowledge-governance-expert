@@ -51,7 +51,7 @@ async function run(source: Source) {
   const count = stats.value[source.id]?.doc_count
   try {
     await ElMessageBox.confirm(
-      `即将同步知识到 Dify 知识库，一共 ${count ?? '—'} 个文档，是否立即启动？`,
+      `即将同步知识到目标文档库，一共 ${count ?? '—'} 个文档，是否立即启动？`,
       '确认立即同步', { confirmButtonText: '立即启动', cancelButtonText: '取消', type: 'warning' },
     )
     await syncSource(source.id)
@@ -82,7 +82,7 @@ onBeforeUnmount(() => { if (polling.value !== null) window.clearInterval(polling
     <div class="table-fill">
     <el-table :data="pagedSources" v-loading="loading" border size="small" height="100%">
       <el-table-column label="同步源" min-width="150"><template #default="{ row }"><b>{{ row.name }}</b></template></el-table-column>
-      <el-table-column label="Dify 知识库" min-width="150" prop="dify_dataset_name" />
+      <el-table-column label="目标文档库" min-width="150" prop="dataset_name" />
       <el-table-column label="文档数" width="90"><template #default="{ row }">{{ stats[row.id]?.doc_count ?? '—' }}</template></el-table-column>
       <el-table-column label="本次同步结果" min-width="180"><template #default="{ row }"><span :style="lastRun(row.id)?.failed_count ? 'color:var(--el-color-danger)' : ''">{{ result(lastRun(row.id)) }}</span></template></el-table-column>
       <el-table-column label="当前阶段 / 结果说明" min-width="260" show-overflow-tooltip><template #default="{ row }">{{ lastRun(row.id)?.message || '—' }}</template></el-table-column>

@@ -36,9 +36,9 @@ export const METHODS = [
   {value: 'book', label: '书籍'}, {value: 'laws', label: '法律法规'}, {value: 'presentation', label: '演示文稿'},
   {value: 'table', label: '表格'}, {value: 'one', label: '整篇分段'}]
 
-/** 分段标识符预设（id 与 Dify 分段标识符选项对齐；换行/2个换行为两级粒度——
+/** 分段标识符预设（换行/2个换行为两级粒度——
 序列化互斥：nl2 → '\n\n'（段落级）、nl → '\n'（行级），父子分段父块切分据此
-区分段落与行，对齐 Dify fixed_separator 单选语义） */
+区分段落与行，对齐 fixed_separator 单选语义） */
 export const DELIMITER_PRESETS = [
   {id: 'nl', label: '换行', chars: '\n'},
   {id: 'nl2', label: '2个换行', chars: '\n\n'},

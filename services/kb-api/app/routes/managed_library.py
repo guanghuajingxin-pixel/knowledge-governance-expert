@@ -2,7 +2,7 @@
 
 解析链路：MinIO 原件 → MinerU（mineru-kit V1）异步解析 job → 前端轮询 refresh；
 job 完成时下载 markdown → 本地分段器按库分段规则切块 → LibraryChunk 落库。
-分段 CRUD / 导出 / 检索测试全部本地化，不再依赖 RAGFlow。
+分段 CRUD / 导出 / 检索测试全部本地化实现。
 """
 import asyncio
 import re
@@ -40,7 +40,7 @@ class ProcessingConfig(BaseModel):
     embedding_model: str = Field("", max_length=200)
     # 分段重叠度：滚动聚合时相邻分段重复携带的 Token 数（0 = 不重叠）
     overlap: int = Field(25, ge=0, le=1024)
-    # 文本预处理规则（分段前执行，语义与 Dify pre_processing_rules 对齐）
+    # 文本预处理规则（分段前执行）
     replace_whitespace: bool = False
     remove_urls_emails: bool = False
 
@@ -796,7 +796,7 @@ async def refresh_state(adapter: "MinerUEngine | MinerUCloudEngine", s: AsyncSes
     """同步文档状态：查询 MinerU job；首次完成时执行本地分段（幂等，
     仅从 PARSING 状态迁出时落地，避免重复下载/重复分段）。"""
     if not doc.engine_job_id:
-        # 旧 RAGFlow 时代的文档没有本地解析任务
+        # 旧引擎时代的文档没有本地解析任务
         if doc.engine_document_id and doc.status == "PARSING":
             doc.status, doc.progress, doc.message = "FAILED", 0, "解析引擎已切换为 MinerU，请重新解析"
         return

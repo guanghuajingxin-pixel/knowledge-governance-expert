@@ -63,7 +63,7 @@ async function run() {
   }
 }
 
-const sourceTag: Record<string, string> = { local: '本地', dify: 'Dify', ragflow: 'RAGFlow' }
+const sourceTag: Record<string, string> = { local: '本地' }
 
 function detailFor(i: number) {
   return result.value?.detail?.find((d) => d.index === i)
@@ -121,9 +121,9 @@ function hitLabel(rule: string, entity: string): string {
           </template>
         </template>
       </el-alert>
-      <el-alert v-if="result.local_error || result.dify_error || result.ragflow_error" type="warning"
+      <el-alert v-if="result.local_error" type="warning"
         :closable="false" show-icon
-        :title="[result.local_error, result.dify_error, result.ragflow_error].filter(Boolean).join('；')" />
+        :title="result.local_error" />
 
       <!-- 命中规则汇总 -->
       <div v-if="result.summary?.length" class="sb-summary">

@@ -121,12 +121,12 @@ async function toggle(s: any) {
 async function remove(s: any) {
   try {
     await ElMessageBox.confirm(
-      `确定删除同步源「${s.name}」吗？其 Dify 知识库与已同步文档不会被删除，仅移除该同步配置。`,
+      `确定删除同步源「${s.name}」吗？其目标文档库与已同步文档不会被删除，仅移除该同步配置。`,
       '删除同步源',
       { confirmButtonText: '确认删除', cancelButtonText: '取消', type: 'warning' },
     )
     await deleteSource(s.id)
-    ElMessage.success(`已删除同步源「${s.name}」（仅移除配置，Dify 文档保留）`)
+    ElMessage.success(`已删除同步源「${s.name}」（仅移除配置，文档保留）`)
     await refresh()
   } catch (e) { if (e !== 'cancel') { /* 拦截器已提示 */ } }
 }
@@ -169,7 +169,7 @@ async function runNow(s: Source) {
   if (!s.enabled || isRunning(s.id)) return
   try {
     await ElMessageBox.confirm(
-      `即将把「${s.name}」目录同步到 Dify，当前约 ${docsOf(s.id)} 个文档，是否启动？`,
+      `即将把「${s.name}」目录同步到目标文档库，当前约 ${docsOf(s.id)} 个文档，是否启动？`,
       '确认立即同步',
       { confirmButtonText: '立即同步', cancelButtonText: '取消', type: 'warning' },
     )
@@ -232,16 +232,9 @@ onBeforeUnmount(() => { if (polling.value !== null) { window.clearInterval(polli
           <div style="color:var(--el-text-color-secondary);font-size:12px">{{ row.start_dir || '根目录' }}</div>
         </template>
       </el-table-column>
-      <el-table-column label="目标知识库类型" width="110">
+      <el-table-column label="目标文档库" min-width="120">
         <template #default="{ row }">
-          <el-tag :type="row.backend_type === 'ragflow' ? 'success' : 'primary'" size="small">
-            {{ row.backend_type === 'ragflow' ? 'RAGFlow' : 'Dify' }}
-          </el-tag>
-        </template>
-      </el-table-column>
-      <el-table-column label="目标知识库" min-width="120">
-        <template #default="{ row }">
-          <span style="font-size:12px">{{ row.dify_dataset_name || row.start_dir || '—' }}</span>
+          <span style="font-size:12px">{{ row.dataset_name || row.start_dir || '—' }}</span>
         </template>
       </el-table-column>
       <el-table-column label="定时任务" width="150">

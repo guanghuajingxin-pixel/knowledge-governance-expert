@@ -138,8 +138,6 @@ export interface SandboxResult {
   exempted_types: string[]
   note?: string
   local_error?: string
-  dify_error?: string
-  ragflow_error?: string
 }
 
 // ===== 策略 =====

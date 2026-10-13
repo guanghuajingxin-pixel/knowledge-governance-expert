@@ -1,99 +1,17 @@
-import io
-import json
-from pathlib import Path
 import subprocess
 import tempfile
 import unittest
-from unittest.mock import MagicMock, patch
-import zipfile
 from contextlib import contextmanager
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
-import httpx
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from kb_common.models import SyncSource, SyncRun, SyncDocumentMapping, SyncLog, SyncFailure, SyncTask
+from kb_common.models import (Setting, SyncSource, SyncRun, SyncDocumentMapping,
+                              SyncLog, SyncFailure, SyncTask)
 from app.services.sync import engine, runtime
-from app.services.sync.dify_sync_client import DifyClient, DifyError
-
-
-class DifyTests(unittest.TestCase):
-    def client(self, handler):
-        client = DifyClient('http://dify/v1', 'test')
-        client._client.close()
-        client._client = httpx.Client(transport=httpx.MockTransport(handler))
-        self.addCleanup(client.close)
-        return client
-
-    def test_pptx_upload_keeps_source_format(self):
-        requests = []
-        def handler(request):
-            requests.append(request)
-            if request.method == 'GET':
-                return httpx.Response(200, json={'doc_form': 'hierarchical_model', 'document_count': 1,
-                                                'indexing_technique': 'high_quality'})
-            return httpx.Response(200, json={'document': {'id': 'doc'}, 'batch': 'batch'})
-        client = self.client(handler)
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / '课程.pptx'
-            with zipfile.ZipFile(path, 'w') as z:
-                z.writestr('ppt/slides/slide1.xml', '<a:p xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:t>流程课程</a:t></a:p>')
-            source = path.read_bytes()
-            client.upload_file('dataset', path)
-            client.update_file('dataset', 'doc', path)
-        posts = [r for r in requests if r.method == 'POST']
-        self.assertEqual(len(posts), 2)
-        for request in posts:
-            body = request.content
-            text = body.decode('utf-8', 'replace')
-            self.assertIn('filename="课程.pptx"', text)
-            self.assertIn(source, body)
-            self.assertIn('hierarchical_model', text)
-            self.assertNotIn('process_rule', text)
-            self.assertNotIn('课程.md', text)
-
-    def test_pdf_upload_passthrough(self):
-        requests = []
-        def handler(request):
-            requests.append(request)
-            if request.method == 'GET':
-                return httpx.Response(200, json={'doc_form': 'text_model', 'document_count': 1,
-                                                'indexing_technique': 'high_quality'})
-            return httpx.Response(200, json={'document': {'id': 'doc'}, 'batch': 'batch'})
-        client = self.client(handler)
-        source = b'%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF'
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / '杰克安全管理规定.pdf'
-            path.write_bytes(source)
-            client.upload_file('dataset', path)
-        posts = [r for r in requests if r.method == 'POST']
-        self.assertEqual(len(posts), 1)
-        body = posts[0].content
-        text = body.decode('utf-8', 'replace')
-        self.assertIn('filename="杰克安全管理规定.pdf"', text)
-        self.assertIn('application/pdf', text)
-        self.assertIn(source, body)
-
-    def test_new_text_dataset_has_default_rule(self):
-        client = self.client(lambda r: httpx.Response(200, json={'document_count': 0}))
-        self.assertEqual(client._file_payload('d', 'Chinese')['process_rule'], {'mode': 'automatic'})
-
-    def test_indexing_error_is_failure(self):
-        client = self.client(lambda r: httpx.Response(200, json={'data': [
-            {'indexing_status': 'error', 'error': 'embedding quota exceeded'}]}))
-        with self.assertRaisesRegex(DifyError, 'embedding quota exceeded'):
-            client.wait_indexing('d', 'b')
-
-    def test_indexing_timeout_is_failure(self):
-        client = self.client(lambda r: httpx.Response(200, json={}))
-        with self.assertRaisesRegex(DifyError, '超时'):
-            client.wait_indexing('d', 'b', timeout=0)
-
-    def test_empty_indexing_response_is_failure(self):
-        client = self.client(lambda r: httpx.Response(200, json={'data': []}))
-        with self.assertRaisesRegex(DifyError, '未返回'):
-            client.wait_indexing('d', 'b')
 
 
 @contextmanager
@@ -122,12 +40,16 @@ def make_fake_settings(**overrides):
 class EngineTests(unittest.TestCase):
     def setUp(self):
         self.sql = create_engine('sqlite://', poolclass=StaticPool, connect_args={'check_same_thread': False})
-        for model in (SyncSource, SyncRun, SyncDocumentMapping, SyncLog, SyncFailure, SyncTask):
+        for model in (SyncSource, SyncRun, SyncDocumentMapping, SyncLog, SyncFailure, SyncTask, Setting):
             model.__table__.create(self.sql)
         self.sessions = sessionmaker(bind=self.sql, expire_on_commit=False)
         with self.sessions() as db:
-            self.source = SyncSource(name='test', workspace_id='w', root_node_id='r', dify_dataset_name='target', enabled=True)
-            db.add(self.source); db.commit()
+            self.source = SyncSource(name='test', workspace_id='w', root_node_id='r',
+                                     dataset_id='1', dataset_name='target', enabled=True)
+            db.add(self.source)
+            # 全局钉钉服务账号：引擎运行前必须能解析同步操作人身份
+            db.add(Setting(key='dingtalk_operator_union_id', value='union-1'))
+            db.commit()
         self.addCleanup(self.sql.dispose)
         self.patches = [patch.object(engine, 'SyncSessionLocal', self.sessions),
                         patch.object(runtime, 'SyncSessionLocal', self.sessions)]
@@ -135,11 +57,12 @@ class EngineTests(unittest.TestCase):
             p.start(); self.addCleanup(p.stop)
         self.dt = MagicMock()
         self.dt.walk_tree.return_value = [{'nodeId': 'n', 'name': '课件.pdf', 'category': 'DOCUMENT'}]
-        self.dify = MagicMock()
-        self.dify.resolve_dataset.return_value = {'id': 'dataset', 'name': 'target', 'runtime_mode': 'general'}
-        self.dify.upload_file.return_value = {'document': {'id': 'remote-doc'}, 'batch': 'b'}
-        self.dify.update_file.return_value = self.dify.upload_file.return_value
-        for target, value in [('make_dingtalk_client', self.dt), ('make_backend', self.dify)]:
+        # 最小 fake backend：本地文档库后端方法面（duck-typing dict 返回）
+        self.backend = MagicMock()
+        self.backend.resolve_dataset.return_value = {'id': 'dataset', 'name': 'target'}
+        self.backend.upload_file.return_value = {'document': {'id': 'remote-doc'}, 'batch': ''}
+        self.backend.update_file.return_value = self.backend.upload_file.return_value
+        for target, value in [('make_dingtalk_client', self.dt), ('make_library_backend', self.backend)]:
             p = patch.object(engine, target, return_value=value)
             p.start(); self.addCleanup(p.stop)
         p = patch.object(engine.SyncEngine, '_fetch', return_value=(Path('课件.pdf'), 'hash'))
@@ -148,60 +71,57 @@ class EngineTests(unittest.TestCase):
         p = patch.object(engine, '_local_storage_dir', return_value=Path(self.tmp.name))
         p.start(); self.addCleanup(p.stop)
 
-    def test_failed_index_preserves_id_then_updates_without_duplicate(self):
-        self.dify.wait_indexing.side_effect = DifyError('索引超时')
+    def test_failed_upload_then_retry_creates_without_duplicate(self):
+        """上传失败保留映射与失败记录；重试成功后清除失败且不产生重复上传。"""
+        self.backend.upload_file.side_effect = RuntimeError('目标文档库上传失败')
         result = engine.SyncEngine(self.source).run()
         self.assertEqual(result['status'], 'failed')
         self.assertEqual(result['created'], 0)
         with self.sessions() as db:
             mapping = db.query(SyncDocumentMapping).one()
-            self.assertEqual(mapping.dify_document_id, 'remote-doc')
+            self.assertIsNone(mapping.document_id)
             self.assertEqual(mapping.status, 'error')
             self.assertEqual(db.query(SyncFailure).count(), 1)
-        self.dify.wait_indexing.side_effect = None
-        self.dify.wait_indexing.return_value = 'completed'
+        self.backend.upload_file.side_effect = None
         result = engine.SyncEngine(self.source).run()
         self.assertEqual(result['status'], 'success')
-        self.assertEqual(result['updated'], 1)
-        self.assertEqual(self.dify.upload_file.call_count, 1)
-        self.assertEqual(self.dify.update_file.call_count, 1)
+        self.assertEqual(result['created'], 1)
+        self.assertEqual(self.backend.upload_file.call_count, 2)
+        self.assertEqual(self.backend.update_file.call_count, 0)
         with self.sessions() as db:
             self.assertEqual(db.query(SyncFailure).count(), 0)
+            self.assertEqual(db.query(SyncDocumentMapping).one().document_id, 'remote-doc')
 
     def test_unsupported_extension_skipped_without_upload(self):
-        """普通库内置 ETL 不支持的格式跳过，历史失败记录保留以便处理。"""
+        """本地文档库白名单（LIBRARY_EXTENSIONS）不支持的格式跳过，历史失败记录保留以便处理。"""
         self.dt.walk_tree.return_value = [
-            {'nodeId': 'n-pptx', 'name': '课件.pptx', 'category': 'DOCUMENT'},
+            {'nodeId': 'n-exe', 'name': '安装包.exe', 'category': 'DOCUMENT'},
             {'nodeId': 'n-pdf', 'name': '手册.pdf', 'category': 'DOCUMENT'},
         ]
         with self.sessions() as db:
-            db.add(SyncFailure(run_id=0, source_id=self.source.id, node_id='n-pptx',
-                               name='课件.pptx', error='历史失败'))
+            db.add(SyncFailure(run_id=0, source_id=self.source.id, node_id='n-exe',
+                               name='安装包.exe', error='历史失败'))
             db.commit()
-        # 固定为内置 ETL，避免测试依赖环境里的 DIFY_ETL_TYPE 配置
-        with patch.object(engine, 'get_settings', return_value=make_fake_settings(dify_etl_type='dify')):
-            result = engine.SyncEngine(self.source).run()
+        result = engine.SyncEngine(self.source).run()
         self.assertEqual(result['status'], 'success')
         self.assertEqual(result['total'], 2)
         self.assertEqual(result['created'], 1)
         self.assertEqual(result['failed'], 0)
-        # pptx 不应触达 Dify 上传；pdf 正常上传一次；mapping 只建 pdf 一条
-        self.assertEqual(self.dify.upload_file.call_count, 1)
+        # exe 不在文档库白名单内，不应触达上传；pdf 正常上传一次；mapping 只建 pdf 一条
+        self.assertEqual(self.backend.upload_file.call_count, 1)
         with self.sessions() as db:
             self.assertEqual(db.query(SyncFailure).count(), 1)  # 未成功上传不能清除历史失败
             self.assertEqual(db.query(SyncDocumentMapping).count(), 1)
             self.assertEqual(db.query(SyncDocumentMapping).one().node_id, 'n-pdf')
 
-    def test_pptx_synced_when_dify_runs_unstructured_etl(self):
-        """Dify 配置 ETL_TYPE=Unstructured 时，pptx 不再被白名单跳过，正常上传。"""
-        fake = make_fake_settings(dify_etl_type='Unstructured')
+    def test_pptx_synced_to_local_library(self):
+        """pptx 在本地文档库白名单内，正常上传。"""
         self.dt.walk_tree.return_value = [{'nodeId': 'n', 'name': '课件.pptx', 'category': 'DOCUMENT'}]
-        with patch.object(engine, 'get_settings', return_value=fake):
-            result = engine.SyncEngine(self.source).run()
+        result = engine.SyncEngine(self.source).run()
         self.assertEqual(result['status'], 'success')
         self.assertEqual(result['created'], 1)
         self.assertEqual(result['failed'], 0)
-        self.assertEqual(self.dify.upload_file.call_count, 1)
+        self.assertEqual(self.backend.upload_file.call_count, 1)
 
     def test_db_query_failure_does_not_leave_running_record(self):
         def fail(conn, cursor, statement, params, context, many):

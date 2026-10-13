@@ -156,11 +156,6 @@ def write_config(boot: dict[str, Any]) -> None:
                 "name": "dingtalk_read_doc",
                 "group": "kb",
                 "use": "extensions.kb_tools:dingtalk_read_doc_tool",
-            },
-            {
-                "name": "knowledge_context_expand",
-                "group": "kb",
-                "use": "extensions.kb_tools:knowledge_context_expand_tool",
             }
         ],
         "tool_search": {"enabled": False},
@@ -296,8 +291,6 @@ class ChatStreamIn(BaseModel):
     plan_mode: bool = False
     subagent_enabled: bool = False
     recursion_limit: int = 80
-    dataset_ids: list[str] | None = None
-    ragflow_dataset_ids: list[str] | None = None  # RAGFlow 数据集（与 Dify 并列的第二检索引擎）
     kb_ids: list[str] | None = None    # 平台本地知识库（ES hybrid）ID 列表
     doc_library_ids: list[int] | None = None  # 平台文档库（knowledge_libraries）ID 列表，本地检索通道
     top_k: int = 8
@@ -602,8 +595,6 @@ def _event_stream(body: ChatStreamIn):
         return
 
     RUNTIME_CTX[body.thread_id] = {
-        "dataset_ids": body.dataset_ids or [],
-        "ragflow_dataset_ids": body.ragflow_dataset_ids or [],
         "kb_ids": body.kb_ids or [],
         "doc_library_ids": body.doc_library_ids or [],
         "top_k": body.top_k,

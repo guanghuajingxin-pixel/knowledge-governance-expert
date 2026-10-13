@@ -50,8 +50,6 @@ async def _effective_setting(s: AsyncSession, key: str) -> str:
 
 class RetrieveIn(BaseModel):
     query: str
-    dataset_ids: list[str] | None = None          # Dify 数据集
-    ragflow_dataset_ids: list[str] | None = None   # RAGFlow 数据集
     kb_ids: list[str] | None = None                # 平台本地 ES 知识库
     doc_library_ids: list[int] | None = None       # 平台文档库（knowledge_libraries，本地分段检索）
     top_k: int = 8
@@ -160,49 +158,19 @@ async def _mask_pre_llm(s: AsyncSession, hits: list[dict], query: str, *,
 async def internal_kb_retrieve(body: RetrieveIn, s: AsyncSession = Depends(get_session)):
     """企业知识库检索：供 DeerFlow knowledge_search 工具调用。
 
-    检索结果会自动附带知识加工元数据（文档摘要、标签、文档类型），
-    帮助智能体理解命中文档的全貌，而不仅仅是片段内容。
+    本地 ES 知识库（kb_ids）与平台文档库（doc_library_ids）双通道合并。
     """
-    from kb_common.clients import dify_client, ragflow_client
-    from kb_common.config import get_settings
-    from kb_common.models import ProcessedDocument, KnowledgeLibrary
+    from kb_common.models import KnowledgeLibrary
 
-    settings = get_settings()
-    # 运行时写入 lru_cached settings（与问答链路一致）
-    settings.dify_base_url = await _effective_setting(s, "dify_base_url")
-    settings.dify_api_key = await _effective_setting(s, "dify_api_key")
-    settings.ragflow_base_url = await _effective_setting(s, "ragflow_base_url")
-    settings.ragflow_api_key = await _effective_setting(s, "ragflow_api_key")
-
-    dataset_ids = list(body.dataset_ids or [])
-    ragflow_ids = list(body.ragflow_dataset_ids or [])
     doc_library_ids = [int(i) for i in (body.doc_library_ids or []) if i]
     # 检索目标由问答链路按智能体配置解析后显式传入；全空=不检索
     # （知识库为智能体的资源配置项，未选择=不使用），不设「全部启用库」兜底
 
     hits: list[dict] = []
-    # 检索源级告警：部分库/引擎失败时 fail-soft（不整轮 502），附在响应里供上层感知
+    # 检索源级告警：部分库失败时 fail-soft（不整轮 502），附在响应里供上层感知
     retrieve_warnings: list[str] = []
-    if dataset_ids:
-        try:
-            hits = await dify_client.retrieve(dataset_ids, body.query, top_k=body.top_k)
-        except Exception as e:  # noqa: BLE001
-            raise HTTPException(status_code=502, detail=f"dify retrieve failed: {e.__class__.__name__}: {e}") from e
-    if ragflow_ids:
-        try:
-            r = await ragflow_client.retrieve_with_report(ragflow_ids, body.query, top_k=body.top_k)
-            hits = hits + r["hits"]
-            for sk in r.get("skipped") or []:
-                retrieve_warnings.append(f"RAGFlow 库 {sk.get('dataset_id')} 检索失败：{sk.get('error')}")
-        except ragflow_client.RagflowNotConfigured:
-            pass  # RAGFlow 未配置：跳过该来源，不影响 Dify/本地结果（fail-soft 于多源并集）
-        except Exception as e:  # noqa: BLE001
-            # RAGFlow 整体异常不再让本轮检索 502：记录告警并返回 Dify/本地结果
-            import logging
-            logging.getLogger(__name__).warning("ragflow retrieve failed: %s", e)
-            retrieve_warnings.append(f"RAGFlow 检索失败：{e.__class__.__name__}: {e}")
 
-    # 本地知识库通道（ES hybrid + rerank）：与 Dify 并列，回查 DB 校验软删除可见性
+    # 本地知识库通道（ES hybrid + rerank）：回查 DB 校验软删除可见性
     kb_ids = [k for k in (body.kb_ids or []) if k]
     local_hits: list[dict] = []
     if kb_ids:
@@ -237,9 +205,9 @@ async def internal_kb_retrieve(body: RetrieveIn, s: AsyncSession = Depends(get_s
             local_hits.append({**h, "content": h.get("text", "") or h.get("content", ""),
                                "document_title": doc.original_filename, "source": "local"})
 
-    # 平台文档库通道（本地分段 + 向量/词项评分）：与 Dify/RAGFlow 并列；
+    # 平台文档库通道（本地分段 + 向量/词项评分）：
     # 检索参数缺省时按库级「检索设置」(engine_config.retrieval) 取默认（与检索测试同口径）。
-    # 逐库隔离：单库失败记入告警，不影响其他库与外部引擎结果。
+    # 逐库隔离：单库失败记入告警，不影响其他库结果。
     if doc_library_ids:
         from app.services.library_retrieval import search as doc_library_search
         libs = (await s.execute(select(KnowledgeLibrary).where(
@@ -267,62 +235,33 @@ async def internal_kb_retrieve(body: RetrieveIn, s: AsyncSession = Depends(get_s
                     "document library %s retrieve failed: %s", lib.id, e)
                 retrieve_warnings.append(f"文档库 {lib.name} 检索失败：{e.__class__.__name__}")
 
-    # 富化：为命中的文档附加加工元数据（摘要/标签/类型）
-    doc_ids = list({h.get("document_id") for h in hits if h.get("document_id")})
-    enriched_meta: dict[str, dict] = {}
+    # 钉钉来源回填：同步自钉钉知识库的文档，附上钉钉原始文档链接与节点 ID，
+    # 使智能体引用来源可直接跳转钉钉知识库预览（而非独立预览组件）。
+    doc_ids = list({h.get("document_id") for h in local_hits if h.get("document_id")})
     dt_map: dict = {}
     if doc_ids:
-        rows = (await s.execute(
-            select(ProcessedDocument).where(ProcessedDocument.document_id.in_(doc_ids))
+        from kb_common.models import SyncDocumentMapping
+        cron_rows = (await s.execute(
+            select(SyncDocumentMapping)
+            .where(SyncDocumentMapping.document_id.in_(doc_ids))
+            .where(SyncDocumentMapping.node_id.isnot(None))
         )).scalars().all()
-        for r in rows:
-            enriched_meta[r.document_id] = {
-                "summary": r.summary,
-                "tags": r.tags,
-                "doc_type": r.doc_type,
-            }
+        for r in cron_rows:
+            if r.document_id and r.node_id:
+                dt_map[r.document_id] = (r.node_id, f"https://alidocs.dingtalk.com/i/nodes/{r.node_id}")
 
-        # 钉钉来源回填：同步自钉钉知识库的 Dify 文档，附上钉钉原始文档链接与节点 ID，
-        # 使智能体引用来源可直接跳转钉钉知识库预览（而非独立预览组件）。
-        # 覆盖两个来源：手动同步（dify_dingtalk_doc_mappings）与定时同步引擎（sync_document_mappings）。
-        from kb_common.models import DifyDingtalkDocMapping, SyncDocumentMapping
-        dt_map = {}
-        manual = (await s.execute(
-            select(DifyDingtalkDocMapping).where(DifyDingtalkDocMapping.dify_document_id.in_(doc_ids))
-        )).scalars().all()
-        for r in manual:
-            dt_map[r.dify_document_id] = (r.dingtalk_node_id, r.dingtalk_url)
-        # 定时同步引擎已记录但手动表缺失的，用 node_id 拼 alidocs 链接补齐
-        missing = [d for d in doc_ids if d not in dt_map]
-        if missing:
-            cron_rows = (await s.execute(
-                select(SyncDocumentMapping)
-                .where(SyncDocumentMapping.dify_document_id.in_(missing))
-                .where(SyncDocumentMapping.node_id.isnot(None))
-            )).scalars().all()
-            for r in cron_rows:
-                if r.dify_document_id and r.node_id:
-                    dt_map[r.dify_document_id] = (r.node_id, f"https://alidocs.dingtalk.com/i/nodes/{r.node_id}")
-
+    hits = local_hits
     for h in hits:
         did = h.get("document_id")
-        if did and did in enriched_meta:
-            h["doc_meta"] = enriched_meta[did]
         mapping = dt_map.get(did) if did else None
         if mapping:
             h["url"] = mapping[1]
             h["node_id"] = mapping[0]
             h["source"] = "dingtalk"
 
-    if local_hits:
-        hits = hits + local_hits
-
     # 送LLM前脱敏（底线节点）：LLM 不得接触未脱敏明文
     scope_ids = {f"kb:{k}" for k in kb_ids if k}
     scope_ids |= {f"library:{i}" for i in doc_library_ids}
-    libs = (await s.execute(select(KnowledgeLibrary))).scalars().all()
-    ds2lib = {r.dataset_id: r.id for r in libs}
-    scope_ids |= {f"library:{ds2lib[d]}" for d in list(dataset_ids) + list(ragflow_ids) if d in ds2lib}
     hits, masking_meta = await _mask_pre_llm(
         s, hits, body.query, thread_id=body.thread_id, scope_ids=scope_ids,
         scene="chat", text_fields=("content", "text"), title_fields=("document_title", "title"))
@@ -332,19 +271,6 @@ async def internal_kb_retrieve(body: RetrieveIn, s: AsyncSession = Depends(get_s
     if masking_meta:
         resp["masking"] = masking_meta
     return resp
-
-
-@router.post("/internal/process/context-expand", dependencies=[Depends(_verify_internal_token)])
-async def internal_context_expand(body: dict, s: AsyncSession = Depends(get_session)):
-    """上下文扩展：供 DeerFlow 智能体调用，根据命中文档 ID 获取摘要+关联文档+标签。
-
-    body: {"document_ids": [...], "query": "...", "max_related": 3}
-    """
-    from app.services.processing import expand_context
-    document_ids = body.get("document_ids") or []
-    query = body.get("query") or ""
-    max_related = int(body.get("max_related") or 3)
-    return await expand_context(s, document_ids, query, max_related)
 
 
 class DingTalkSearchIn(BaseModel):

@@ -1,15 +1,13 @@
-"""原文件传输、官方导出与流水线输入契约回归。"""
+"""原文件传输与官方导出契约回归。"""
 import base64
 import hashlib
 import subprocess
 from pathlib import Path
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import Mock, patch
 
 import httpx
 import pytest
-import yaml
-from fastapi import HTTPException
-from app.services.sync import export_service, pipeline_schema, source_files
+from app.services.sync import export_service, source_files
 from kb_common.clients.source_integrity import downloaded_file
 
 
@@ -71,59 +69,3 @@ def test_binary_source_never_uses_online_export(tmp_path):
     export.assert_not_called()
     with pytest.raises(ValueError, match='大小'):
         source_files.fetch_source_file(dt, {**node, 'size': 11}, tmp_path)
-
-
-def pipeline_bytes():
-    return yaml.safe_dump({'kind': 'rag_pipeline', 'rag_pipeline': {'name': '测试'}, 'workflow': {
-        'graph': {'nodes': [{'id': 'file', 'data': {'provider_type': 'local_file'}}]},
-        'rag_pipeline_variables': [
-            {'variable': 'parent_mode', 'label': '模式', 'type': 'select', 'options': ['paragraph', 'full_doc'], 'required': True, 'default_value': 'paragraph', 'belong_to_node_id': 'shared'},
-            {'variable': 'clean_1', 'type': 'checkbox', 'required': True, 'default_value': True, 'belong_to_node_id': 'shared'},
-            {'variable': 'limit', 'type': 'number', 'required': True, 'default_value': 1024, 'belong_to_node_id': 'file'},
-            {'variable': 'jina_reader_url', 'required': True, 'belong_to_node_id': 'webpage'},
-        ]}}).encode()
-
-
-def test_import_filters_other_branches_and_preserves_false_zero():
-    schema = pipeline_schema.parse_pipeline(pipeline_bytes(), 'file')
-    result = pipeline_schema.apply_inputs(schema['variables'], {'clean_1': False, 'limit': 0, 'jina_reader_url': 'ignored'})
-    assert result == {'parent_mode': 'paragraph', 'clean_1': False, 'limit': 0}
-    assert len(pipeline_schema.schema_key('https://dify/v1', 'uuid')) <= 64
-
-
-@pytest.mark.parametrize('inputs', [{'parent_mode': 'invalid'}, {'limit': True}, {'clean_1': 'false'}, {'parent_mode': '   '}, {'limit': float('nan')}])
-def test_invalid_inputs_rejected_before_push(inputs):
-    with pytest.raises(ValueError):
-        pipeline_schema.apply_inputs(pipeline_schema.parse_pipeline(pipeline_bytes(), 'file')['variables'], inputs)
-
-
-@pytest.mark.parametrize('content,node', [(b'!!python/object:evil {}', 'file'), (b'x' * (1024*1024+1), 'file'), (pipeline_bytes(), 'other')])
-def test_import_rejects_unsafe_or_wrong_pipeline(content, node):
-    with pytest.raises(ValueError):
-        pipeline_schema.parse_pipeline(content, node)
-
-
-def test_single_sync_validates_before_download_and_preserves_bytes():
-    import asyncio
-    from app.routes import dify_route as route
-    original = b'\x00\xfforiginal-office-file'
-    async def run():
-        with patch.object(route, '_runtime_config', AsyncMock(return_value=('http://dify/v1', 'test'))), \
-             patch('app.services.sync.dify_pipeline_vars.prepare_inputs_for_dataset', side_effect=ValueError('缺少参数')) as prepare, \
-             patch.object(source_files, 'download_single_source', return_value=('原文.pptx', original, 'file')) as download, \
-             patch.object(route.minio_client, 'upload_bytes'), \
-             patch.object(route.dify_client, 'upload_document', AsyncMock(return_value={'document': {'id': 'doc'}})) as upload, \
-             patch.object(route, '_save_dingtalk_mapping', AsyncMock()):
-            body = route.SyncDingTalkIn(node_id='node', name='界面旧名字.pdf', pipeline_inputs={'child_length': 300})
-            sync = route.sync_dingtalk_file.__wrapped__
-            with pytest.raises(HTTPException) as error:
-                await sync('dataset', body, s=Mock())
-            assert error.value.status_code == 422
-            download.assert_not_called()
-            prepare.side_effect = None
-            prepare.return_value = {'child_length': 300, 'parent_mode': 'paragraph'}
-            result = await sync('dataset', body, s=Mock())
-            upload.assert_awaited_once_with('dataset', '原文.pptx', original, inputs=prepare.return_value)
-            assert result['source_sha256'] == hashlib.sha256(original).hexdigest()
-            assert result['source_size'] == len(original)
-    asyncio.run(run())

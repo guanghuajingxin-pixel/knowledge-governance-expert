@@ -14,12 +14,10 @@ import type { SearchResult } from '@/types/search'
 import { citationUrl, linkEvidence } from '@/utils/chat-evidence'
 import { updateStep, settleSteps, evidenceLabel, isFailedReadStep, filterReadFailWarnings, type StepItem } from '@/utils/chat-progress'
 
-/** 引用来源标签：如实显示知识来源平台（与后端 citations.source 取值对应） */
+/** 引用来源标签：如实显示知识来源（与后端 citations.source 取值对应） */
 const SOURCE_LABELS: Record<string, string> = {
   dingtalk: '钉钉',
   dws: '钉钉', // 历史标记兼容
-  dify: 'DIFY',
-  ragflow: 'RagFlow',
   local: '本地库',
 }
 const sourceLabel = (s?: string) => (s && SOURCE_LABELS[s]) || '知识库'
@@ -77,7 +75,7 @@ function renderMd(md: string, citations?: SearchResult[], live = false): string 
 
 // 状态
 const query = ref('')
-// 可检索知识库 = 知识库抽象层（知识应用 → 知识库）里启用的镜像库（RAGFlow / DIFY）；
+// 可检索知识库 = 知识库抽象层（知识应用 → 知识库）里启用的本地文档库；
 // 检索范围不再由问答页选择，固定取全部启用库，是否检索由智能体配置 retrieval_mode 决定
 const kbSources = ref<KnowledgeLibrary[]>([])
 const datasetsError = ref('')
@@ -445,7 +443,7 @@ async function loadModels() {
 async function loadKbSources() {
   datasetsError.value = ''
   try {
-    // 只取知识库抽象层里启用的库（RAGFlow / DIFY 镜像，登记于「知识应用 → 知识库」）
+    // 只取知识库抽象层里启用的库（本地文档库，登记于「知识应用 → 知识库」）
     const all = await listKnowledgeLibraries(true)
     kbSources.value = all
   } catch (e: any) {
@@ -724,7 +722,7 @@ async function askQuestion(q: string, action: '' | 'continue' | 'stop' = '', tar
           msg.done = true
           settleSteps(msg.steps, 'failed')
           msg.configError = code
-          msg.meta = code === 'llm_not_configured' || code === 'dify_not_configured'
+          msg.meta = code === 'llm_not_configured'
             ? '需要先完成系统配置'
             : '⚠️ 回答失败，可重试'
           msg.content = message || '问答请求失败，请稍后重试。'
@@ -1047,7 +1045,7 @@ async function submitCorrection() {
             ⚠️ 知识库加载失败：{{ datasetsError }}。
           </div>
           <div v-else-if="!kbSources.length" class="warn-tip">
-            尚无可检索的知识库，请到「知识应用 → 知识库」登记 DIFY / RagFlow 知识库后回到本页。
+            尚无可检索的知识库，请到「智能体配置」中选择知识库，或到「知识应用 → 知识库」创建文档库后回到本页。
           </div>
         </div>
 

@@ -3,59 +3,14 @@ import sys
 import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
-import httpx
 from fastapi import HTTPException
 from pydantic import ValidationError
-from app.services.knowledge_engines.ragflow import RagflowEngine, EngineError, document_state
 from app.services.knowledge_engines.mineru import job_state
 from app.services.knowledge_engines.local_chunker import chunk_markdown, clean_markdown, est_tokens
 from app.routes import managed_library as routes
 
 
 class EngineContractTests(unittest.IsolatedAsyncioTestCase):
-    async def request_with(self, method, path, responses, **kwargs):
-        client = AsyncMock()
-        client.__aenter__.return_value = client
-        client.request.side_effect = responses
-        with patch('app.services.knowledge_engines.ragflow.httpx.AsyncClient', return_value=client):
-            result = await RagflowEngine('http://engine/api/v1', 'test').request(method, path, **kwargs)
-        return result, client
-
-    def response(self, code=200, body=None):
-        return httpx.Response(code, json=body or {'code': 0, 'data': {}}, request=httpx.Request('GET', 'http://engine'))
-
-    async def test_legacy_patch_fallback_only_on_405(self):
-        _, client = await self.request_with('PATCH', '/datasets/a/documents/b', [self.response(405), self.response()], json={'chunk_method':'naive'})
-        self.assertEqual([c.args[0] for c in client.request.call_args_list], ['PATCH', 'PUT'])
-        self.assertEqual(client.request.call_args_list[1].kwargs['json'], {'chunk_method':'naive'})
-
-    async def test_ambiguous_mutation_not_retried(self):
-        with self.assertRaises(EngineError):
-            await self.request_with('PATCH', '/datasets/a/documents/b', [self.response(500)])
-
-    async def test_business_failure_rejected(self):
-        with self.assertRaisesRegex(EngineError, 'No access'):
-            await self.request_with('POST', '/datasets', [self.response(body={'code': 102, 'message':'No access'})])
-
-    async def test_wire_contracts(self):
-        adapter = RagflowEngine('http://engine', 'test')
-        adapter.request = AsyncMock(return_value={'chunks': [], 'total': 0})
-        await adapter.parse('ds', 'doc')
-        adapter.request.assert_awaited_with('POST', '/datasets/ds/chunks', json={'document_ids':['doc']})
-        await adapter.parse('ds', 'doc', stop=True)
-        adapter.request.assert_awaited_with('DELETE', '/datasets/ds/chunks', json={'document_ids':['doc']})
-        await adapter.delete_chunk('ds', 'doc', 'chunk')
-        adapter.request.assert_awaited_with('DELETE', '/datasets/ds/documents/doc/chunks', json={'chunk_ids':['chunk']})
-        await adapter.chunks('ds', 'doc', 3, 20)
-        adapter.request.assert_awaited_with('GET', '/datasets/ds/documents/doc/chunks', params={'page':3, 'page_size':20})
-
-    def test_state_mapping(self):
-        for run in ['3', 'DONE']:
-            self.assertEqual(document_state({'run':run,'progress':1}), ('COMPLETED', 1))
-        self.assertEqual(document_state({'run':'RUNNING','progress':-1}), ('FAILED',0))
-        self.assertEqual(document_state({'run':'2','progress':0}), ('CANCELLED',0))
-        self.assertEqual(document_state({'run':'future_state'}), ('UNKNOWN',0))
-
     def test_validation(self):
         for payload in [{'name':'   '}, {'name':'x','chunk_token_num':0}, {'name':'x','chunk_token_num':2049}, {'name':'x','delimiter':''}]:
             with self.assertRaises(ValidationError): routes.LibraryIn(**payload)
@@ -135,31 +90,10 @@ class EngineContractTests(unittest.IsolatedAsyncioTestCase):
 
 
 class UpgradeAndIsolationTests(unittest.IsolatedAsyncioTestCase):
-    async def test_models_normalize_source_response(self):
-        adapter = RagflowEngine('http://engine', 'test')
-        adapter.request = AsyncMock(return_value=[{'model_id':'id','name':'bge-m3','instance_name':'local','provider_name':'Xinference'}])
-        self.assertEqual(await adapter.embedding_models(), [{'id':'id','name':'bge-m3@local@Xinference'}])
-
-    async def test_new_disabled_chunk_updates_returned_id(self):
-        adapter = RagflowEngine('http://engine','test')
-        adapter.request = AsyncMock(side_effect=[{'chunk':{'id':'new'}}, None])
-        await adapter.write_chunk('ds','doc',{'content':'text','available':False})
-        adapter.request.assert_awaited_with('PATCH','/datasets/ds/documents/doc/chunks/new',json={'available':False})
-
     def test_parent_child_config(self):
         cfg = routes.ProcessingConfig(enable_children=True, children_delimiter='。')
         self.assertTrue(cfg.enable_children)
         with self.assertRaises(ValidationError): routes.ProcessingConfig(enable_children=True, chunk_method='table')
-
-    async def test_query_does_not_leave_project_for_wrong_engine(self):
-        from kb_common.clients import ragflow_client
-        settings = SimpleNamespace(ragflow_base_url='http://other/api/v1',ragflow_api_key='key',ragflow_retrieval_top_k=8,
-            ragflow_similarity_threshold=0.2,ragflow_vector_similarity_weight=0.3,ragflow_rerank_id='')
-        with patch.object(ragflow_client,'get_settings',return_value=settings), patch.object(ragflow_client,'_binding_errors',AsyncMock(return_value=[{'dataset_id':'ds','error':'changed'}])), patch.object(ragflow_client.httpx,'AsyncClient') as client:
-            result = await ragflow_client.retrieve_with_report(['ds'],'private query')
-        self.assertEqual(result['hits'],[])
-        self.assertEqual(result['skipped'][0]['dataset_id'],'ds')
-        client.assert_not_called()
 
 
 
@@ -559,28 +493,36 @@ class ParsedContentTests(unittest.IsolatedAsyncioTestCase):
         fake.minio = SimpleNamespace(get_object=get_object or Mock())
         return fake
 
-    async def test_store_parsed_markdown_uploads_sibling_object(self):
+    def _patched_modules(self, fake):
+        """函数内延迟导入的 minio_client 用 sys.modules + 包属性双保险替换，
+        避免引擎等模块先行 import 后包属性仍指向真实客户端、测试写穿到真实 MinIO。"""
         import sys
+        import kb_common.clients as clients_pkg
+        return (patch.dict(sys.modules, {'kb_common.clients.minio_client': fake}),
+                patch.object(clients_pkg, 'minio_client', fake, create=True))
+
+    async def test_store_parsed_markdown_uploads_sibling_object(self):
         doc = SimpleNamespace(storage_path='document-libraries/7/abc/doc.pdf')
         fake = self._fake_minio_module()
-        with patch.dict(sys.modules, {'kb_common.clients.minio_client': fake}):
+        m1, m2 = self._patched_modules(fake)
+        with m1, m2:
             await routes._store_parsed_markdown(doc, '# 手册')
         fake.upload_bytes.assert_called_once_with('raw-docs', 'document-libraries/7/abc/parsed.md',
                                                   '# 手册'.encode('utf-8'), 'text/markdown')
 
     async def test_store_parsed_markdown_skips_empty(self):
-        import sys
         fake = self._fake_minio_module()
-        with patch.dict(sys.modules, {'kb_common.clients.minio_client': fake}):
+        m1, m2 = self._patched_modules(fake)
+        with m1, m2:
             await routes._store_parsed_markdown(SimpleNamespace(storage_path='a/b/c.md'), '')
         fake.upload_bytes.assert_not_called()
 
     async def test_parsed_content_endpoint_404_when_missing(self):
-        import sys, uuid as _uuid
+        import uuid as _uuid
         doc = SimpleNamespace(storage_path='document-libraries/7/abc/doc.pdf')
         fake = self._fake_minio_module(get_object=Mock(side_effect=RuntimeError('NoSuchKey')))
-        with patch.object(routes, 'bound_document', AsyncMock(return_value=(object(), doc))), \
-             patch.dict(sys.modules, {'kb_common.clients.minio_client': fake}):
+        m1, m2 = self._patched_modules(fake)
+        with patch.object(routes, 'bound_document', AsyncMock(return_value=(object(), doc))), m1, m2:
             with self.assertRaises(HTTPException) as ctx:
                 await routes.parsed_content(7, _uuid.uuid4(), s=None)
         self.assertEqual(ctx.exception.status_code, 404)

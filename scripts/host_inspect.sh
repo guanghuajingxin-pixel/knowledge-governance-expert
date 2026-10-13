@@ -78,5 +78,3 @@ if python3 -c "exit(0 if $LOAD1 > $CORES else 1)" 2>/dev/null; then
   WARN=1
 fi
 [ "$WARN" = "0" ] && echo "[OK] 负载/内存/swap 均在安全水位"
-hr
-echo "提示：Dify 栈恢复命令 = cd dify/docker && docker compose start ；停止 = docker compose stop"

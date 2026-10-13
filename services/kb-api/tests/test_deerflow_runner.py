@@ -48,7 +48,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_cited_retrieval_yields_answered_with_enriched_citations(self):
         hits = {"results": [{"document_title": "差旅报销管理制度", "document_id": "d1",
-                             "segment_id": "s1", "dataset_id": "ds", "score": 0.8,
+                             "segment_id": "s1", "score": 0.8,
                              "content": "报销需部门经理审批。"}]}
         body = sse(
             RETRIEVE_START,
@@ -162,16 +162,14 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(any(e["type"] == "final" for e in events))
             self.assertTrue(any(e["type"] == "config_error" for e in events))
 
-    async def test_browse_and_expand_have_correlated_failure_states(self):
+    async def test_browse_failure_marks_step_failed(self):
         body = sse(
             {"type": "tool_start", "name": "dingtalk_browse", "call_id": "browse", "args": {}},
-            {"type": "tool_start", "name": "knowledge_context_expand", "call_id": "expand", "args": {}},
-            {"type": "tool_end", "name": "knowledge_context_expand", "call_id": "expand", "content": '{"error":"失败"}'},
-            {"type": "tool_end", "name": "dingtalk_browse", "call_id": "browse", "content": '{}'},
+            {"type": "tool_end", "name": "dingtalk_browse", "call_id": "browse", "content": '{"error":"失败"}'},
             {"type": "ai_text", "content": "暂未找到依据"}, END)
         events = await self.collect(body)
-        self.assertEqual([e["status"] for e in events if e.get("step_id") == "browse"], ["running", "completed"])
-        self.assertEqual([e["status"] for e in events if e.get("step_id") == "expand"], ["running", "failed"])
+        self.assertEqual([e["status"] for e in events if e.get("step_id") == "browse"], ["running", "failed"])
+        self.assertIn("浏览钉钉目录失败", self.final_of(events)["quality"]["warnings"])
         self.assertEqual(self.final_of(events)["quality"]["verification"], "unverified")
 
     async def test_clarification_ends_with_clarification_answer(self):

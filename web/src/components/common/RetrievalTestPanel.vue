@@ -20,7 +20,7 @@ const renderMarkdown = (content: string, documentId?: string) => {
 }
 
 const props = defineProps<{
-  /** 后端：local=本地知识库 ES 检索；library=知识库抽象层（Dify/RAGFlow）检索 */
+  /** 后端：local=本地知识库 ES 检索；library=知识库抽象层（本地文档库）检索 */
   backend?: 'local' | 'library'
   /** 检索范围：document=单文档内检索；kb=整个知识库检索 */
   scope: 'document' | 'kb'
@@ -221,7 +221,7 @@ function formatTime(ts: number) {
 onMounted(loadRecords)
 
 // 知识库抽象层检索：目标为文档库且已保存「检索设置」时，按库配置预填本次测试初值
-// （外部库 Dify/RAGFlow 无本地检索设置，保持全局默认；预填失败静默回退）
+// （未保存检索设置的库保持全局默认；预填失败静默回退）
 onMounted(async () => {
   if (backend.value !== 'library' || !props.libraryId) return
   try {

@@ -49,26 +49,11 @@ const routes: RouteRecordRaw[] = [
         meta: { title: 'Dify智能问答', icon: 'Workflow', group: 'feature' },
       },
       {
-        // 知识采集：页面已拆分为二级页（钉钉知识同步/同步队列），父级仅作分组，重定向到首个子页
+        // 知识采集：页面已拆分为二级页（知识源管理/知识中心/同步队列），父级仅作分组，重定向到首个子页
         path: 'collection',
         name: 'Collection',
         redirect: '/knowledge-sources',
         meta: { title: '知识采集', icon: 'Download', group: 'feature' },
-      },
-      {
-        // 知识加工：仅解析引擎一个二级页，父级仅作分组，重定向到子页
-        // （入库审核已迁入知识治理分组，见 /govern/review）
-        path: 'process',
-        name: 'Process',
-        redirect: '/process/engine',
-        meta: { title: '知识加工', icon: 'Settings', group: 'feature' },
-      },
-      {
-        // 解析引擎：双页签（自定义解析 + MinerU WebUI iframe）
-        path: 'process/engine',
-        name: 'ProcessEngine',
-        component: () => import('@/views/governance/ProcessEngine.vue'),
-        meta: { title: '解析引擎', icon: 'Gauge', group: 'feature', parent: '/process', menuOrder: 1 },
       },
       {
         // 知识应用：拆分为二级页（脱敏策略/知识库），父级仅作分组，重定向到首个子页
@@ -85,7 +70,7 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '脱敏策略', icon: 'EyeOff', group: 'feature', parent: '/apply', menuOrder: 1, roles: ['super_admin', 'admin'] },
       },
       {
-        // 知识库：项目文档库 / 问答库 / DIFY 外部库 / RAGFLOW 外部库
+        // 知识库：项目文档库 / 物料库 / 问答库
         path: 'apply/knowledge-libraries',
         name: 'KnowledgeLibraries',
         component: () => import('@/views/knowledge-libraries/index.vue'),
@@ -170,25 +155,18 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '知识缺口', icon: 'ChartLine', group: 'feature', parent: '/govern', menuOrder: 1 },
       },
       {
-        // 入库审核：原「知识打标」页迁入知识治理分组（AI 打标 + 摘要生成 + 知识关系构建 + 钉钉知识入库审核）
+        // 入库审核：钉钉知识入库审核（列表内完成审核）
         path: 'govern/review',
         name: 'GovernReview',
         component: () => import('@/views/governance/process.vue'),
         meta: { title: '入库审核', icon: 'BadgeCheck', group: 'feature', parent: '/govern', menuOrder: 2 },
       },
       {
-        // 知识源管理：原「知识中心」子菜单，知识中心页签迁入知识加工后挂到知识采集分组下
+        // 知识源管理：原「知识中心」子菜单，挂到知识采集分组下
         path: 'knowledge-sources',
         name: 'KnowledgeSources',
         component: () => import('@/views/knowledge-sources/index.vue'),
         meta: { title: '知识源管理', icon: 'Plug', group: 'feature', parent: '/collection', menuOrder: 1, roles: ['super_admin', 'admin', 'editor'] },
-      },
-      {
-        // 钉钉知识同步：原「知识采集」页钉钉页签下沉为二级页（定时同步 + 指定目录同步）
-        path: 'collection/dingtalk',
-        name: 'CollectionDingtalk',
-        component: () => import('@/views/governance/collection/DingtalkSync.vue'),
-        meta: { title: '钉钉知识同步', icon: 'Clock', group: 'feature', parent: '/collection', menuOrder: 2 },
       },
       {
         // 知识中心：跨文档库聚合所有来源的知识源文档（标题/标签/来源系统/更新人/更新与过期时间），
@@ -196,14 +174,14 @@ const routes: RouteRecordRaw[] = [
         path: 'collection/knowledge-center',
         name: 'CollectionKnowledgeCenter',
         component: () => import('@/views/governance/collection/KnowledgeCenter.vue'),
-        meta: { title: '知识中心', icon: 'FolderOpen', group: 'feature', parent: '/collection', menuOrder: 3 },
+        meta: { title: '知识中心', icon: 'FolderOpen', group: 'feature', parent: '/collection', menuOrder: 2 },
       },
       {
         // 同步队列：知识同步过程的逐文档任务列表（待处理/处理中/已完成 + 失败任务重试）
         path: 'collection/queue',
         name: 'CollectionQueue',
         component: () => import('@/views/governance/collection/SyncQueue.vue'),
-        meta: { title: '同步队列', icon: 'ListTodo', group: 'feature', parent: '/collection', menuOrder: 4 },
+        meta: { title: '同步队列', icon: 'ListTodo', group: 'feature', parent: '/collection', menuOrder: 3 },
       },
       {
         path: 'model',

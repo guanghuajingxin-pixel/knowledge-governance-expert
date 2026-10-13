@@ -17,8 +17,6 @@ export function formatDateTime(value: string | null | undefined): string {
 export const SOURCE_LABELS: Record<string, string> = {
   local: '本地上传',
   dingtalk: '钉钉同步',
-  dify: 'Dify',
-  ragflow: 'RAGFlow',
 }
 export function formatSource(source: string | null | undefined): string {
   if (!source) return '-'

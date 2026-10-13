@@ -1,6 +1,6 @@
 # 知识库检索
 
-统一检索已开放的本地文档库、Dify 和 RAGFlow，返回知识片段及来源。
+统一检索已开放的本地文档库，返回知识片段及来源。
 
 ## 请求
 
@@ -20,10 +20,9 @@ Content-Type: application/json
 | mode | string | 否 | hybrid 混合、vector 向量、fulltext 全文；省略遵循库级设置或引擎默认 |
 | similarity_threshold | number | 否 | 最终分数阈值，0–1 |
 | vector_similarity_weight | number | 否 | 混合检索向量权重，0–1 |
-| rerank | boolean | 否 | 是否重排；省略遵循库级设置或引擎默认 |
+| rerank | boolean | 否 | 是否重排；省略遵循库级设置或默认 |
 | rerank_model_id | string | 否 | 平台重排模型配置 UUID |
-| rerank_id | string | 否 | RAGFlow 混合检索的引擎重排模型名，最多 200 字符 |
-| document_ids | string[] | 否 | 最多 100 个文档 ID；本地库使用 UUID，RAGFlow 使用引擎文档 ID；Dify 暂不支持 |
+| document_ids | string[] | 否 | 最多 100 个文档 ID（UUID），仅在指定文档范围内检索 |
 
 ```json
 {
@@ -69,7 +68,7 @@ Content-Type: application/json
 | partial | 是否有部分知识库检索失败 |
 | failed_library_ids | 失败库 ID；不包含内部异常或连接配置 |
 
-内容、文档标题和知识库名称按 viewer 的检索输出策略脱敏；策略服务异常时接口拒绝返回原文。分数由各引擎计算，不应视为统一校准的概率。
+内容、文档标题和知识库名称按 viewer 的检索输出策略脱敏；策略服务异常时接口拒绝返回原文。分数由检索内核计算，不应视为统一校准的概率。
 
 ## Python 示例
 

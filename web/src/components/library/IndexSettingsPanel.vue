@@ -73,7 +73,7 @@ function parseDelimiters(s: string) {
   let rest = s || ''
   const sel: string[] = []
   // 换行两级：先长后短（'\n\n' 段落级 / '\n' 行级，序列化互斥可判别，
-  // 供父子分段父块切分区分段落与行——Dify fixed_separator 语义）
+  // 供父子分段父块切分区分段落与行——fixed_separator 单选语义）
   if (rest.includes('\n\n')) { sel.push('nl2'); rest = rest.split('\n\n').join('') }
   else if (rest.includes('\n')) { sel.push('nl'); rest = rest.split('\n').join('') }
   for (const p of DELIMITER_PRESETS) {

@@ -185,8 +185,6 @@ async def run_deerflow_stream(
     query: str,
     *,
     thread_id: str,
-    dataset_ids: list[str] | None = None,
-    ragflow_dataset_ids: list[str] | None = None,
     kb_ids: list[str] | None = None,
     doc_library_ids: list[int] | None = None,
     top_k: int = 8,
@@ -212,8 +210,6 @@ async def run_deerflow_stream(
         "plan_mode": bool(plan_mode),
         "subagent_enabled": bool(subagent_enabled),
         "recursion_limit": 80,
-        "dataset_ids": dataset_ids or [],
-        "ragflow_dataset_ids": ragflow_dataset_ids or [],
         "kb_ids": kb_ids or [],
         "doc_library_ids": doc_library_ids or [],
         "top_k": max(int(top_k or 8), 5),
@@ -272,14 +268,13 @@ async def run_deerflow_stream(
                 "document_title": title,
                 "document_id": h.get("document_id") or "",
                 "segment_id": h.get("segment_id") or "",
-                "dataset_id": h.get("dataset_id") or "",
                 "page_number": h.get("page_number"),
                 "score": h.get("score"),
                 "content": h.get("content") or "",
                 "evidence_read": bool(h.get("content")),
-                "source": h.get("source") or "dify",
+                "source": h.get("source") or "local",
             }
-            # 同步自钉钉知识库的 Dify 文档：携带钉钉原始链接，引用来源点击跳钉钉预览
+            # 同步自钉钉知识库的文档：携带钉钉原始链接，引用来源点击跳钉钉预览
             if h.get("url"):
                 cite["url"] = h.get("url")
                 cite["node_id"] = h.get("node_id") or ""
@@ -342,8 +337,7 @@ async def run_deerflow_stream(
 
     titles = {"knowledge_search": "知识库检索", "dingtalk_search": "钉钉文档定位",
               "dingtalk_read_doc": "读取文档正文", "dingtalk_browse": "浏览钉钉目录",
-              "knowledge_context_expand": "展开相关上下文", "task": "子任务处理",
-              "ask_clarification": "等待确认"}
+              "task": "子任务处理", "ask_clarification": "等待确认"}
 
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(connect=5.0, read=660.0, write=30.0, pool=10.0)) as client:
@@ -425,8 +419,6 @@ async def run_deerflow_stream(
                                 detail = "已获取正文" if content.get("content") else "未获取到正文"
                             elif name == "dingtalk_browse":
                                 detail = "目录读取完成"
-                            elif name == "knowledge_context_expand":
-                                detail = "相关上下文已展开"
                             yield _sse({"type": "step", "step_id": call_id,
                                         "status": "failed" if failed else "completed",
                                         "title": titles.get(name, "处理资料"), "detail": detail})

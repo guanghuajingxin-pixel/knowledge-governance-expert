@@ -42,33 +42,6 @@ export interface LlmModelsResult {
 export const listLlmModels = (params: { base_url?: string; api_key?: string }) =>
   request.get<unknown, LlmModelsResult>('/settings/llm-models', { params })
 
-// ============ Dify 多配置 ============
-
-export interface DifyProfile {
-  id: string
-  name: string
-  base_url: string
-  api_key: string
-  dataset_ids: string
-  enabled: boolean
-  created_at: string | null
-}
-
-export const listDifyProfiles = () =>
-  request.get<unknown, DifyProfile[]>('/settings/dify-profiles')
-
-export const createDifyProfile = (data: Omit<DifyProfile, 'id' | 'enabled' | 'created_at'>) =>
-  request.post<unknown, DifyProfile>('/settings/dify-profiles', data)
-
-export const updateDifyProfile = (id: string, data: Omit<DifyProfile, 'id' | 'enabled' | 'created_at'>) =>
-  request.put<unknown, DifyProfile>(`/settings/dify-profiles/${id}`, data)
-
-export const deleteDifyProfile = (id: string) =>
-  request.delete<unknown, void>(`/settings/dify-profiles/${id}`)
-
-export const enableDifyProfile = (id: string) =>
-  request.put<unknown, { ok: boolean }>(`/settings/dify-profiles/${id}/enable`)
-
 // ============ LLM 供应商配置（多供应商 × 多模型） ============
 
 export interface LlmModelEntry {
@@ -125,15 +98,6 @@ export interface TestDingtalkResult {
 
 export const testDingtalk = (data: { app_key?: string; app_secret?: string; operator_union_id?: string }) =>
   request.post<unknown, TestDingtalkResult>('/settings/test-dingtalk', data)
-
-export interface TestDifyResult {
-  ok: boolean
-  latency_ms?: number
-  message?: string
-}
-
-export const testDify = (data: { base_url?: string; api_key?: string; profile_id?: string }) =>
-  request.post<unknown, TestDifyResult>('/settings/test-dify', data)
 
 export interface TestMinerUResult {
   ok: boolean
@@ -228,37 +192,10 @@ export const fetchExternalModels = (baseUrl: string, apiKey: string, extra?: { k
     params: { base_url: baseUrl, api_key: apiKey, ...(extra || {}) },
   })
 
-// ============ RAGFlow 知识库多配置（多环境切换） ============
-
-export interface RagflowProfile {
-  id: string
-  name: string
-  base_url: string
-  api_key: string          // 脱敏回显
-  has_key: boolean
-  enabled: boolean
-  created_at: string | null
-}
-
-export const listRagflowProfiles = () =>
-  request.get<unknown, RagflowProfile[]>('/settings/ragflow-profiles')
-
-export const createRagflowProfile = (data: { name: string; base_url: string; api_key: string }) =>
-  request.post<unknown, RagflowProfile>('/settings/ragflow-profiles', data)
-
-export const updateRagflowProfile = (id: string, data: { name: string; base_url: string; api_key: string }) =>
-  request.put<unknown, RagflowProfile>(`/settings/ragflow-profiles/${id}`, data)
-
-export const deleteRagflowProfile = (id: string) =>
-  request.delete<unknown, void>(`/settings/ragflow-profiles/${id}`)
-
-export const enableRagflowProfile = (id: string) =>
-  request.put<unknown, { ok: boolean }>(`/settings/ragflow-profiles/${id}/enable`)
-
 // ============ 密钥回显（管理员查看/复制完整密钥） ============
 
-/** 查看 profile 配置的完整 API Key（kind: dify / llm / ragflow / embedding / rerank） */
-export const revealProfileSecret = (kind: 'dify' | 'llm' | 'ragflow' | 'embedding' | 'rerank', profileId: string) =>
+/** 查看 profile 配置的完整 API Key（kind: llm / embedding / rerank） */
+export const revealProfileSecret = (kind: 'llm' | 'embedding' | 'rerank', profileId: string) =>
   request.get<unknown, { api_key: string }>(`/settings/profile-secret/${kind}/${profileId}`)
 
 /** 查看系统级密钥配置项的完整值（如 mineru_api_key / dingtalk_app_secret） */

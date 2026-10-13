@@ -424,7 +424,7 @@ const ownerStats = [
           <svg viewBox="0 0 1024 1024" width="22" height="22" fill="#fff"><path d="M512 128c-212 0-384 172-384 384s172 384 384 384 384-172 384-384-172-384-384-384z m0 640c-141.4 0-256-114.6-256-256s114.6-256 256-256 256 114.6 256 256-114.6 256-256 256z"/><path d="M512 288c-123.7 0-224 100.3-224 224s100.3 224 224 224 224-100.3 224-224-100.3-224-224-224z m0 384c-88.4 0-160-71.6-160-160s71.6-160 160-160 160 71.6 160 160-71.6 160-160 160z"/><path d="M480 512h64v160h-64zM480 352h64v96h-64z"/></svg>
         </div>
         <div class="metric-body">
-          <div class="metric-title">知识召回数 <el-tooltip content="知识采集流程打通、Dify 文档关联钉钉文档 ID 后统计"><el-icon class="q"><QuestionFilled /></el-icon></el-tooltip></div>
+          <div class="metric-title">知识召回数 <el-tooltip content="知识采集流程打通、同步文档关联钉钉文档 ID 后统计"><el-icon class="q"><QuestionFilled /></el-icon></el-tooltip></div>
           <div class="metric-value cs-value">即将发布</div>
         </div>
         <div class="metric-side">
@@ -438,7 +438,7 @@ const ownerStats = [
           <svg viewBox="0 0 1024 1024" width="22" height="22" fill="#fff"><path d="M416 384h192v64H416zM416 512h192v64H416zM416 640h128v64H416z"/><path d="M512 128C288 128 128 288 128 512s160 384 384 384 384-160 384-384S736 128 512 128z m0 640c-141.4 0-256-114.6-256-256s114.6-256 256-256 256 114.6 256 256-114.6 256-256 256z"/></svg>
         </div>
         <div class="metric-body">
-          <div class="metric-title">调用量 <el-tooltip content="知识采集流程打通、Dify 文档关联钉钉文档 ID 后统计"><el-icon class="q"><QuestionFilled /></el-icon></el-tooltip></div>
+          <div class="metric-title">调用量 <el-tooltip content="知识采集流程打通、同步文档关联钉钉文档 ID 后统计"><el-icon class="q"><QuestionFilled /></el-icon></el-tooltip></div>
           <div class="metric-value cs-value">即将发布</div>
         </div>
         <div class="metric-side">

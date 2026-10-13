@@ -17,7 +17,7 @@ import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import select, update
 
 from kb_common.config import get_settings
 from kb_common.models import (
@@ -55,13 +55,10 @@ def run_sync_batch_tick(job_log=None) -> tuple[int, str]:
             _refresh_parsing_documents(db)
 
             # (c) 原子认领：跨源全局 FIFO，SKIP LOCKED 防多 tick 并发重复领取
-            library_source_ids = select(SyncSource.id).where(SyncSource.backend_type == "library")
             claimed = db.execute(
                 select(SyncTask)
                 .where(SyncTask.status == "pending", SyncTask.kind == "sync",
-                       SyncTask.action.in_(("create", "update")),
-                       or_(SyncTask.library_document_id.isnot(None),
-                           SyncTask.source_id.in_(library_source_ids)))
+                       SyncTask.action.in_(("create", "update")))
                 .order_by(SyncTask.id).limit(s.sync_batch_size)
                 .with_for_update(skip_locked=True)
             ).scalars().all()
@@ -97,10 +94,8 @@ def run_sync_batch_tick(job_log=None) -> tuple[int, str]:
 def _refresh_parsing_documents(db) -> None:
     """刷新 library 同步源关联的 PARSING 文档（MinerU job 查询 + 完成时落地分段）。"""
     doc_id_strs = [row[0] for row in db.execute(
-        select(SyncDocumentMapping.dify_document_id).distinct()
-        .join(SyncSource, SyncSource.id == SyncDocumentMapping.source_id)
-        .where(SyncSource.backend_type == "library",
-               SyncDocumentMapping.dify_document_id.isnot(None))
+        select(SyncDocumentMapping.document_id).distinct()
+        .where(SyncDocumentMapping.document_id.isnot(None))
     ).all()]
     if not doc_id_strs:
         return
@@ -236,7 +231,7 @@ def _process_locked(db, task: SyncTask, source: SyncSource) -> tuple[str, str]:
             mapping = SyncDocumentMapping(source_id=source.id, node_id=node_id,
                                           name=name, category=node.get("category", ""))
             db.add(mapping)
-        mapping.dify_document_id = doc_id
+        mapping.document_id = doc_id
         mapping.parent_node_id = node.get("parent_node_id", source.root_node_id)
         mapping.name = name
         mapping.relative_path = str(rel_dir / safe_name(name))

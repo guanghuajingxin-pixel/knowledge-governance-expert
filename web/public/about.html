@@ -325,7 +325,7 @@
     </p>
     <div class="hero-pills">
       <span>🦌 DeerFlow 2.0 智能体底座</span>
-      <span>🔎 Dify + 钉钉双源检索</span>
+      <span>🔎 知识库 + 钉钉双源检索</span>
       <span>⏱ 限时探索 · 用户可控</span>
       <span>⚡ SSE 流式问答</span>
       <span>📄 MinerU 文档解析</span>
@@ -363,7 +363,7 @@
       <div class="idea">
         <div class="idea-icon">💡</div>
         <h3>答案优先，而非链接堆砌</h3>
-        <p>知识类问题<b>主动、同时检索 Dify 与钉钉双来源</b>，穷尽同义词 / 上下位词 / 拆解子问题等 3-5 轮关键词替换策略，归纳合并去重后，<b>第一句就是实质答案</b>，参考文档仅作补充。</p>
+        <p>知识类问题<b>主动、同时检索知识库与钉钉双来源</b>，穷尽同义词 / 上下位词 / 拆解子问题等 3-5 轮关键词替换策略，归纳合并去重后，<b>第一句就是实质答案</b>，参考文档仅作补充。</p>
       </div>
       <div class="idea">
         <div class="idea-icon">🧭</div>
@@ -554,7 +554,7 @@
     <div class="sec-head">
       <div class="sec-tag">ARCHITECTURE</div>
       <h2>系统架构</h2>
-      <p>4 个应用进程 + 5 个基础设施容器 + 本地 Dify 服务，微服务分层、各司其职</p>
+      <p>4 个应用进程 + 5 个基础设施容器，知识检索全链路本地化，微服务分层、各司其职</p>
     </div>
     <div class="arch">
       <div class="arch-layer">
@@ -589,7 +589,7 @@
         <div class="arch-title"><b>📚 检索与解析</b></div>
         <div class="arch-boxes">
           <div class="chip hot"><b>MinerU 解析引擎 · :2028</b><small>Office 原生 OOXML 秒级转换 · PDF/扫描件 OCR · 多级降级</small></div>
-          <div class="chip hot"><b>Dify 知识库（本地化部署）</b><small>语义 + 全文混合检索 · 答案内容主来源</small></div>
+          <div class="chip hot"><b>本地文档库</b><small>语义 + 全文混合检索 · 答案内容主来源</small></div>
           <div class="chip"><b>Elasticsearch</b><small>kNN + BM25 + RRF 融合 + 重排</small></div>
           <div class="chip"><b>钉钉知识库</b><small>目录浏览 / 全文检索 / 正文读取（dws CLI）</small></div>
         </div>
@@ -672,7 +672,7 @@
         <div class="mod-no">08</div>
         <div class="mod-emoji">🎛</div>
         <h3>配置中心</h3>
-        <p>系统配置：LLM 供应商卡片式接入、Dify / 钉钉 / MinerU 连通性测试后保存、密钥脱敏；智能体配置：人格与技能 Markdown 编辑、工具开关、规划 / 子智能体 / 长期记忆。</p>
+        <p>系统配置：LLM 供应商卡片式接入、Embedding / Rerank / 钉钉 / MinerU 连通性测试后保存、密钥脱敏；智能体配置：人格与技能 Markdown 编辑、工具开关、规划 / 子智能体 / 长期记忆。</p>
         <div class="mod-tags"><span>热生效</span><span>密钥加密</span><span>工具开关</span></div>
       </div>
     </div>
@@ -690,7 +690,7 @@
     <div class="hl-grid">
       <div class="hl"><div class="hl-check">✓</div><div><b>进程内嵌入式 DeerFlow 2.0</b><p>以官方 DeerFlowClient 直接驱动 Lead Agent（中间件链 + 子智能体 + 检查点），无需 langgraph server / gateway，独立 sidecar 解决 Python 3.12 与主服务依赖隔离。</p></div></div>
       <div class="hl"><div class="hl-check">✓</div><div><b>混合检索管线</b><p>kNN 向量 + BM25 全文 + RRF 融合排序 + bge-reranker-v2-m3 重排，BGE 模型进程内单次加载、跨服务复用，兼顾质量与内存。</p></div></div>
-      <div class="hl"><div class="hl-check">✓</div><div><b>企业检索工具链「四件套」</b><p>knowledge_search（Dify 检索）/ dingtalk_browse（目录地图与列表）/ dingtalk_search（文件名补漏）/ dingtalk_read_doc（正文读取），SOUL 规定检索纪律。</p></div></div>
+      <div class="hl"><div class="hl-check">✓</div><div><b>企业检索工具链「四件套」</b><p>knowledge_search（知识库检索）/ dingtalk_browse（目录地图与列表）/ dingtalk_search（文件名补漏）/ dingtalk_read_doc（正文读取），SOUL 规定检索纪律。</p></div></div>
       <div class="hl"><div class="hl-check">✓</div><div><b>办公文档正文秒级可读</b><p>pptx / docx / xlsx 走 MinerU 原生 OOXML 转换（秒级、无需模型），PDF / 扫描件走 pipeline OCR，本地即时解析与云 API 多级降级兜底。</p></div></div>
       <div class="hl"><div class="hl-check">✓</div><div><b>确定性的限时探索</b><p>中间件在模型调用边界短路合成询问，到点动作不依赖模型自觉、不额外消耗 Token；阈值可用环境变量覆盖。</p></div></div>
       <div class="hl"><div class="hl-check">✓</div><div><b>真正可中断的问答</b><p>前端 abort + 后端 cancel 双保险，worker 线程注入 GeneratorExit 确定性停图并释放锁，中断后立即发起新问答零卡顿。</p></div></div>
@@ -710,7 +710,7 @@
 </div>
 
 <footer>
-  知识治理专家 Knowledge Governance Expert · DeerFlow 2.0 智能体底座 · Dify + 钉钉双源知识 · Vue 3 / FastAPI / LangGraph / MinerU
+  知识治理专家 Knowledge Governance Expert · DeerFlow 2.0 智能体底座 · 本地知识库 + 钉钉双源知识 · Vue 3 / FastAPI / LangGraph / MinerU
 </footer>
 
 </body>

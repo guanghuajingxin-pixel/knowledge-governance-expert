@@ -1,28 +1,19 @@
 import request from './request'
 
-// 知识库（检索抽象层）：统一登记 RAGFlow / DIFY 知识库镜像，供智能体检索选库。
-// 仅登记 platform + dataset_id 引用，不支持导入/解析新文档；
+// 知识库（检索抽象层）：本地文档库统一注册表，供智能体检索选库与检索测试。
+// 文档的导入/解析走文档库管理（api/document-library）；
 // 与「知识源管理」（推送路径定义）相互独立。
-
-export type LibraryPlatform = 'dify' | 'ragflow'
 
 export interface KnowledgeLibrary {
   id: number
   name: string
-  platform: LibraryPlatform
+  /** 历史保留字段（外部镜像下线后本地库为空串） */
+  platform: string
   dataset_id: string
-  library_type: 'document' | 'external'
+  library_type: 'document' | 'material'
   description: string
   enabled: boolean
   updated_at: string
-}
-
-export interface KnowledgeLibraryCreate {
-  name: string
-  platform: LibraryPlatform
-  dataset_id: string
-  description?: string
-  enabled?: boolean
 }
 
 export interface KnowledgeLibraryUpdate {
@@ -36,14 +27,8 @@ export const listKnowledgeLibraries = (enabledOnly = false) =>
     params: enabledOnly ? { enabled_only: true } : {},
   })
 
-export const createKnowledgeLibrary = (data: KnowledgeLibraryCreate) =>
-  request.post<unknown, KnowledgeLibrary>('/knowledge-libraries', data)
-
 export const updateKnowledgeLibrary = (id: number, data: KnowledgeLibraryUpdate) =>
   request.put<unknown, KnowledgeLibrary>(`/knowledge-libraries/${id}`, data)
-
-export const deleteKnowledgeLibrary = (id: number) =>
-  request.delete<unknown, { ok: boolean }>(`/knowledge-libraries/${id}`)
 
 // ===== 检索测试：按知识库逐库执行与智能问答一致的底层检索 =====
 
@@ -76,7 +61,7 @@ export interface RetrievalTestHit {
 export interface RetrievalTestLib {
   library_id: number
   name: string
-  platform: LibraryPlatform
+  platform: string
   dataset_id: string
   enabled: boolean
   ok: boolean
@@ -102,11 +87,9 @@ export interface RetrievalTestParams {
   top_k?: number
   /** 检索模式：hybrid=混合检索（默认）、vector=向量检索、fulltext=全文检索 */
   mode?: 'hybrid' | 'vector' | 'fulltext'
-  /** 混合检索 + Rerank 子策略时的 RAGFlow rerank 模型名 */
-  rerank_id?: string
   /** 最终相关性分数阈值 */
   similarity_threshold?: number
-  /** 本地与 RagFlow 混合检索的向量权重 */
+  /** 混合检索的向量权重 */
   vector_similarity_weight?: number
 }
 

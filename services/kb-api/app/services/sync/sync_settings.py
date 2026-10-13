@@ -1,6 +1,6 @@
 """同步模块凭据解析：DB 系统配置（Setting 表）优先，回退 .env Settings。
 
-平台钉钉/Dify 凭据由 系统配置页（settings_route）维护在 DB 中，
+平台钉钉凭据由 系统配置页（settings_route）维护在 DB 中，
 .env 里通常为空。同步路由与引擎必须统一走此解析，否则拿到空凭据，
 钉钉会报 invalidClientIdOrSecret。
 """
@@ -16,11 +16,6 @@ SYNC_SETTING_KEYS = (
     "dingtalk_app_key",
     "dingtalk_app_secret",
     "dingtalk_operator_union_id",
-    "dify_base_url",
-    "dify_api_key",
-    "dify_upload_max_mb",
-    "ragflow_base_url",
-    "ragflow_api_key",
 )
 
 
@@ -56,64 +51,20 @@ def make_dingtalk_client(db, operator_union_id: str | None = None):
     )
 
 
-def make_dify_client(db):
-    """用解析后的凭据构建同步 DifyClient。"""
-    from app.services.sync.dify_sync_client import DifyClient
-
-    vals = load_sync_settings(db)
-    get_settings().dify_upload_max_mb = int(vals["dify_upload_max_mb"])
-    return DifyClient(vals["dify_base_url"], vals["dify_api_key"])
-
-
-def make_ragflow_client(db):
-    """用解析后的凭据构建同步 RagflowSyncClient。"""
-    from app.services.sync.ragflow_sync_client import RagflowSyncClient
-
-    vals = load_sync_settings(db)
-    return RagflowSyncClient(vals["ragflow_base_url"], vals["ragflow_api_key"])
-
-
 def make_library_backend(source):
-    """构建文档库（document-libraries）同步后端。
+    """构建本地文档库（document-libraries）同步后端。
 
-    目标库 ID 复用 dify_dataset_id 列（backend_type=library 时存本地文档库 ID）。
-    source 可为 SyncSource 对象或 dict（路由层创建/更新时）。
+    dataset_id 存本地文档库 ID；source 可为 SyncSource 对象或 dict（路由层创建/更新时）。
     """
     from app.services.sync.library_backend import LibraryBackend
     if isinstance(source, dict):
-        dataset_id = source.get("dify_dataset_id") or ""
+        dataset_id = source.get("dataset_id") or ""
         src_id = source.get("id", "?")
     else:
-        dataset_id = getattr(source, "dify_dataset_id", "") or ""
+        dataset_id = getattr(source, "dataset_id", "") or ""
         src_id = getattr(source, "id", "?")
     try:
         library_id = int(dataset_id)
     except (ValueError, TypeError):
         raise ValueError(f"同步源 {src_id} 的文档库 ID 无效：{dataset_id!r}")
     return LibraryBackend(library_id)
-
-
-def make_backend(source, db):
-    """按同步源的 backend_type 返回目标引擎客户端（dify | ragflow | library）。
-
-    source 可传 SyncSource 对象、dict（路由层创建/更新时），
-    或直接传 backend_type 字符串（路由层校验时用，仅 dify/ragflow 支持）。
-    各客户端暴露同一套方法面（resolve_dataset/upload_file/update_file/
-    delete_document/wait_indexing/close），SyncEngine 无需区分具体引擎；
-    Dify 专属的知识流水线逻辑由 engine 用 backend_type=='dify' 守卫。
-    library 后端写入本地文档库（MinIO + LibraryDocument + MinerU 解析）。
-    """
-    if isinstance(source, str):
-        backend_type = source
-        target = source
-    else:
-        backend_type = (getattr(source, "backend_type", None)
-                        if not isinstance(source, dict)
-                        else source.get("backend_type")) or "dify"
-        target = source
-    backend_type = backend_type.strip().lower()
-    if backend_type == "ragflow":
-        return make_ragflow_client(db)
-    if backend_type == "library":
-        return make_library_backend(target)
-    return make_dify_client(db)

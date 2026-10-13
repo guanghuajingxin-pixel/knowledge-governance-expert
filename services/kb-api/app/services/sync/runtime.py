@@ -77,7 +77,7 @@ def recover_interrupted_runs() -> None:
 
     batch run（library 编目预建任务的 run）跨批次长驻 running 是健康状态，
     仅当长时间无推进（批处理作业死亡/被停）才按 sync_batch_stale_run_seconds 收编；
-    直跑模式（dify/ragflow）保持原 per-source 双锁收编逻辑。
+    整源直跑 run 保持原 per-source 双锁收编逻辑。
     """
     from datetime import timedelta
 
@@ -142,7 +142,7 @@ def run_sync(source_id: int, trigger: str = 'manual', operator: str = '') -> dic
             finish_interrupted(run_id, f'同步进程异常退出（退出码 {process.returncode}），可重试')
         except subprocess.TimeoutExpired:
             kill_process_group(process)
-            finish_interrupted(run_id, f'同步超时（超过 {timeout} 秒），已终止本地同步进程；已提交的 Dify 索引可能继续，可重试')
+            finish_interrupted(run_id, f'同步超时（超过 {timeout} 秒），已终止本地同步进程；已提交的文档解析可能继续，可重试')
         except BaseException as exc:
             if process is not None:
                 kill_process_group(process)

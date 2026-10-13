@@ -93,7 +93,7 @@ def main():
             for case in cases:
                 start=time.monotonic()
                 payload={'query':case['question']}
-                for key in ('dify_dataset_ids','kb_ids','history','model'):
+                for key in ('kb_ids','history','model'):
                     if key in case:
                         payload[key]=case[key]
                 try:

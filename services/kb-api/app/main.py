@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routes import auth, users, internal, knowledge_base, directory, document, search, settings_route, knowledge_center, knowledge_library, dify_route, ragflow_route, operate, governance, agent_route, agent_internal, chat_session_route, qa_route, sync_route, process_route, knowledge_gaps, metrics_route, sensitive, masking, mineru_route, managed_library
+from app.routes import auth, users, internal, knowledge_base, directory, document, search, settings_route, knowledge_center, knowledge_library, operate, governance, agent_route, agent_internal, chat_session_route, qa_route, sync_route, knowledge_gaps, metrics_route, sensitive, masking, mineru_route, managed_library
 
 
 @asynccontextmanager
@@ -19,10 +19,6 @@ async def lifespan(app: FastAPI):
         "llm_api_key": "LLM_API_KEY",
         "llm_model": "LLM_MODEL",
         "mineru_api_key": "MINERU_API_KEY",
-        "dify_base_url": "DIFY_BASE_URL",
-        "dify_api_key": "DIFY_API_KEY",
-        "ragflow_base_url": "RAGFLOW_BASE_URL",
-        "ragflow_api_key": "RAGFLOW_API_KEY",
         "dingtalk_app_key": "DINGTALK_APP_KEY",
         "dingtalk_app_secret": "DINGTALK_APP_SECRET",
         "dingtalk_operator_union_id": "DINGTALK_OPERATOR_UNION_ID",
@@ -73,7 +69,7 @@ async def lifespan(app: FastAPI):
         import logging
         logging.getLogger(__name__).warning("连接池预热任务启动失败（不影响启动）: %r", e)
 
-    # 旧版单值配置 → LLM/Dify profiles 表一次性迁移（模型配置页下线后存量配置仍可见可管理）
+    # 旧版单值配置 → LLM profiles 表一次性迁移（模型配置页下线后存量配置仍可见可管理）
     try:
         from app.routes.settings_route import seed_profiles_from_legacy_settings
         async with SessionLocal() as s:
@@ -90,7 +86,7 @@ async def lifespan(app: FastAPI):
     from app.routes import knowledge_gaps
     knowledge_gaps.start_gap_refresh_scheduler()
 
-    # 钉钉知识库 → Dify 定时增量同步调度器（按各同步源 cron 字段注册任务）
+    # 钉钉知识库 → 本地文档库 定时增量同步调度器（按各同步源 cron 字段注册任务）
     try:
         from app.services.sync.scheduler import start_sync_scheduler
         start_sync_scheduler()
@@ -189,8 +185,6 @@ app.include_router(material_library.router)
 app.include_router(material_library.components_router)
 app.include_router(sensitive.router)
 app.include_router(masking.router)
-app.include_router(dify_route.router)
-app.include_router(ragflow_route.router)
 app.include_router(operate.router)
 app.include_router(governance.router)
 app.include_router(knowledge_gaps.router)
@@ -199,7 +193,6 @@ app.include_router(agent_internal.router)
 app.include_router(chat_session_route.router)
 app.include_router(qa_route.router)
 app.include_router(sync_route.router)
-app.include_router(process_route.router)
 app.include_router(metrics_route.router)
 app.include_router(mineru_route.router)
 

@@ -289,8 +289,6 @@ class SandboxIn(BaseModel):
 
 @router.post("/masking/sandbox", dependencies=ADMIN_ONLY)
 async def sandbox(payload: SandboxIn, s: AsyncSession = Depends(get_session)):
-    from kb_common.clients import dify_client, ragflow_client
-
     if payload.mock_role not in ("super_admin", "admin", "editor", "viewer"):
         raise HTTPException(422, f"不支持的角色：{payload.mock_role}")
     if payload.scene not in SCENES:
@@ -308,7 +306,7 @@ async def sandbox(payload: SandboxIn, s: AsyncSession = Depends(get_session)):
         return {**base, "masking_active": False, "raw": [], "masked": [], "detail": [],
                 "note": "当前全局配置/作用域下无生效策略，返回内容未脱敏"}
 
-    # 真实检索：本地 ES + 知识库镜像（dify/ragflow），fail-soft
+    # 真实检索：本地知识库（ES）+ 平台文档库（knowledge_libraries 本地通道），fail-soft
     raw: list[dict] = []
     kb_ids = [k for k in payload.kb_ids if k]
     if kb_ids:
@@ -338,23 +336,17 @@ async def sandbox(payload: SandboxIn, s: AsyncSession = Depends(get_session)):
             base["local_error"] = f"本地检索失败：{e.__class__.__name__}"
     lib_ids = payload.library_ids
     if lib_ids:
-        libs = (await s.execute(select(KnowledgeLibrary).where(KnowledgeLibrary.id.in_(lib_ids)))).scalars().all()
-        ds = [l.dataset_id for l in libs if l.platform == "dify"]
-        rf = [l.dataset_id for l in libs if l.platform == "ragflow"]
-        if ds:
+        from app.services import library_retrieval
+        libs = (await s.execute(select(KnowledgeLibrary).where(
+            KnowledgeLibrary.id.in_(lib_ids),
+            KnowledgeLibrary.library_type != "material"))).scalars().all()
+        for lib in libs:
             try:
-                for h in await dify_client.retrieve(ds, payload.query, top_k=payload.top_k):
+                for h in await library_retrieval.search(s, lib, payload.query, payload.top_k):
                     raw.append({"content": h.get("content") or "", "document_title": h.get("document_title") or "",
-                                "score": h.get("score"), "source": "dify"})
+                                "score": h.get("score"), "source": "local"})
             except Exception as e:  # noqa: BLE001
-                base["dify_error"] = f"Dify 检索失败：{e.__class__.__name__}"
-        if rf:
-            try:
-                for h in await ragflow_client.retrieve(rf, payload.query, top_k=payload.top_k):
-                    raw.append({"content": h.get("content") or "", "document_title": h.get("document_title") or "",
-                                "score": h.get("score"), "source": "ragflow"})
-            except Exception as e:  # noqa: BLE001
-                base["ragflow_error"] = f"RAGFlow 检索失败：{e.__class__.__name__}"
+                base.setdefault("library_error", f"文档库检索失败：{e.__class__.__name__}")
 
     kept, detail, summary = masking_svc.mask_hits(
         [dict(h) for h in raw], ctx, text_fields=("content",))

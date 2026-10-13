@@ -190,7 +190,7 @@ async def search(session, lib, query, top_k, mode='hybrid', *, document_ids=None
             weight = 0.0
             if not lexical_ids:
                 lexical_ids = await asyncio.to_thread(lexical_candidates, prepared, texts, recall_count)
-    # RAGFlow stable sort preserves recall ranking when similarity scores tie.
+    # Stable sort preserves recall ranking when similarity scores tie.
     candidates = list(dict.fromkeys(lexical_ids + dense_ids))
     if not candidates:
         return []

@@ -35,8 +35,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "models": [],                 # 参与调度的模型名列表（最多 10）；为空则用系统配置的 llm_model
     "default_model": "",          # 智能体默认模型（须为 models 之一）；为空跟随列表首个模型
     "retrieval_mode": "smart",    # smart=智能调用（闲聊/问候不检索）；force=强制调用（每问必检索）
-    # 问答检索的知识库范围（knowledge_libraries 表 ID）：空=不检索（未选择=不使用）；
-    # 文档库走本地检索通道，DIFY/RAGFlow 外部库走各自引擎通道
+    # 问答检索的知识库范围（knowledge_libraries 表 ID，仅本地文档库可选）：
+    # 空=不检索（未选择=不使用）；文档库统一走本地检索通道
     "knowledge_library_ids": [],
     # 智能体级停用的选库（knowledge_library_ids 的子集，UI 开关控制）：
     # 停用的库不参与该智能体检索（不删除绑定，可随时重新启用），随配置一起保存

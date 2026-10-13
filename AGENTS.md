@@ -210,6 +210,4 @@ See README for the full `.env` template. Key optional vars:
 
 - **Design spec**: `docs/superpowers/specs/2026-07-28-knowledge-governance-expert-design.md` — authoritative
 - **Style reference**: `风格参考/` — 5 screenshots of target UI appearance
-- **Dify source** (for code reference): `dify/api/core/rag/` — splitter, extractor, embedding, retrieval, rerank patterns
-- **Dify models**: `dify/api/models/dataset.py` — data model reference
-- **Dify tasks**: `dify/api/tasks/` — Celery task patterns
+- **Dify source** (for code reference): `dify/` 源码目录已从 git 移除（本地保留 untracked 参考副本，`api/core/rag/` splitter/retrieval、`api/models/dataset.py`、`api/tasks/` 仍可参考）；外部知识库集成（Dify/RAGFlow）历史代码见 `archive/external-kb-dify-ragflow` 分支

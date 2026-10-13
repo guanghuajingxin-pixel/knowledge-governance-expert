@@ -3,7 +3,7 @@
 职责划分：
 - 本平台同步源为作业配置唯一事实源：cron 存 sync_sources.cron（5 段 crontab），
   新建/编辑/启停/删除时经 admin API 幂等同步到 XXL-Job（推送时转 Quartz 6 段）；
-- 调度与触发由 XXL-Job admin 负责；内嵌执行器（xxljob_executor）接收回调跑 run_sync；
+- 调度与触发由 XXL-Job admin 负责；内嵌执行器（xxljob_executor）接收回调执行同步；
 - 中断运行收编扫描（超时/崩溃孤儿 run）为独立线程，与调度中心无关。
 
 启动行为（fail fast）：
@@ -21,7 +21,6 @@ from pathlib import Path
 from kb_common.config import get_settings
 from kb_common.models import SyncSource
 
-from .engine import run_sync
 from .runtime import recover_interrupted_runs
 from .sync_database import SyncSessionLocal
 from .xxljob_admin import XxlJobAdminClient, XxlJobAdminError, crontab_to_quartz
@@ -78,21 +77,10 @@ def _job_spec(group_id: int, source: SyncSource) -> dict:
     }
 
 
-def _source_backend_type(source_id: int) -> str:
-    """查询同步源 backend_type（查询失败返回空串，走默认直跑分支）。"""
-    try:
-        with SyncSessionLocal() as db:
-            source = db.get(SyncSource, source_id)
-            return (source.backend_type or "").strip().lower() if source else ""
-    except Exception:  # noqa: BLE001
-        return ""
-
-
 def _handle_sync_source(param: str, job_log) -> tuple[int, str]:
     """xxl-job handler：param 为同步源 ID（cron 触发）或 JSON（手动触发携带 operator/trigger）。
 
-    library 源分流到编目（run_catalog：预建任务/文档，由 syncBatch 批处理分批消费）；
-    dify/ragflow 源维持整源直跑（run_sync）。
+    统一走编目（run_catalog：预建任务/文档，由 syncBatch 批处理分批消费）。
     """
     source_id: int | None = None
     operator = ""
@@ -111,11 +99,8 @@ def _handle_sync_source(param: str, job_log) -> tuple[int, str]:
                 return 500, f"无效的作业参数（应为同步源 ID 或 JSON）: {param!r}"
     if source_id is None:
         return 500, f"无效的作业参数（应为同步源 ID 或 JSON）: {param!r}"
-    if _source_backend_type(source_id) == "library":
-        from .catalog import run_catalog
-        summary = run_catalog(source_id, trigger, operator)
-    else:
-        summary = run_sync(source_id, trigger, operator)
+    from .catalog import run_catalog
+    summary = run_catalog(source_id, trigger, operator)
     job_log.log(f"同步结果: {summary}")
     status = summary.get("status")
     message = str(summary.get("message") or status)[:400]
@@ -269,13 +254,9 @@ def trigger_source_sync(source_id: int, operator: str = "") -> dict:
     调度关闭（XXL_JOB_ENABLED=false）时回退进程内直跑，保证开发环境可用。
     """
     if not get_settings().xxl_job_enabled:
-        # library 源降级也走编目（run_catalog 内部会触发进程内批处理线程）
-        if _source_backend_type(source_id) == "library":
-            from .catalog import run_catalog
-            _direct_executor.submit(run_catalog, source_id, "manual", operator)
-        else:
-            from .engine import run_sync as direct_run
-            _direct_executor.submit(direct_run, source_id, "manual", operator)
+        # 降级也走编目（run_catalog 内部会触发进程内批处理线程）
+        from .catalog import run_catalog
+        _direct_executor.submit(run_catalog, source_id, "manual", operator)
         return {"via": "direct",
                 "message": "调度中心未启用（XXL_JOB_ENABLED=false），本次直接执行；进度可在同步队列查看"}
     admin = get_admin_client()
@@ -303,15 +284,11 @@ def trigger_first_sync(source_id: int, operator: str = "") -> None:
     用户预期「创建后立即开始同步」，而 admin→执行器回调存在间歇性失败
     （开发态热重载窗口/网络抖动），首次同步不走调度往返、直跑最可靠；
     后续周期同步仍由 cron（XXL-Job）驱动。
-    library 源直跑的是编目（预建任务/文档，立即入队进列表），实际内容
-    由 syncBatch 批处理作业分批同步。
+    直跑的是编目（预建任务/文档，立即入队进列表），实际内容由
+    syncBatch 批处理作业分批同步。
     """
-    if _source_backend_type(source_id) == "library":
-        from .catalog import run_catalog
-        _direct_executor.submit(run_catalog, source_id, "manual", operator)
-        return
-    from .engine import run_sync as direct_run
-    _direct_executor.submit(direct_run, source_id, "manual", operator)
+    from .catalog import run_catalog
+    _direct_executor.submit(run_catalog, source_id, "manual", operator)
 
 
 def reload_sync_jobs() -> int:

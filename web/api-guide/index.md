@@ -17,7 +17,7 @@ features:
     link: /authentication
     linkText: 管理凭证
   - title: 多源知识检索
-    details: 通过统一接口检索本地文档库、Dify 与 RAGFlow，返回经过脱敏的知识片段。
+    details: 通过统一接口检索平台本地文档库，返回经过脱敏的知识片段。
     link: /retrieval
     linkText: 查看接口
   - title: 文档解析

@@ -28,13 +28,13 @@ flowchart TB
     end
 
     subgraph L3["应用服务层"]
-        KBAPI["kb-api :8000<br/>FastAPI 主服务<br/>28 个路由模块 + 后台调度器"]
+        KBAPI["kb-api :8000<br/>FastAPI 主服务<br/>27 个路由模块 + 后台调度器"]
         FAQ["faq-service :8004<br/>FastAPI<br/>FAQ 库 + 精准匹配"]
         WORKER["kb-worker<br/>Celery (queue: ingestion)<br/>解析 / 切片 / 向量化 / 索引"]
     end
 
     subgraph L4["检索与解析层"]
-        SEARCH["统一知识库层<br/>knowledge_libraries"]
+        SEARCH["知识库注册表<br/>knowledge_libraries（本地文档库）"]
         ESRAG["ES 混合检索<br/>kNN + BM25 + RRF + Rerank"]
         MINERU["MinerU 引擎 :2028<br/>本地文档解析 (OOXML / OCR)"]
         MASK["脱敏引擎<br/>识别 + 动作 + 双执行节点"]
@@ -51,8 +51,6 @@ flowchart TB
     subgraph L6["外部服务"]
         LLM["LLM API<br/>(OpenAI 兼容)"]
         MODELS["Embedding / Rerank API<br/>(OpenAI 兼容)"]
-        DIFY["Dify :8088<br/>(本地 docker compose)"]
-        RAGFLOW["RAGFlow"]
         DING["钉钉开放平台<br/>(知识库 / 多维表 / dws CLI)"]
         MCLOUD["MinerU 云 API<br/>(降级通道)"]
     end
@@ -71,7 +69,6 @@ flowchart TB
     KBAPI & WORKER --> MINIO
     WORKER --> MINERU
     KBAPI --> MCLOUD
-    SEARCH --> DIFY & RAGFLOW
     KBAPI --> DING
     KBAPI --> LLM
     KBAPI & WORKER & FAQ --> MODELS
@@ -162,12 +159,13 @@ flowchart LR
 |---|---|---|
 | 认证与账户 | `auth` / `users` / `settings_route` | 登录 JWT、用户 CRUD、模型/系统运行时配置（DB 优先，.env 兜底） |
 | 知识库核心 | `knowledge_base` / `directory` / `document` / `search` / `internal` | 文档库与目录树、上传、混合检索、`/internal/embed` 向量通道 |
-| 统一知识库层 | `knowledge_library` / `knowledge_center` / `managed_library` | 登记 RAGFlow / Dify 镜像库、知识中心（钉钉 + 本地）、托管库 |
-| 知识采集 | `sync_route` / `process_route` / `structured_route` | 钉钉→Dify/RAGFlow 同步任务、知识加工流水线、结构化处理 |
+| 知识库与文档管理 | `knowledge_library` / `knowledge_center` / `managed_library` | 知识库注册表（列表/启停/检索测试）、知识中心（钉钉 + 本地）、文档库管理 |
+| 知识采集 | `sync_route` | 钉钉→本地文档库同步任务（编目 + XXL-Job 批处理） |
 | 知识运营与治理 | `operate` / `governance` / `knowledge_gaps` / `metrics_route` | 运营看板（每日 0 点定时统计）、治理标准（钉钉多维表）、知识缺口 |
 | 安全合规 | `sensitive` / `masking` | 敏感词典、脱敏策略/豁免/审计/沙箱 |
 | 智能问答 | `qa_route` / `agent_route` / `agent_internal` / `chat_session_route` | 问答入口（SSE 转译）、智能体配置、sidecar 内部回调接口、会话持久化 |
-| 外部引擎 | `dify_route` / `ragflow_route` / `mineru_route` | Dify / RAGFlow 代理转发、解析引擎管理 |
+| 解析引擎 | `mineru_route` / `mineru_saas` / `mineru_contract` | MinerU 解析引擎（本地 Kit / 云 SaaS 统一契约、CORS 代理） |
+| 平台开放接口 | `open_api` / `platform_keys` / `portal_accounts` | 机器凭证检索 API、平台应用凭证、门户账号 |
 
 **服务层（`app/services/`）**：
 
@@ -175,19 +173,19 @@ flowchart LR
 |---|---|
 | `agent/deerflow_runner.py` | DeerFlow 客户端：SSE 事件转译为前端协议、引用过滤（`_filter_cited_citations`）、取消透传；**sidecar 不可达 fail-fast（`DeerflowUnavailable`）** |
 | `agent/config.py` / `agent/llm.py` | 智能体配置、LLM 解析 |
-| `sync/` | 钉钉→Dify/RAGFlow 增量同步引擎：`engine`（同步逻辑）、`scheduler`（cron 调度，XXL-JOB 可选）、`worker`、`export_service`（钉钉文档导出） |
-| `knowledge_engines/` | `local_chunker`（本地切片）、`mineru`（解析引擎）、`ragflow`（RAGFlow 通道） |
+| `sync/` | 钉钉→本地文档库增量同步引擎：`engine`（同步逻辑）、`catalog`/`batch`（编目 + 批处理）、`scheduler`（cron 调度，XXL-Job）、`library_backend`（文档库写入）、`export_service`（钉钉文档导出） |
+| `knowledge_engines/` | `local_chunker`（本地切片，含 Dify splitter 移植语义）、`chunk_enhancer`（检索内容增强）、`mineru`（解析引擎） |
 | `masking.py` | 脱敏引擎：内置正则 + 敏感词典 + 上下文规则识别，六类动作，多策略取最严格，一致性替换 |
 | `chat.py` | 问答会话逻辑 |
 | `dingtalk_bot.py` | 钉钉机器人 Stream 长连接（lifespan 内启动/停止） |
-| `processing.py` / `structured_engine.py` / `ingestion.py` / `llm_resolver.py` / `collection_history.py` / `dingtalk_identity.py` | 知识加工、结构化引擎、入库编排、LLM 多配置解析、采集历史、钉钉身份 |
+| `ingestion.py` / `llm_resolver.py` / `library_retrieval.py` / `dingtalk_identity.py` / `dingtalk_operator.py` | 入库编排、LLM 多配置解析、文档库本地检索（ragflow_nlp 评分核）、钉钉身份/操作人 |
 
 **后台任务（lifespan 启动，[main.py](../services/kb-api/app/main.py)）**：
-1. 从 DB `settings` 表加载运行时配置覆盖环境变量（LLM / Dify / RAGFlow / 钉钉等 11 个键）
+1. 从 DB `settings` 表加载运行时配置覆盖环境变量（LLM / MinerU / 钉钉等 7 个键）
 2. 数据库连接池两段式预热（启动阶段 ≤8s + 后台补齐）
-3. 旧版单值配置 → LLM/Dify profiles 表一次性迁移
+3. 旧版单值配置 → LLM profiles 表一次性迁移
 4. 运营看板每日 0 点统计调度器
-5. 钉钉→Dify 定时增量同步调度器（按源 cron 注册）
+5. 钉钉→本地文档库定时增量同步调度器（按源 cron 注册）
 6. 钉钉机器人 Stream 长连接（凭证齐全才启动）
 
 ### 4.3 DeerFlow sidecar（`services/deerflow/`，:2027）— 智能问答 Agent 底座
@@ -197,7 +195,7 @@ flowchart LR
 | 形态 | vendor 的 DeerFlow 2.0 Enhanced harness，FastAPI + SSE（入口 `app/qa_server.py`），Python 3.12 + uv 独立环境 |
 | 运行方式 | 进程内嵌入式 `DeerFlowClient` 直跑 Lead Agent（create_agent 中间件链 + Sub-Agent 并行调研 + 长期记忆 + 摘要压缩 + sqlite 检查点），无需 langgraph server |
 | 配置自举 | 启动时 `GET kb-api /api/v1/agent/bootstrap` 拉取模型配置，生成 `config.yaml` 与 `SOUL.md` 人格；kb-api 晚启动时后台重试（40 次 × 5s） |
-| Agent 工具（`extensions/kb_tools.py`） | `knowledge_search`（统一知识库层多源检索）、`dingtalk_browse`（目录地图预判/列目录，在线文档优先）、`dingtalk_search`（文件名缓存补漏）、`dingtalk_read_doc`（dws CLI 读正文，二进制文件优先本地 MinerU 解析） |
+| Agent 工具（`extensions/kb_tools.py`） | `knowledge_search`（本地知识库检索：ES 知识库 `kb_ids` + 平台文档库 `doc_library_ids` 双通道）、`dingtalk_browse`（目录地图预判/列目录，在线文档优先）、`dingtalk_search`（文件名缓存补漏）、`dingtalk_read_doc`（dws CLI 读正文，二进制文件优先本地 MinerU 解析） |
 | 检索策略（人格 SOUL.md / 技能 SKILL.md 规定） | 先预判目录再进目录；知识类问题主动同时双源检索；每读完一篇即判断能否作答；钉钉命中文档必须读正文；3-5 次关键词穷尽检索 |
 | 并发与取消 | 专属 worker 线程 + asyncio.Queue 泵驱动同步 `agent.stream()`；sqlite 检查点方法级 RLock 支持多会话并行（前端最多 5 路）；`/v1/chat/cancel` 确定性停止 |
 | 限时探索 | 1 分钟询问 / 5 分钟再问 / 10 分钟兜底（`ExplorationTimeoutMiddleware`，阈值可用 `KGE_EXPLORE_*` 覆盖） |
@@ -226,8 +224,8 @@ PENDING → PARSING（MinerU 解析，markdown 存 MinIO）→ INDEXING（chunk 
 | `database.py` | AsyncSession 工厂、连接池预热 |
 | `config.py` | Pydantic Settings（.env） |
 | `security.py` | JWT 签发/校验、API Key 哈希、RBAC |
-| `rag/` | `embedder`（外接向量 API）、`chunker`、`indexer`（ES 写入）、`searcher`（kNN+BM25+RRF 混合检索）、`reranker`（外接重排，未配置自动跳过）、`tracer`（检索溯源） |
-| `clients/` | `minio_client` `es_client` `mineru_client` `llm_client` `dify_client` `dify_document` `ragflow_client` `dingtalk_client` `document_upload` `source_integrity` |
+| `rag/` | `embedder`（外接向量 API）、`chunker`、`indexer`（ES 写入）、`searcher`（kNN+BM25+RRF 混合检索）、`reranker`（外接重排，未配置自动跳过）、`tracer`（检索溯源）、`ragflow_nlp`（本地检索评分核，token/混合打分） |
+| `clients/` | `minio_client` `es_client` `mineru_client` `llm_client` `dingtalk_client` `document_upload` `source_integrity` |
 
 ## 5. 关键链路
 
@@ -270,13 +268,13 @@ sequenceDiagram
     participant K as kb-api
     participant D as DeerFlow sidecar :2027
     participant L as LLM API
-    participant S as 知识源 (Dify/RAGFlow/本地 ES/钉钉)
+    participant S as 知识源 (本地 ES/文档库/钉钉)
 
     B->>K: POST /api/v1/search/chat/stream (SSE, session_id)
     K->>D: POST /v1/chat/stream (thread_id = kge-u{uid}-{sid})
     D->>L: Lead Agent 推理
     D->>K: ① knowledge_search → /internal/kb/retrieve
-    K->>S: 统一知识库层多源检索 (fail-soft)
+    K->>S: 本地知识库检索（ES + 文档库，fail-soft）
     K-->>D: 召回片段 (按用户身份脱敏后)
     D->>K: ② dingtalk_browse / search / read_doc
     K->>S: 钉钉目录预判 / dws 读正文 (本地 MinerU 解析)
@@ -296,25 +294,25 @@ sequenceDiagram
 - **多轮记忆**：同一会话复用 sqlite 检查点（`thread_id` 映射）；会话持久化到 kb-api `chat_messages`。
 - **可中断**：前端停止按钮双保险（abort SSE + `POST /api/v1/search/chat/cancel` → sidecar `/v1/chat/cancel`），中间件在模型节点边界确定性短路，不空耗 token。
 
-### 5.3 钉钉知识 → Dify/RAGFlow 增量同步
+### 5.3 钉钉知识 → 本地文档库增量同步
 
 ```mermaid
 flowchart LR
-    subgraph SYNC["kb-api sync 模块 (进程内调度器 / XXL-JOB 可选)"]
+    subgraph SYNC["kb-api sync 模块 (进程内调度器 / XXL-Job)"]
         SCH["scheduler<br/>(按源 cron 注册)"]
         ENG["engine<br/>增量对比 + 增删改"]
         EXP["export_service<br/>钉钉文档导出"]
+        LB["library_backend<br/>文档库写入"]
     end
     DT["钉钉开放平台"]
-    DY["Dify 数据集"]
-    RF["RAGFlow"]
+    LIB["本地文档库<br/>(MinerU 解析 + ES 索引)"]
 
     SCH --> ENG
     ENG -->|"OpenAPI 拉增量"| DT
     ENG -->|"OSS 成品下载 / dws doc read"| EXP
     EXP --> DT
-    ENG -->|"上传 + 知识流水线变量"| DY
-    ENG -->|"数据集同步"| RF
+    ENG --> LB
+    LB --> LIB
 ```
 
 同步任务记录、目录快照（`dingtalk_folder_stats`）、失败重试均在共享 PG 中管理；「同步队列」页可视化跟踪。
@@ -348,8 +346,8 @@ users ──► knowledge_bases (kb_type: DOCUMENT | FAQ)
               └──► faq_directories (树) ──► faq_entries ──► segments
 
 api_keys ──► users                    # 开放 API（哈希存储）
-settings                              # 运行时配置覆盖 + profiles（LLM/Dify 多配置）
-knowledge_libraries                   # 统一知识库层：RAGFlow / Dify 镜像库登记
+settings                              # 运行时配置覆盖 + profiles（LLM 多配置）
+knowledge_libraries                   # 知识库注册表（本地文档库 / 物料库）
 masking_policies / masking_exemptions / masking_logs   # 脱敏策略域
 sensitive_items                       # 敏感词典
 dingtalk_folder_stats                 # 钉钉目录快照（治理/采集复用）
@@ -408,7 +406,6 @@ flowchart TB
 | Agent 底座 | DeerFlow 2.0 Enhanced（vendor） | Python 3.12 + langgraph 1.x，sidecar 隔离 |
 | 文档解析 | MinerU 3.x（本地自托管 + 云 API 降级） | :2028 |
 | 模型接入 | OpenAI 兼容 HTTP API | LLM / Embedding / Rerank 全外接 |
-| 外部知识引擎 | Dify（本地 compose :8088）/ RAGFlow | 统一知识库层多通道 |
 | 钉钉集成 | OpenAPI + Stream 长连接 + dws CLI | 知识库 / 多维表 / 机器人 |
 
 ## 10. 关键架构决策（ADR 摘要）
@@ -422,6 +419,6 @@ flowchart TB
 | 5 | **FAQ 独立进程、共享库与向量通道** | FAQ 高频精准匹配与文档 RAG 演进节奏不同；仅拆进程不拆存储，保持简单 |
 | 6 | **ES 混合检索 + RRF + 可选重排** | kNN 语义与 BM25 关键词互补；Rerank 未配置时自动跳过，保证降级可用 |
 | 7 | **配置 DB 优先、.env 兜底** | 运行时可改（模型配置页 + 连通性测试），重启不丢；启动 lifespan 覆盖 env，全服务口径一致 |
-| 8 | **统一知识库层（knowledge_libraries）** | Dify / RAGFlow / 本地 ES 多源以镜像库登记统一管理，检索按 platform 分通道、fail-soft 降级（坏库跳过、引擎异常转 warnings） |
+| 8 | **知识库注册表（knowledge_libraries）** | 检索选库统一从注册表取数（本地文档库），问答/检索测试/开放 API 共用一套库选择与权限逻辑；历史外部库镜像方案（Dify/RAGFlow 多通道）已下线，代码见 `archive/external-kb-dify-ragflow` 分支 |
 | 9 | **文档解析三级降级** | 本地 MinerU（秒级 OOXML / OCR pipeline）→ python 库即时解析 → MinerU 云 API；保障弱网/无 Key 场景可用 |
 | 10 | **多会话并行 + 确定性取消** | sqlite 检查点方法级 RLock 替代全局锁；取消走 `gen.close()` + 模型节点边界短路，不空耗 token |

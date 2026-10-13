@@ -9,8 +9,8 @@ import { copyToClipboard, revealProfileSecret } from '@/api/settings'
  * 完整密钥按需拉取（仅管理员接口），拉取结果缓存在本实例内。
  */
 const props = defineProps<{
-  /** 配置类型：dify / llm / ragflow / embedding / rerank */
-  kind: 'dify' | 'llm' | 'ragflow' | 'embedding' | 'rerank'
+  /** 配置类型：llm / embedding / rerank */
+  kind: 'llm' | 'embedding' | 'rerank'
   rowId: string
   /** 列表接口返回的脱敏回显值（如 sk-****3456） */
   masked: string

@@ -234,13 +234,11 @@ async function handleSyncImport() {
       name: `钉钉文档 · ${sel.workspaceName}`,
       workspace_id: sel.workspaceId,
       root_node_id: sel.rootNodeId,
-      backend_type: 'library',
-      dify_dataset_name: libName,
-      dify_dataset_id: String(libId),
+      dataset_name: libName,
+      dataset_id: String(libId),
       delete_policy: 'keep',
       cron: '*/5 * * * *',
       enabled: true,
-      pipeline_inputs: {},
       node_whitelist: sel.nodes.map((n) => n.node_id),
     })
     // 后端创建源时已直跑首次编目：任务进同步队列、文档以「待同步」进列表，由批处理分批同步
@@ -266,13 +264,11 @@ async function submitKnowledgeSync(selection: KbSelection) {
           name: `钉钉知识库 · ${ws.name}`,
           workspace_id: ws.id,
           root_node_id: ws.root_node_id,
-          backend_type: 'library',
-          dify_dataset_name: libName,
-          dify_dataset_id: String(props.libraryId),
+          dataset_name: libName,
+          dataset_id: String(props.libraryId),
           delete_policy: 'keep',
           cron: '*/5 * * * *',
           enabled: true,
-          pipeline_inputs: {},
           node_whitelist: [],
         })
         // 创建 library 同步源时后端立即编目，逐文档任务进入同步队列。

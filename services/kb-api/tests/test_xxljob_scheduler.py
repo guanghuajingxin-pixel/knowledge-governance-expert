@@ -17,7 +17,6 @@ from sqlalchemy.pool import StaticPool
 
 from kb_common.models import SyncSource
 from app.services.sync import scheduler
-from app.services.sync import engine as sync_engine
 from app.services.sync.xxljob_admin import XxlJobAdminClient
 
 
@@ -117,9 +116,9 @@ class SchedulerJobSyncTest(unittest.TestCase):
         self.sessions = sessionmaker(bind=self.sql, expire_on_commit=False)
         with self.sessions() as db:
             self.enabled = SyncSource(name="启用源", workspace_id="w", root_node_id="r",
-                                      dify_dataset_name="t", enabled=True, cron="0 2 * * *")
+                                      dataset_name="t", enabled=True, cron="0 2 * * *")
             self.disabled = SyncSource(name="停用源", workspace_id="w", root_node_id="r2",
-                                       dify_dataset_name="t", enabled=False, cron="*/5 * * * *",
+                                       dataset_name="t", enabled=False, cron="*/5 * * * *",
                                        xxl_job_id=777)
             db.add_all([self.enabled, self.disabled])
             db.commit()
@@ -217,28 +216,33 @@ class SchedulerJobSyncTest(unittest.TestCase):
             self.assertIsNotNone(db.get(SyncSource, self.enabled_id).xxl_job_id)
 
     def test_trigger_disabled_falls_back_to_direct(self):
+        from app.services.sync import catalog
         with patch.object(scheduler, "SyncSessionLocal", self.sessions), \
              patch.object(scheduler, "get_settings", lambda: SimpleNamespace(
                  xxl_job_executor_appname="kge-sync-executor", xxl_job_enabled=False)), \
-             patch.object(sync_engine, "run_sync") as mock_run:
+             patch.object(catalog, "run_catalog", return_value={"status": "success"}) as mock_catalog, \
+             patch.object(scheduler, "_direct_executor",
+                          SimpleNamespace(submit=lambda fn, *a, **k: fn(*a, **k))):
             result = scheduler.trigger_source_sync(self.enabled_id, "carol")
         self.assertEqual(result["via"], "direct")
-        mock_run.assert_called_once_with(self.enabled_id, "manual", "carol")
+        mock_catalog.assert_called_once_with(self.enabled_id, "manual", "carol")
 
     def test_handler_parses_json_param(self):
-        with patch.object(scheduler, "run_sync", return_value={"status": "success", "message": "ok"}) as mock_run:
+        from app.services.sync import catalog
+        with patch.object(catalog, "run_catalog", return_value={"status": "success", "message": "ok"}) as mock_catalog:
             code, _msg = scheduler._handle_sync_source(
                 json.dumps({"source_id": self.enabled_id, "operator": "alice", "trigger": "manual"}),
                 SimpleNamespace(log=lambda *a, **k: None))
         self.assertEqual(code, 200)
-        mock_run.assert_called_once_with(self.enabled_id, "manual", "alice")
+        mock_catalog.assert_called_once_with(self.enabled_id, "manual", "alice")
 
     def test_handler_plain_id_param(self):
-        with patch.object(scheduler, "run_sync", return_value={"status": "success", "message": "ok"}) as mock_run:
+        from app.services.sync import catalog
+        with patch.object(catalog, "run_catalog", return_value={"status": "success", "message": "ok"}) as mock_catalog:
             code, _msg = scheduler._handle_sync_source(
                 str(self.enabled_id), SimpleNamespace(log=lambda *a, **k: None))
         self.assertEqual(code, 200)
-        mock_run.assert_called_once_with(self.enabled_id, "schedule", "")
+        mock_catalog.assert_called_once_with(self.enabled_id, "schedule", "")
 
 
 if __name__ == "__main__":

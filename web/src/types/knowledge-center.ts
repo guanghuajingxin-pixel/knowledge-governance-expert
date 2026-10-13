@@ -74,7 +74,7 @@ export interface DingTalkDocResult {
 export interface KnowledgeSource {
   id: number
   name: string
-  source_type: 'dingtalk_workspace' | 'dify_dataset' | 'ragflow_dataset' | 'business_system'
+  source_type: 'dingtalk_workspace' | 'business_system'
   external_id: string
   description: string
   config: Record<string, any> | null

@@ -4,7 +4,7 @@ DeerFlow Lead Agent / Sub-Agent 通过本工具访问知识治理平台 kb-api
 背后的统一知识库层（覆盖企业已接入的各平台知识库），
 实现基于企业内部资料的可信问答与引用溯源。
 
-运行时上下文（数据集选择等）由 qa_server 按 thread_id 注入 RUNTIME_CTX，
+运行时上下文（知识库/文档库选择等）由 qa_server 按 thread_id 注入 RUNTIME_CTX，
 工具通过 LangChain 注入的 RunnableConfig 获取 thread_id。
 """
 from __future__ import annotations
@@ -20,7 +20,7 @@ from langchain_core.runnables import RunnableConfig
 
 logger = logging.getLogger(__name__)
 
-#: thread_id -> {"dataset_ids": list[str], "top_k": int}
+#: thread_id -> {"kb_ids": list[str], "doc_library_ids": list[int], "top_k": int}
 RUNTIME_CTX: dict[str, dict[str, Any]] = {}
 
 
@@ -65,8 +65,6 @@ def knowledge_search_tool(query: str, top_k: int = 8, config: RunnableConfig = N
     cfg = (config or {}).get("configurable", {}) or {}
     thread_id = cfg.get("thread_id", "default")
     ctx = RUNTIME_CTX.get(thread_id, {})
-    dataset_ids = ctx.get("dataset_ids") or []
-    ragflow_dataset_ids = ctx.get("ragflow_dataset_ids") or []
     kb_ids = ctx.get("kb_ids") or []
     doc_library_ids = ctx.get("doc_library_ids") or []
     effective_top_k = min(max(int(top_k or 8), 1), 15)
@@ -89,8 +87,6 @@ def knowledge_search_tool(query: str, top_k: int = 8, config: RunnableConfig = N
 
     payload: dict[str, Any] = {
         "query": query,
-        "dataset_ids": dataset_ids,
-        "ragflow_dataset_ids": ragflow_dataset_ids,
         "kb_ids": kb_ids,
         "doc_library_ids": doc_library_ids,
         "top_k": effective_top_k,
@@ -355,46 +351,3 @@ def dingtalk_read_doc_tool(node_id: str, title: str = "", extension: str = "", c
         ensure_ascii=False,
         indent=1,
     )
-
-
-@tool("knowledge_context_expand", parse_docstring=True)
-def knowledge_context_expand_tool(document_ids: str, query: str = "", max_related: int = 3,
-                                   config: RunnableConfig = None) -> str:
-    """扩展知识检索上下文：根据已命中的文档 ID，获取这些文档的摘要、关联文档和标签聚合。
-
-    当 knowledge_search 返回的片段不足以回答问题，或需要更全面理解文档全貌时，
-    调用本工具获取：① 命中文档的摘要（理解文档核心内容）；② 语义关联文档（深度探索）；
-    ③ 标签聚合（辅助判断主题范围）。
-
-    使用规则：
-    - document_ids 来自 knowledge_search 返回的 results[].document_id，多个用逗号分隔；
-    - 优先传入 2-5 个最相关的文档 ID，避免上下文过长；
-    - 返回的 related 文档可进一步用 knowledge_search 检索其内容；
-    - 若命中文档尚未加工（无摘要/关联），返回为空，属正常情况。
-
-    Args:
-        document_ids: 命中文档 ID，多个用英文逗号分隔。
-        query: 用户原始问题，用于辅助关联排序，可选。
-        max_related: 最多返回的关联文档数，默认 3。
-    """
-    payload: dict[str, Any] = {
-        "document_ids": [d.strip() for d in (document_ids or "").split(",") if d.strip()],
-        "query": query or "",
-        "max_related": min(max(int(max_related or 3), 1), 10),
-    }
-    try:
-        with httpx.Client(timeout=60.0) as client:
-            resp = client.post(
-                f"{_kb_api_url()}/api/v1/internal/process/context-expand",
-                json=payload,
-                headers=_headers(),
-            )
-            resp.raise_for_status()
-            data = resp.json()
-    except Exception as e:  # noqa: BLE001
-        logger.warning("knowledge_context_expand failed: %s", e)
-        return json.dumps(
-            {"error": f"上下文扩展失败：{e.__class__.__name__}", "summaries": [], "related": [], "tags": []},
-            ensure_ascii=False,
-        )
-    return json.dumps(data, ensure_ascii=False, indent=1)

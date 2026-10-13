@@ -6,8 +6,8 @@ import { buildTree, createSource, testSourceDraft, updateSource } from '@/api/sy
 import type { Source, SourcePayload, TreeNode } from '@/types/sync'
 import { listKnowledgeSources, fetchDingtalkFolderSnapshot } from '@/api/knowledge-center'
 import type { KnowledgeSource } from '@/types/knowledge-center'
+import { listDocumentLibraries, type DocumentLibrary } from '@/api/document-library'
 import { useRouter } from 'vue-router'
-import PipelineInputs from '@/components/collection/PipelineInputs.vue'
 import { cronLabel } from './cron'
 
 const router = useRouter()
@@ -20,13 +20,11 @@ const form = reactive<SourcePayload>({
   workspace_id: '',
   root_node_id: '',
   start_dir: '',
-  backend_type: 'dify',
-  dify_dataset_name: '',
-  dify_dataset_id: '',
+  dataset_name: '',
+  dataset_id: '',
   delete_policy: 'sync',
   cron: '0 2 * * *',
   enabled: true,
-  pipeline_inputs: {},
 })
 
 const saving = ref(false)
@@ -70,9 +68,9 @@ function syncCron() {
 
 const dingtalkSources = ref<KnowledgeSource[]>([])
 const workspaceLoading = ref(false)
-const difySources = ref<KnowledgeSource[]>([])
-const difyDatasetLoading = ref(false)
-const difyDatasetError = ref('')
+const docLibraries = ref<DocumentLibrary[]>([])
+const docLibraryLoading = ref(false)
+const docLibraryError = ref('')
 const treeData = ref<TreeNode[]>([])
 const treeLoading = ref(false)
 const filterText = ref('')
@@ -80,10 +78,8 @@ const selectedNodeId = ref('')
 const treeRef = ref<any>(null)
 const currentDingtalkSource = ref<KnowledgeSource | null>(null)
 
-const pipelineForm = ref<InstanceType<typeof PipelineInputs>>()
 function onDatasetChange(datasetId: string) {
-  form.dify_dataset_name = difySources.value.find((item) => item.external_id === datasetId)?.name || ''
-  form.pipeline_inputs = {}
+  form.dataset_name = docLibraries.value.find((item) => String(item.id) === datasetId)?.name || ''
 }
 // 目录树数据源：优先读 dingtalk_folder_stats 文件夹快照（知识源登记/知识缺口「刷新」时
 // 后台遍历写入，DB 只读秒开）；快照缺失时回退实时 buildTree 遍历钉钉。
@@ -147,23 +143,21 @@ watch(
     form.workspace_id = source?.workspace_id || ''
     form.root_node_id = source?.root_node_id || ''
     form.start_dir = source?.start_dir || ''
-    form.backend_type = source?.backend_type || 'dify'
-    form.dify_dataset_name = source?.dify_dataset_name || ''
-    form.dify_dataset_id = source?.dify_dataset_id || ''
+    form.dataset_name = source?.dataset_name || ''
+    form.dataset_id = source?.dataset_id || ''
     form.delete_policy = source?.delete_policy || 'sync'
     form.cron = source?.cron || '0 2 * * *'
     parseCron(form.cron)
     form.enabled = source?.enabled ?? true
-    form.pipeline_inputs = { ...(source?.pipeline_inputs || {}) }
     testedSignature.value = ''
     selectedNodeId.value = ''
     filterText.value = ''
     currentDingtalkSource.value = null
     treeData.value = []
-    await Promise.all([loadDingtalkSources(), loadDifySources()])
-    if (!form.dify_dataset_id) {
-      const matches = difySources.value.filter((item) => item.name === form.dify_dataset_name)
-      if (matches.length === 1) form.dify_dataset_id = matches[0].external_id
+    await Promise.all([loadDingtalkSources(), loadDocumentLibraries()])
+    if (!form.dataset_id) {
+      const matches = docLibraries.value.filter((item) => item.name === form.dataset_name)
+      if (matches.length === 1) form.dataset_id = String(matches[0].id)
     }
     if (form.workspace_id) {
       const ks = dingtalkSources.value.find((item) => item.external_id === form.workspace_id)
@@ -185,34 +179,26 @@ async function loadDingtalkSources() {
   }
 }
 
-async function loadDifySources() {
-  difyDatasetLoading.value = true
-  difyDatasetError.value = ''
-  // 目标库列表按引擎类型取：只列已登记为知识源的库（不实时列引擎全部库）
-  const sourceType = form.backend_type === 'ragflow' ? 'ragflow_dataset' : 'dify_dataset'
+async function loadDocumentLibraries() {
+  docLibraryLoading.value = true
+  docLibraryError.value = ''
   try {
-    difySources.value = await listKnowledgeSources({ source_type: sourceType, enabled_only: true })
+    docLibraries.value = (await listDocumentLibraries()).filter((item) => item.enabled)
   } catch (error: any) {
-    difySources.value = []
-    difyDatasetError.value = error?.response?.data?.detail || error?.message || '加载目标知识库失败'
+    docLibraries.value = []
+    docLibraryError.value = error?.response?.data?.detail || error?.message || '加载目标文档库失败'
   } finally {
-    difyDatasetLoading.value = false
+    docLibraryLoading.value = false
   }
 }
 
-// 切换目标引擎：清空已选目标库并按新引擎重新拉取已登记库
-async function onEngineChange() {
-  form.dify_dataset_id = ''
-  form.dify_dataset_name = ''
-  form.pipeline_inputs = {}
-  testedSignature.value = ''
-  await loadDifySources()
-}
-
-const engineLabel = computed(() => (form.backend_type === 'ragflow' ? 'RAGFlow' : 'Dify'))
-
 function goRegisterSource() {
   router.push('/knowledge-sources')
+  emit('update:visible', false)
+}
+
+function goCreateLibrary() {
+  router.push('/apply/knowledge-libraries')
   emit('update:visible', false)
 }
 
@@ -304,8 +290,7 @@ function validateForm(): boolean {
   if (!form.name.trim()) { ElMessage.error('请填写同步源名称'); return false }
   if (!form.workspace_id.trim()) { ElMessage.error('请选择钉钉知识库'); return false }
   if (!form.root_node_id.trim()) { ElMessage.error('请在目录选择中点选要同步的目录'); return false }
-  if (!form.dify_dataset_id) { ElMessage.error(`请选择目标 ${engineLabel.value} 知识库`); return false }
-  if (pipelineForm.value && !pipelineForm.value.validate()) return false
+  if (!form.dataset_id) { ElMessage.error('请选择目标文档库'); return false }
   return true
 }
 
@@ -391,27 +376,20 @@ async function test() {
       <el-form-item label="已选目录">
         <el-input v-model="form.start_dir" readonly placeholder="在上方目录选择中点选目录" />
       </el-form-item>
-      <el-form-item label="同步目标引擎" required>
-        <el-radio-group v-model="form.backend_type" @change="onEngineChange">
-          <el-radio-button value="dify">Dify 知识库</el-radio-button>
-          <el-radio-button value="ragflow">RAGFlow 知识库</el-radio-button>
-        </el-radio-group>
-        <div style="font-size:12px;color:var(--el-text-color-secondary);margin-top:4px">钉钉目录同步到哪个引擎。切换引擎会清空已选目标库并重新加载对应引擎已登记的知识库。</div>
-      </el-form-item>
       <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px">
-        <el-form-item :label="`目标 ${engineLabel} 知识库`" required>
+        <el-form-item label="目标文档库" required>
           <div style="display:flex;gap:8px;width:100%">
-            <el-select v-model="form.dify_dataset_id" filterable clearable @change="onDatasetChange" :placeholder="`选择已登记的 ${engineLabel} 知识库`" :loading="difyDatasetLoading" style="flex:1">
-              <el-option v-for="item in difySources" :key="item.id" :label="item.name" :value="item.external_id">
+            <el-select v-model="form.dataset_id" filterable clearable @change="onDatasetChange" placeholder="选择目标文档库" :loading="docLibraryLoading" style="flex:1">
+              <el-option v-for="item in docLibraries" :key="item.id" :label="item.name" :value="String(item.id)">
                 <span>{{ item.name }}</span>
-                <span style="float: right; color: var(--el-text-color-secondary); font-size: 12px">{{ item.external_id }}</span>
+                <span style="float: right; color: var(--el-text-color-secondary); font-size: 12px">{{ item.document_count }} 篇</span>
               </el-option>
             </el-select>
           </div>
-          <div v-if="difySources.length === 0 && !difyDatasetLoading" style="font-size: 12px; color: var(--el-color-warning); margin-top: 4px">
-            暂无已登记的 {{ engineLabel }} 知识库，请先到<a style="color: var(--el-color-primary); cursor: pointer" @click="goRegisterSource">知识源管理</a>登记。
+          <div v-if="docLibraries.length === 0 && !docLibraryLoading" style="font-size: 12px; color: var(--el-color-warning); margin-top: 4px">
+            暂无可用文档库，请先到<a style="color: var(--el-color-primary); cursor: pointer" @click="goCreateLibrary">知识库</a>创建。
           </div>
-          <div v-else style="font-size: 12px; color: var(--el-text-color-secondary); margin-top: 4px">仅显示并使用已登记的 {{ engineLabel }} 知识库。</div>
+          <div v-else style="font-size: 12px; color: var(--el-text-color-secondary); margin-top: 4px">钉钉目录将同步到该文档库，仅列出已启用的文档库。</div>
         </el-form-item>
         <el-form-item label="删除策略">
           <el-select v-model="form.delete_policy" style="width: 100%">
@@ -420,7 +398,6 @@ async function test() {
           </el-select>
         </el-form-item>
       </div>
-      <PipelineInputs v-if="visible && form.backend_type === 'dify'" ref="pipelineForm" :dataset-id="form.dify_dataset_id" v-model="form.pipeline_inputs" :disabled="saving || testing" />
       <el-form-item label="定时任务">
         <div style="display:flex;gap:8px;width:100%;flex-wrap:wrap">
           <el-select v-model="cronFreq" style="width:110px" @change="syncCron">

@@ -101,11 +101,9 @@ const toolCatalog = ref<AgentTool[]>([])
 // 知识库抽象层全部库（不含物料库）；「添加知识库」弹窗内按类型筛选后勾选
 const kbLibraries = ref<KnowledgeLibrary[]>([])
 const kbLibrariesError = ref('')
-type KbFilterType = 'document' | 'dify' | 'ragflow'
+type KbFilterType = 'document'
 const KB_FILTERS: Array<{ value: KbFilterType; label: string; match: (l: KnowledgeLibrary) => boolean }> = [
   { value: 'document', label: KB_TYPE_META.document.label, match: (l) => l.library_type === 'document' },
-  { value: 'dify', label: KB_TYPE_META.dify.label, match: (l) => l.library_type === 'external' && l.platform === 'dify' },
-  { value: 'ragflow', label: KB_TYPE_META.ragflow.label, match: (l) => l.library_type === 'external' && l.platform === 'ragflow' },
 ]
 // 弹窗状态：类型筛选（默认文档库）+ 视图（卡片/列表，默认卡片）+ 弹窗内暂存勾选（确认后写回 form）
 const kbDialogVisible = ref(false)
@@ -602,7 +600,7 @@ async function onImportFile(e: Event) {
             </template>
             <div class="mode-desc">
               <p><b>强制调用</b>：每个问题（含问候寒暄）都必须先检索知识库再回答（平台注入强制约束），答案严格来自知识库。</p>
-              <p><b>智能调用</b>：闲聊问候直接应答；业务问题先检索 Dify 知识库，召回不足时智能体自主补查、再不足兜底钉钉知识库。</p>
+              <p><b>智能调用</b>：闲聊问候直接应答；业务问题先检索知识库，召回不足时智能体自主补查、再不足兜底钉钉知识库。</p>
             </div>
             <div class="kb-selected">
               <div class="kb-selected-head">

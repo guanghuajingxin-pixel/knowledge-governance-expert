@@ -1,7 +1,7 @@
-// 钉钉知识库 → Dify 定时增量同步：API 封装（前缀 /api/v1/sync）
+// 钉钉知识库 → 本地文档库 定时增量同步：API 封装（前缀 /api/v1/sync）
 import request from './request'
 import type {
-  Failure, Log, PipelineVariablesResponse, PreviewItem, Run, RunDetail, Source, SourcePayload, SourceStats,
+  Failure, Log, PreviewItem, Run, RunDetail, Source, SourcePayload, SourceStats,
   TaskListResponse, TaskQuery, TreeNode, TreeNodeLite, Workspace,
 } from '@/types/sync'
 
@@ -57,10 +57,6 @@ export interface SourceStatsItem extends SourceStats {
 export const sourcesStatsAll = () =>
   request.get<unknown, { items: SourceStatsItem[] }>(`${BASE}/sources/stats`)
 
-/** 拉取流水线数据集的 input form 变量 schema（分段参数定义），用于自动生成配置表单 */
-export const listPipelineVariables = (datasetId: string) =>
-  request.get<unknown, PipelineVariablesResponse>(`${BASE}/pipeline-variables`, { params: { dataset_id: datasetId } })
-
 // ---------- 运行记录 / 失败 / 日志 ----------
 export const listRuns = (params?: { source_id?: number; limit?: number; offset?: number }) =>
   request.get<unknown, Run[]>(`${BASE}/runs`, { params })
@@ -77,12 +73,6 @@ export const listLogs = (params?: { run_id?: number; level?: string; limit?: num
 export const retryFailure = (id: number) => request.post(`${BASE}/failures/${id}/retry`)
 
 export const retryAllFailures = () => request.post(`${BASE}/failures/retry-all`)
-
-export const importPipelineSchema = (datasetId: string, file: File) => {
-  const data = new FormData()
-  data.append('file', file)
-  return request.post<unknown, PipelineVariablesResponse>(`${BASE}/pipeline-schema`, data, { params: { dataset_id: datasetId } })
-}
 
 // ---------- 同步队列：逐文档任务 ----------
 export const listTasks = (params: TaskQuery) =>

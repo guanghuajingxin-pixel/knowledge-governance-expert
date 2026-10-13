@@ -1,4 +1,4 @@
-"""钉钉知识库 → Dify 定时增量同步路由（迁移自 DingDingKonwledgePipeline）。
+"""钉钉知识库 → 本地文档库 定时增量同步路由。
 
 - 前缀：/api/v1/sync
 - 认证：沿用平台 require_role（super_admin/admin/editor）
@@ -9,11 +9,10 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
-from time import time
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile
-from sqlalchemy import select, literal, func, case, cast, String, union_all
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import select, literal, func, cast, String
 
 from app.deps import require_role
 from app.schemas import (
@@ -21,27 +20,21 @@ from app.schemas import (
     SyncPreviewSettingsUpdate, SyncSourceCreate, SyncSourceOut, SyncSourceTest, SyncSourceUpdate,
     SyncTaskBatchIn, SyncTaskOut,
 )
-from kb_common.clients.dify_document import dataset_runtime
 from kb_common.models import (
-    SyncDocumentMapping, SyncFailure, SyncLog, SyncRun, SyncSource, SyncTask, CollectionTransfer,
+    SyncDocumentMapping, SyncFailure, SyncLog, SyncRun, SyncSource, SyncTask,
 )
 
 from app.services.sync.dingtalk_sync_client import DingTalkError
-from app.services.sync.dify_sync_client import DifyError
 from app.services.sync.engine import run_sync
 from app.services.sync.export_service import check_dws
 from app.services.sync.source_files import skip_reason
 from app.services.sync.scheduler import reload_sync_jobs, remove_source_job
 from app.services.sync.sync_database import get_sync_session
-from app.services.sync.sync_settings import make_backend, make_dify_client, make_dingtalk_client
+from app.services.sync.sync_settings import make_dingtalk_client, make_library_backend
 from app.services.sync.xxljob_admin import crontab_to_quartz
 
 router = APIRouter(prefix="/api/v1/sync", tags=["同步"])
 _executor = ThreadPoolExecutor(max_workers=4)
-
-# 数据集 runtime 模式缓存（backend_type:dataset_id → (写入时间, mode)），
-# 模式基本不变，10 分钟 TTL，免去预演每次都调 Dify resolve_dataset。
-_dataset_runtime_cache: dict[str, tuple[float, str]] = {}
 
 
 def get_sync_db():
@@ -58,41 +51,32 @@ def get_sync_db():
 def collection_activity(kind: str = "", status: str = "", keyword: str = "",
                         page: int = Query(1, ge=1), size: int = Query(20, ge=1, le=100),
                         db=Depends(get_sync_db)):
-    directory = select(
-        SyncRun.id.label("id"), literal("directory").label("kind"),
-        SyncSource.name.label("name"), SyncRun.source_id.label("source_id"),
-        SyncSource.dify_dataset_id.label("dataset_id"), SyncSource.dify_dataset_name.label("dataset_name"),
-        SyncRun.status.label("status"), SyncRun.message.label("message"),
-        SyncRun.started_at.label("started_at"), SyncRun.finished_at.label("finished_at"),
-        SyncRun.total.label("total"),
-        (SyncRun.created_count + SyncRun.updated_count + SyncRun.deleted_count).label("success_count"),
-        SyncRun.failed_count.label("failed_count"), cast(literal(None), String).label("document_id"),
-        SyncRun.trigger.label("trigger"),
-    ).join(SyncSource, SyncSource.id == SyncRun.source_id)
-    transfer = select(
-        CollectionTransfer.id, CollectionTransfer.kind, CollectionTransfer.name, literal(None).label("source_id"),
-        CollectionTransfer.dataset_id, literal("").label("dataset_name"),
-        CollectionTransfer.status, CollectionTransfer.message,
-        CollectionTransfer.started_at, CollectionTransfer.finished_at, literal(1).label("total"),
-        case((CollectionTransfer.status == "success", 1), else_=0).label("success_count"),
-        case((CollectionTransfer.status == "failed", 1), else_=0).label("failed_count"),
-        CollectionTransfer.document_id, literal("manual").label("trigger"),
-    )
-    activity = union_all(directory, transfer).subquery()
     conditions = []
     if kind:
-        conditions.append(activity.c.kind == kind)
+        conditions.append(literal("directory") == kind)
     if keyword.strip():
-        conditions.append(activity.c.name.contains(keyword.strip(), autoescape=True))
-    groups = db.execute(select(activity.c.kind, activity.c.status, func.count().label("count"))
-        .where(*conditions).group_by(activity.c.kind, activity.c.status)).mappings().all()
+        conditions.append(SyncSource.name.contains(keyword.strip(), autoescape=True))
+    groups = db.execute(select(literal("directory"), SyncRun.status, func.count().label("count"))
+        .join(SyncSource, SyncSource.id == SyncRun.source_id)
+        .where(*conditions).group_by(SyncRun.status)).mappings().all()
     if status:
-        conditions.append(activity.c.status == status)
-    total = db.scalar(select(func.count()).select_from(activity).where(*conditions))
-    rows = db.execute(select(activity).where(*conditions)
-        .order_by(activity.c.started_at.desc(), activity.c.kind, activity.c.id.desc())
-        .offset((page - 1) * size).limit(size)).mappings().all()
-    return {"items": [dict(row) for row in rows], "total": total, "groups": [dict(row) for row in groups]}
+        conditions.append(SyncRun.status == status)
+    total = db.scalar(select(func.count()).select_from(SyncRun)
+                      .join(SyncSource, SyncSource.id == SyncRun.source_id).where(*conditions))
+    rows = db.execute(select(SyncRun, SyncSource.name.label("source_name"))
+        .join(SyncSource, SyncSource.id == SyncRun.source_id)
+        .where(*conditions)
+        .order_by(SyncRun.started_at.desc(), SyncRun.id.desc())
+        .offset((page - 1) * size).limit(size)).all()
+    items = [{
+        "id": run.id, "kind": "directory", "name": source_name,
+        "source_id": run.source_id, "message": run.message,
+        "status": run.status, "started_at": run.started_at, "finished_at": run.finished_at,
+        "total": run.total,
+        "success_count": run.created_count + run.updated_count + run.deleted_count,
+        "failed_count": run.failed_count, "document_id": None, "trigger": run.trigger,
+    } for run, source_name in rows]
+    return {"items": items, "total": total, "groups": [dict(row) for row in groups]}
 
 
 @router.get("/dingtalk/workspaces",
@@ -144,16 +128,6 @@ def dingtalk_nodes(parent_node_id: str = Query(...), max_results: int = Query(50
 
 
 # ---------- 同步源 ----------
-def _serialize_pipeline_inputs(value) -> str:
-    """pipeline_inputs 在 schema 里是 dict，ORM 列是 Text，存 JSON 字符串。"""
-    import json as _json
-    if value is None:
-        return "{}"
-    if isinstance(value, str):
-        return value or "{}"
-    return _json.dumps(value, ensure_ascii=False)
-
-
 def _serialize_node_whitelist(value) -> str:
     """node_whitelist 在 schema 里是 list，ORM 列是 Text，存 JSON 字符串。"""
     import json as _json
@@ -162,83 +136,6 @@ def _serialize_node_whitelist(value) -> str:
     if isinstance(value, str):
         return value or "[]"
     return _json.dumps(value, ensure_ascii=False)
-
-
-@router.get("/pipeline-variables",
-            dependencies=[Depends(require_role("super_admin", "admin", "editor"))])
-def pipeline_variables(dataset_id: str = Query(...), db=Depends(get_sync_db)):
-    """返回指定流水线数据集的 input form 变量 schema（分段参数定义）。
-
-    Dify Service API 不暴露变量定义，本接口直连 Dify 自身数据库只读查询
-    workflows.rag_pipeline_variables（配置项 dify_db_url）。
-    未配置 dify_db_url 或查询失败时读取已导入的 .pipeline 参数定义，
-    两者均不可用时前端提供配置导入和 JSON 编辑器。
-    """
-    from app.services.sync.dify_pipeline_vars import pipeline_form
-    client = make_dify_client(db)
-    try:
-        dataset = client.resolve_dataset(dataset_id)
-        mode = dataset_runtime(dataset)
-        form = (pipeline_form(dataset_id, client.local_file_node_id(dataset_id))
-                if mode == "rag_pipeline" else {"configured": True, "variables": [], "schema_source": "general"})
-        return {**form, "runtime_mode": mode}
-    except (DifyError, ValueError) as exc:
-        raise HTTPException(502, str(exc)) from exc
-    finally:
-        client.close()
-
-
-@router.post("/pipeline-schema", dependencies=[Depends(require_role("super_admin", "admin"))])
-def import_pipeline_schema(file: UploadFile, dataset_id: str = Query(...), db=Depends(get_sync_db)):
-    import json
-    from kb_common.models import Setting
-    from app.services.sync.pipeline_schema import parse_pipeline, schema_key
-    client = make_dify_client(db)
-    try:
-        dataset = client.resolve_dataset(dataset_id)
-        if dataset_runtime(dataset) != "rag_pipeline":
-            raise ValueError("普通知识库无需导入流水线配置")
-        node_id = client.local_file_node_id(dataset_id)
-        schema = parse_pipeline(file.file.read(1024 * 1024 + 1), node_id)
-        key = schema_key(client.base_url, dataset_id)
-        row = db.get(Setting, key)
-        value = json.dumps(schema, ensure_ascii=False)
-        if row:
-            row.value = value
-        else:
-            db.add(Setting(key=key, value=value, is_secret=False))
-        db.commit()
-        return {"configured": True, "runtime_mode": "rag_pipeline", "schema_source": "imported",
-                "variables": schema["variables"]}
-    except (DifyError, ValueError) as exc:
-        raise HTTPException(422, str(exc)) from exc
-    finally:
-        client.close()
-
-
-def _source_dataset_runtime(source: SyncSource, db) -> str:
-    """同步源目标数据集的 runtime 模式（general / rag_pipeline）。
-
-    RAGFlow 一律按普通库（general），不调 resolve（服务未启动时
-    会抛非预期异常导致 500，且 RAGFlow 没有流水线概念）。
-    Dify 模式基本不变，走 10 分钟缓存（_dataset_runtime_cache），
-    避免预演每次都调 resolve_dataset。失败原样抛出，调用方决定是否容错。
-    """
-    if (source.backend_type or "dify") != "dify":
-        return "general"
-    cache_key = f"dify:{source.dify_dataset_id or source.dify_dataset_name}"
-    now = time()
-    cached_mode = _dataset_runtime_cache.get(cache_key)
-    if cached_mode is not None and now - cached_mode[0] < 600:
-        return cached_mode[1]
-    backend = make_backend(source, db)
-    try:
-        dataset = backend.resolve_dataset(source.dify_dataset_id, source.dify_dataset_name)
-        mode = dataset_runtime(dataset)
-    finally:
-        backend.close()
-    _dataset_runtime_cache[cache_key] = (now, mode)
-    return mode
 
 
 @router.get("/sources", response_model=list[SyncSourceOut],
@@ -283,32 +180,23 @@ def sources_stats_all(db=Depends(get_sync_db)):
 def create_source(payload: SyncSourceCreate, u=Depends(require_role("super_admin", "admin")),
                   db=Depends(get_sync_db)):
     data = payload.model_dump()
-    if not (data.get("dify_dataset_name") or "").strip():
+    if not (data.get("dataset_name") or "").strip():
         raise HTTPException(status_code=422, detail="请选择目标知识库")
     try:
         crontab_to_quartz(data.get("cron") or "0 2 * * *")
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    data["pipeline_inputs"] = _serialize_pipeline_inputs(data.get("pipeline_inputs"))
     data["node_whitelist"] = _serialize_node_whitelist(data.get("node_whitelist"))
-    # library 后端需要完整 dict（从 dify_dataset_id 读文档库 ID）；
-    # dify/ragflow 传 backend_type 字符串即可（历史行为不变）
-    backend_type = (data.get("backend_type") or "dify").strip().lower()
-    if backend_type == "library":
-        if not (data.get("dify_dataset_id") or "").strip():
-            raise HTTPException(status_code=422, detail="请指定目标文档库")
-        client = make_backend(data, db)
-    else:
-        client = make_backend(backend_type, db)
+    if not (data.get("dataset_id") or "").strip():
+        raise HTTPException(status_code=422, detail="请指定目标文档库")
+    client = make_library_backend(data)
     try:
-        dataset = client.resolve_dataset(data.get("dify_dataset_id"), data["dify_dataset_name"])
-    except DifyError as exc:
-        raise HTTPException(422, str(exc)) from exc
+        dataset = client.resolve_dataset(data.get("dataset_id"), data["dataset_name"])
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     finally:
         client.close()
-    data.update(dify_dataset_id=dataset["id"], dify_dataset_name=dataset["name"])
+    data.update(dataset_id=dataset["id"], dataset_name=dataset["name"])
     # 同步身份归属：默认记创建者（定时同步用其钉钉权限拉取）；body 可显式指定/置空
     import uuid as _uuid
     owner_raw = data.get("owner_user_id") or str(u.id)
@@ -319,9 +207,9 @@ def create_source(payload: SyncSourceCreate, u=Depends(require_role("super_admin
     db.refresh(source)
     # 新建源也必须立即注册 cron；否则只能等服务重启或下一次编辑后才会执行。
     reload_sync_jobs()
-    # 「添加知识」（library 后端）：创建后立即跑首次同步（进程内直跑，绕过调度往返），
+    # 「添加知识」：创建后立即跑首次同步（进程内直跑，绕过调度往返），
     # 不必等下一个 cron 刻度；后续周期同步仍由 cron 驱动。
-    if backend_type == "library" and source.enabled:
+    if source.enabled:
         from app.services.sync.scheduler import trigger_first_sync
         trigger_first_sync(source.id, getattr(u, "username", "") or "")
     return source
@@ -343,52 +231,43 @@ def update_source(source_id: int, payload: SyncSourceUpdate, db=Depends(get_sync
     if source is None:
         raise HTTPException(status_code=404, detail="同步源不存在")
     updates = payload.model_dump(exclude_unset=True)
-    if "dify_dataset_name" in updates and not (updates.get("dify_dataset_name") or "").strip():
+    if "dataset_name" in updates and not (updates.get("dataset_name") or "").strip():
         raise HTTPException(status_code=422, detail="请选择目标知识库")
     if "cron" in updates:
         try:
             crontab_to_quartz(updates.get("cron") or source.cron)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-    if "pipeline_inputs" in updates:
-        updates["pipeline_inputs"] = _serialize_pipeline_inputs(updates.get("pipeline_inputs"))
     if "node_whitelist" in updates:
         updates["node_whitelist"] = _serialize_node_whitelist(updates.get("node_whitelist"))
     if "owner_user_id" in updates:
         import uuid as _uuid
         raw = updates["owner_user_id"]
         updates["owner_user_id"] = _uuid.UUID(raw) if raw else None
-    if "dify_dataset_id" in updates or "dify_dataset_name" in updates:
-        backend_type = updates.get("backend_type") or source.backend_type or "dify"
-        if backend_type == "library":
-            target_id = updates.get("dify_dataset_id", source.dify_dataset_id)
-            if not (target_id or "").strip():
-                raise HTTPException(status_code=422, detail="请指定目标文档库")
-            client = make_backend({"backend_type": "library", "dify_dataset_id": target_id}, db)
-        else:
-            client = make_backend(backend_type, db)
+    if "dataset_id" in updates or "dataset_name" in updates:
+        target_id = updates.get("dataset_id", source.dataset_id)
+        if not (target_id or "").strip():
+            raise HTTPException(status_code=422, detail="请指定目标文档库")
+        client = make_library_backend({"dataset_id": target_id})
         try:
-            target_id = updates.get("dify_dataset_id", source.dify_dataset_id)
             # 兼容旧前端只按名称改目标；新前端始终携带 ID。
-            if "dify_dataset_id" not in updates and updates.get("dify_dataset_name") != source.dify_dataset_name:
+            if "dataset_id" not in updates and updates.get("dataset_name") != source.dataset_name:
                 target_id = None
-            dataset = client.resolve_dataset(target_id, updates.get("dify_dataset_name") or source.dify_dataset_name)
-        except DifyError as exc:
-            raise HTTPException(422, str(exc)) from exc
+            dataset = client.resolve_dataset(target_id, updates.get("dataset_name") or source.dataset_name)
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
         finally:
             client.close()
-        if source.dify_dataset_id and dataset["id"] != source.dify_dataset_id:
+        if source.dataset_id and dataset["id"] != source.dataset_id:
             if db.query(SyncRun).filter_by(source_id=source_id, status="running").first():
                 raise HTTPException(409, "同步运行中，不能更换目标知识库")
             for mapping in db.query(SyncDocumentMapping).filter_by(source_id=source_id):
-                mapping.dify_document_id = None
-                mapping.dify_batch = None
+                mapping.document_id = None
+                mapping.batch_id = None
                 mapping.status = "pending"
                 mapping.error = ""
             db.query(SyncFailure).filter_by(source_id=source_id).delete()
-        updates.update(dify_dataset_id=dataset["id"], dify_dataset_name=dataset["name"])
+        updates.update(dataset_id=dataset["id"], dataset_name=dataset["name"])
     for key, value in updates.items():
         setattr(source, key, value)
     db.commit()
@@ -423,14 +302,7 @@ def sync_source_now(source_id: int, u=Depends(require_role("super_admin", "admin
         raise HTTPException(status_code=404, detail="同步源不存在")
     if not source.enabled:
         raise HTTPException(status_code=409, detail="同步源已停用，启用后才可立即同步")
-    is_library = (source.backend_type or "").strip().lower() == "library"
-    if not is_library:
-        # library 源走编目+批处理：批处理进行中（running run）允许再次编目（内部按队列跳过）
-        running = db.query(SyncRun.id).filter(
-            SyncRun.source_id == source_id, SyncRun.status == "running",
-        ).first()
-        if running:
-            raise HTTPException(status_code=409, detail="该同步源正在运行，请在运行监控中查看结果")
+    # library 源走编目+批处理：批处理进行中（running run）允许再次编目（内部按队列跳过）
     from app.services.sync.scheduler import trigger_source_sync
     from app.services.sync.xxljob_admin import XxlJobAdminError
     try:
@@ -446,9 +318,9 @@ def source_stats(source_id: int, db=Depends(get_sync_db)):
     source = db.get(SyncSource, source_id)
     if source is None:
         raise HTTPException(status_code=404, detail="同步源不存在")
-    # 文档数 = 该同步源已成功同步到 Dify 的文档数（本地映射 status=synced）。
-    # 多个源可共享同一 Dify 数据集（且数据集可能含手动上传文档），
-    # 不能用数据集全库文档数作为单源口径。
+    # 文档数 = 该同步源已成功同步的文档数（本地映射 status=synced）。
+    # 多个源可共享同一文档库（且文档库可能含手动上传文档），
+    # 不能用全库文档数作为单源口径。
     doc_count = db.query(func.count(SyncDocumentMapping.id)).filter(
         SyncDocumentMapping.source_id == source_id,
         SyncDocumentMapping.status == "synced",
@@ -459,8 +331,7 @@ def source_stats(source_id: int, db=Depends(get_sync_db)):
             "last_run": SyncRunOut.model_validate(last_run).model_dump() if last_run else None}
 
 
-def _test_source_connection(dify_dataset_name: str, db, dataset_id: str | None = None,
-                            backend_type: str = "dify") -> dict[str, Any]:
+def _test_source_connection(dataset_name: str, db, dataset_id: str | None = None) -> dict[str, Any]:
     """测试当前草稿的外部依赖，不要求同步源已写入数据库。"""
     results: dict[str, Any] = {}
     dt = make_dingtalk_client(db)
@@ -473,42 +344,26 @@ def _test_source_connection(dify_dataset_name: str, db, dataset_id: str | None =
     finally:
         dt.close()
 
-    backend = make_backend(backend_type, db)
-    is_dify = (backend_type or "dify") == "dify"
     try:
-        dataset = backend.resolve_dataset(dataset_id, dify_dataset_name)
-        if dataset is None:
-            results["dify"] = {"ok": False, "error": f"知识库不存在: {dify_dataset_name}"}
-        elif is_dify and dataset_runtime(dataset) == "rag_pipeline":
-            # Dify 知识流水线数据集走 pipeline/run 通道，需确认已发布流水线含本地文件数据源节点。
-            try:
-                node_id = backend.local_file_node_id(dataset.get("id"))
-                results["dify"] = {"ok": True, "dataset_id": dataset.get("id"),
-                                   "mode": "pipeline", "start_node_id": node_id}
-            except DifyError as exc:
-                results["dify"] = {"ok": False, "error": str(exc)}
-        else:
-            results["dify"] = {"ok": True, "dataset_id": dataset.get("id"),
-                               "mode": "general" if is_dify else "ragflow"}
-    except DifyError as exc:
-        results["dify"] = {"ok": False, "error": str(exc)}
+        backend = make_library_backend({"dataset_id": dataset_id})
+        dataset = backend.resolve_dataset(dataset_id, dataset_name)
+        results["library"] = {"ok": True, "dataset_id": dataset.get("id")}
+    except ValueError as exc:
+        results["library"] = {"ok": False, "error": str(exc)}
     except Exception as exc:  # noqa: BLE001
-        results["dify"] = {"ok": False, "error": str(exc)}
-    finally:
-        backend.close()
+        results["library"] = {"ok": False, "error": str(exc)}
 
     results["dws"] = check_dws()
     results["ok"] = bool(results.get("dingtalk", {}).get("ok")
-                         and results.get("dify", {}).get("ok"))
+                         and results.get("library", {}).get("ok"))
     return results
 
 
 @router.post("/sources/test",
              dependencies=[Depends(require_role("super_admin", "admin", "editor"))])
 def test_source_draft(payload: SyncSourceTest, db=Depends(get_sync_db)):
-    """保存前测试表单中选定的钉钉与目标知识库连接。"""
-    return _test_source_connection(payload.dify_dataset_name, db, payload.dify_dataset_id,
-                                   payload.backend_type)
+    """保存前测试表单中选定的钉钉与目标文档库连接。"""
+    return _test_source_connection(payload.dataset_name, db, payload.dataset_id)
 
 
 @router.post("/sources/{source_id}/test",
@@ -517,8 +372,7 @@ def test_source(source_id: int, db=Depends(get_sync_db)):
     source = db.get(SyncSource, source_id)
     if source is None:
         raise HTTPException(status_code=404, detail="同步源不存在")
-    return _test_source_connection(source.dify_dataset_name, db, source.dify_dataset_id,
-                                   source.backend_type)
+    return _test_source_connection(source.dataset_name, db, source.dataset_id)
 
 
 @router.post("/sources/{source_id}/preview",
@@ -541,10 +395,7 @@ def preview_source(source_id: int, refresh: bool = False, db=Depends(get_sync_db
 
     mappings = {m.node_id: m for m in
                 db.query(SyncDocumentMapping).filter_by(source_id=source_id).all()}
-    try:
-        mode = _source_dataset_runtime(source, db)
-    except (DifyError, ValueError) as exc:
-        raise HTTPException(502, str(exc)) from exc
+    mode = "library"  # 本地文档库通道：白名单与解析链路均按 library 规则
     items: list[dict] = []
     remote_ids: set[str] = set()
     for node in nodes:
@@ -563,7 +414,7 @@ def preview_source(source_id: int, refresh: bool = False, db=Depends(get_sync_db
             continue
         item_base = {"node_id": node_id, "name": name, "category": node.get("category", "DOCUMENT"), "enabled": True}
         if mapping is None:
-            items.append({**item_base, "action": "新增", "doc": name, "note": "未同步过，本次将写入 Dify"})
+            items.append({**item_base, "action": "新增", "doc": name, "note": "未同步过，本次将写入目标文档库"})
         else:
             items.append({**item_base, "action": "更新", "doc": name,
                           "note": "上一轮已同步，本次将重新上传" if mapping.status == "synced"
@@ -572,7 +423,7 @@ def preview_source(source_id: int, refresh: bool = False, db=Depends(get_sync_db
         for node_id, mapping in mappings.items():
             if node_id not in remote_ids:
                 items.append({"action": "删除", "doc": mapping.name,
-                              "note": "钉钉侧已删除，将同步删除 Dify 文档"})
+                              "note": "钉钉侧已删除，将同步删除目标文档库文档"})
     return items
 
 
@@ -727,24 +578,16 @@ def list_tasks(tab: str = Query("done"), status: str = "", source_id: int | None
 @router.post("/tasks/batch-retry",
              dependencies=[Depends(require_role("super_admin", "admin", "editor"))])
 def batch_retry_tasks(payload: SyncTaskBatchIn, db=Depends(get_sync_db)):
-    """批量重试：仅失败且带节点信息的任务可重试；同步源正在运行的跳过。
+    """批量重试：仅失败且带节点信息的任务可重试。
 
-    library 批处理模式的源不因 running run 被跳过（重入队与批处理并发安全）。
+    library 批处理模式：任务重入队与批处理并发安全（running run 不阻断）。
     """
     from app.services.sync.task_retry import submit_task_retry
     tasks = db.query(SyncTask).filter(SyncTask.id.in_(payload.ids)).all()
-    running_sources = {r[0] for r in
-                       db.query(SyncRun.source_id).filter(SyncRun.status == "running").all()}
-    library_sources = {r[0] for r in
-                       db.query(SyncSource.id).filter(
-                           SyncSource.backend_type == "library").all()}
     submitted = 0
     skipped = 0
     for task in tasks:
-        # library 批处理模式任务重入队与批处理并发安全，不因 running run 被跳过
-        is_library = bool(task.library_document_id) or (task.source_id in library_sources)
-        if task.status == "failed" and task.node_id and task.source_id is not None \
-                and (is_library or task.source_id not in running_sources):
+        if task.status == "failed" and task.node_id and task.source_id is not None:
             submit_task_retry(task.id)
             submitted += 1
         else:
@@ -752,7 +595,7 @@ def batch_retry_tasks(payload: SyncTaskBatchIn, db=Depends(get_sync_db)):
     skipped += max(0, len(payload.ids) - len(tasks))
     message = f"已提交 {submitted} 个任务重试"
     if skipped:
-        message += f"，跳过 {skipped} 个（非失败、缺节点信息或同步源运行中）"
+        message += f"，跳过 {skipped} 个（非失败或缺节点信息）"
     return {"ok": True, "submitted": submitted, "skipped": skipped, "message": message}
 
 
@@ -771,7 +614,10 @@ def batch_delete_tasks(payload: SyncTaskBatchIn, db=Depends(get_sync_db)):
 @router.post("/tasks/{task_id}/retry",
              dependencies=[Depends(require_role("super_admin", "admin", "editor"))])
 def retry_task(task_id: int, db=Depends(get_sync_db)):
-    """任务级重试：只重处理这一个钉钉节点，不整源重跑。"""
+    """任务级重试：只重处理这一个钉钉节点，不整源重跑。
+
+    library 批处理模式任务重入队与批处理并发安全（running run 不阻断）。
+    """
     from app.services.sync.task_retry import submit_task_retry
     task = db.get(SyncTask, task_id)
     if task is None:
@@ -780,16 +626,6 @@ def retry_task(task_id: int, db=Depends(get_sync_db)):
         raise HTTPException(status_code=409, detail="仅失败任务可重试")
     if not task.node_id or task.source_id is None:
         raise HTTPException(status_code=409, detail="任务缺少钉钉节点或同步源信息，无法重试")
-    # library 批处理模式任务重入队与批处理并发安全，不因 running run 拒绝
-    is_library = bool(task.library_document_id)
-    if not is_library and task.source_id is not None:
-        source = db.get(SyncSource, task.source_id)
-        is_library = source is not None and (source.backend_type or "").strip().lower() == "library"
-    if not is_library:
-        running = db.query(SyncRun.id).filter(
-            SyncRun.source_id == task.source_id, SyncRun.status == "running").first()
-        if running:
-            raise HTTPException(status_code=409, detail="该同步源正在同步中，请等待结束后再重试")
     submit_task_retry(task_id)
     return {"ok": True, "message": "重试已提交，队列稍后刷新可见结果"}
 

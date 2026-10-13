@@ -6,14 +6,13 @@ import PageContainer from '@/components/common/PageContainer.vue'
 import ImageComponentsPanel from '@/components/library/ImageComponentsPanel.vue'
 import SecretKeyCell from '@/components/common/SecretKeyCell.vue'
 import {
-  getSettings, setSetting, testLLM, listLlmModels, testDify, testMineru, testDingtalk,
+  getSettings, setSetting, testLLM, listLlmModels, testMineru, testDingtalk,
   testEmbedding, testRerank,
   type SettingsResponse, type SettingItem,
-  type TestLLMResult, type TestDifyResult, type TestMinerUResult, type TestDingtalkResult,
+  type TestLLMResult, type TestMinerUResult, type TestDingtalkResult,
   type TestEmbeddingResult, type TestRerankResult,
   getDingtalkBotStatus, type DingtalkBotStatus,
 } from '@/api/settings'
-import { listDifyProfiles, createDifyProfile, updateDifyProfile, deleteDifyProfile, enableDifyProfile, type DifyProfile } from '@/api/settings'
 import {
   listLlmProfiles, createLlmProfile, updateLlmProfile, deleteLlmProfile, refreshLlmProfileModels,
   type LlmProfile, type LlmModelEntry,
@@ -21,13 +20,10 @@ import {
 import {
   listRerankProfiles, createRerankProfile, updateRerankProfile, deleteRerankProfile, enableRerankProfile,
   type RerankProfile,
-  listRagflowProfiles, createRagflowProfile, updateRagflowProfile, deleteRagflowProfile, enableRagflowProfile,
-  type RagflowProfile,
   listEmbeddingProfiles, createEmbeddingProfile, updateEmbeddingProfile, deleteEmbeddingProfile, enableEmbeddingProfile,
   type EmbeddingProfile,
   fetchExternalModels,
 } from '@/api/settings'
-import { testRagflow, type TestRagflowResult } from '@/api/ragflow'
 import { getMenuVisibility, setMenuVisibility } from '@/api/settings'
 import { revealProfileSecret, revealSettingSecret, copyToClipboard } from '@/api/settings'
 import { useRouter } from 'vue-router'
@@ -41,11 +37,6 @@ const form = ref<SettingsResponse>({
   llm_api_key: { ...EMPTY, is_secret: true },
   llm_model: { ...EMPTY },
   mineru_api_key: { ...EMPTY, is_secret: true },
-  dify_base_url: { ...EMPTY },
-  dify_api_key: { ...EMPTY, is_secret: true },
-  dify_upload_max_mb: { ...EMPTY, value: '15' },
-  ragflow_base_url: { ...EMPTY },
-  ragflow_api_key: { ...EMPTY, is_secret: true },
   embedding_base_url: { ...EMPTY },
   embedding_api_key: { ...EMPTY, is_secret: true },
   embedding_model: { ...EMPTY },
@@ -210,107 +201,6 @@ async function removeLlmProfile(p: LlmProfile) {
   await deleteLlmProfile(p.id)
   ElMessage.success('已删除')
   await loadLlmProfiles()
-}
-
-// ============ RAGFlow 知识库多配置（多环境切换，多条只能生效一条） ============
-const ragflowProfiles = ref<RagflowProfile[]>([])
-const ragflowLoading = ref(false)
-
-const rfDlg = ref({
-  visible: false,
-  editingId: '',
-  name: '',
-  base_url: '',
-  api_key: '',
-  has_key: false,
-  testing: false,
-  saving: false,
-  testResult: null as TestRagflowResult | null,
-})
-
-async function loadRagflowProfiles() {
-  ragflowLoading.value = true
-  try {
-    ragflowProfiles.value = await listRagflowProfiles()
-  } finally {
-    ragflowLoading.value = false
-  }
-}
-
-function openRfCreate() {
-  rfDlg.value = {
-    visible: true, editingId: '', name: '', base_url: '',
-    api_key: '', has_key: false,
-    testing: false, saving: false, testResult: null,
-  }
-}
-
-async function openRfEdit(p: RagflowProfile) {
-  rfDlg.value = {
-    visible: true, editingId: p.id, name: p.name, base_url: p.base_url,
-    api_key: '', has_key: p.has_key,
-    testing: false, saving: false, testResult: null,
-  }
-  // 密钥回填：编辑时展示完整 Key（show-password 承担脱敏）
-  if (p.has_key) rfDlg.value.api_key = await prefillProfileKey('ragflow', p.id)
-}
-
-async function runRfTest() {
-  const d = rfDlg.value
-  if (!d.base_url.trim()) {
-    ElMessage.warning('请先填写服务地址')
-    return
-  }
-  d.testResult = null
-  d.testing = true
-  try {
-    d.testResult = await testRagflow({
-      base_url: d.base_url,
-      api_key: d.api_key,
-      profile_id: d.editingId,
-    })
-  } catch (e: any) {
-    d.testResult = { ok: false, message: e?.message || '请求失败' }
-  } finally {
-    d.testing = false
-  }
-}
-
-async function saveRfProfile() {
-  const d = rfDlg.value
-  if (!d.name.trim()) return ElMessage.warning('请填写配置名称')
-  if (!d.base_url.trim()) return ElMessage.warning('请填写服务地址')
-  if (!d.editingId && !d.api_key.trim()) return ElMessage.warning('请填写 API Key（RAGFlow 接口均需认证）')
-  d.saving = true
-  try {
-    // 编辑态：留空且原有 Key → 不修改
-    const payload = { name: d.name.trim(), base_url: d.base_url.trim(), api_key: d.api_key }
-    if (d.editingId) {
-      await updateRagflowProfile(d.editingId, payload)
-      ElMessage.success('RAGFlow 配置已更新')
-    } else {
-      await createRagflowProfile(payload)
-      ElMessage.success('RAGFlow 配置已创建，点击「生效」切换当前使用的环境')
-    }
-    d.visible = false
-    await loadRagflowProfiles()
-  } finally {
-    d.saving = false
-  }
-}
-
-async function removeRfProfile(p: RagflowProfile) {
-  await ElMessageBox.confirm(`确定删除 RAGFlow 配置「${p.name}」？`, '删除确认', { type: 'warning' })
-  await deleteRagflowProfile(p.id)
-  ElMessage.success('已删除')
-  await loadRagflowProfiles()
-}
-
-async function enableRfProfile(p: RagflowProfile, enable: boolean) {
-  if (!enable) { ElMessage.warning('RAGFlow 连接至少需保留一条生效配置，请先切换到其他配置'); return }
-  await enableRagflowProfile(p.id)
-  ElMessage.success(`已切换生效：${p.name}`)
-  await loadRagflowProfiles()
 }
 
 // ============ Rerank 重排模型多配置（多条只能生效一条） ============
@@ -578,12 +468,10 @@ onMounted(async () => {
   // 互不依赖的请求并发拉取：原来逐个 await，首屏耗时等于多次往返相加
   const [settings] = await Promise.all([
     getSettings(),
-    loadProfiles(),
     loadLlmProfiles(),
     loadMenuConfig(),
     loadBotSection(),
     loadRerankProfiles(),
-    loadRagflowProfiles(),
     loadEmbeddingProfiles(),
   ])
   form.value = settings
@@ -613,7 +501,7 @@ async function save(k: string) {
 // ============ 密钥回显（查看/复制完整密钥，仅管理员） ============
 
 /** 编辑弹窗打开时拉取 profile 完整 Key 回填表单；失败返回空串（保留留空=不修改语义） */
-async function prefillProfileKey(kind: 'dify' | 'llm' | 'ragflow' | 'embedding' | 'rerank', id: string) {
+async function prefillProfileKey(kind: 'llm' | 'embedding' | 'rerank', id: string) {
   try {
     return (await revealProfileSecret(kind, id)).api_key
   } catch {
@@ -688,96 +576,6 @@ function clearSiteLogo() {
   form.value.site_logo.value = ''
 }
 
-// ============ Dify 多配置（多条只能生效一条） ============
-const profiles = ref<DifyProfile[]>([])
-const profileDialogVisible = ref(false)
-const savingProfile = ref(false)
-const editingProfile = ref<{ id: string | null; name: string; base_url: string; api_key: string; dataset_ids: string }>({
-  id: null, name: '', base_url: '', api_key: '', dataset_ids: '',
-})
-
-async function loadProfiles() {
-  try {
-    profiles.value = await listDifyProfiles()
-  } catch {
-    profiles.value = []
-  }
-}
-
-async function openProfileDialog(row?: Partial<DifyProfile> & { id?: string }) {
-  if (row) {
-    editingProfile.value = {
-      id: row.id ?? null, name: row.name ?? '', base_url: row.base_url ?? '',
-      api_key: '', dataset_ids: row.dataset_ids ?? '',
-    }
-    // 密钥回填：编辑时展示完整 Key（show-password 承担脱敏）
-    if (row.id && row.api_key) editingProfile.value.api_key = await prefillProfileKey('dify', row.id)
-  } else {
-    editingProfile.value = { id: null, name: '', base_url: '', api_key: '', dataset_ids: '' }
-  }
-  profileDialogVisible.value = true
-}
-
-async function saveProfile() {
-  if (!editingProfile.value.name.trim()) {
-    ElMessage.warning('请填写配置名称')
-    return
-  }
-  savingProfile.value = true
-  try {
-    const data = {
-      name: editingProfile.value.name,
-      base_url: editingProfile.value.base_url,
-      api_key: editingProfile.value.api_key,
-      dataset_ids: editingProfile.value.dataset_ids,
-    }
-    if (editingProfile.value.id) {
-      await updateDifyProfile(editingProfile.value.id, data)
-      ElMessage.success('配置已更新')
-    } else {
-      await createDifyProfile(data)
-      ElMessage.success('配置已创建')
-    }
-    profileDialogVisible.value = false
-    await loadProfiles()
-  } finally {
-    savingProfile.value = false
-  }
-}
-
-async function removeProfile(id: string) {
-  await ElMessageBox.confirm('确认删除该配置？', '提示', { type: 'warning' })
-  await deleteDifyProfile(id)
-  ElMessage.success('已删除')
-  await loadProfiles()
-}
-
-// 配置弹窗内连通性测试（编辑态 Key 为掩码时由后端回退已存 Key）
-const profileTest = ref({ testing: false, result: null as TestDifyResult | null })
-
-async function runProfileTest() {
-  profileTest.value.result = null
-  profileTest.value.testing = true
-  try {
-    profileTest.value.result = await testDify({
-      base_url: editingProfile.value.base_url,
-      api_key: editingProfile.value.api_key,
-      profile_id: editingProfile.value.id || '',
-    })
-  } catch (e: any) {
-    profileTest.value.result = { ok: false, message: e?.message || '请求失败' }
-  } finally {
-    profileTest.value.testing = false
-  }
-}
-
-async function enableProfile(id: string, enable: boolean) {
-  if (!enable) { ElMessage.warning('Dify 连接至少需保留一条生效配置，请先切换到其他配置'); return }
-  await enableDifyProfile(id)
-  ElMessage.success('已切换生效配置')
-  await loadProfiles()
-}
-
 // ============ 钉钉配置（弹窗配置 + 连通性测试） ============
 const dingtalkConfigured = computed(() =>
   !!(form.value.dingtalk_app_key?.is_set && form.value.dingtalk_app_secret?.is_set && form.value.dingtalk_operator_union_id?.is_set))
@@ -822,7 +620,7 @@ async function runDingtalkTest() {
 }
 
 async function saveDingtalkModal() {
-  // Dify 风格：保存前先验证连通性，失败则不落库
+  // 保存前先验证连通性，失败则不落库
   await runDingtalkTest()
   if (!dtModal.value.testResult?.ok) return
   dtModal.value.saving = true
@@ -938,7 +736,7 @@ async function loadMenuConfig() {
         visible: !hidden.includes(r.path),
       }))
     // 保持路由定义顺序
-    const orderedPaths = ['/chat', '/deap-agent', '/hiagent', '/collection', '/knowledge-sources', '/collection/dingtalk', '/collection/knowledge-center', '/collection/queue', '/process', '/process/engine', '/apply', '/operate', '/operate/dashboard', '/operate/qa', '/operate/corrections', '/govern', '/govern/gaps', '/govern/review']
+    const orderedPaths = ['/chat', '/deap-agent', '/hiagent', '/collection', '/knowledge-sources', '/collection/knowledge-center', '/collection/queue', '/apply', '/operate', '/operate/dashboard', '/operate/qa', '/operate/corrections', '/govern', '/govern/gaps', '/govern/review']
     items.sort((a, b) => {
       const ia = orderedPaths.indexOf(a.path)
       const ib = orderedPaths.indexOf(b.path)
@@ -1057,91 +855,6 @@ const visibleMenuCount = computed(() => menuConfigItems.value.filter((x) => x.vi
             </div>
           </el-form-item>
 
-          <el-divider content-position="left">Dify 知识库</el-divider>
-          <el-form-item label="文件上传上限">
-            <div>
-              <div style="display:flex;align-items:center;gap:10px">
-                <el-input v-model="form.dify_upload_max_mb.value" type="number" min="1" max="1024" aria-label="Dify 单文件上传上限 MB" style="width:140px" />
-                <span>MB</span>
-                <el-button type="primary" :loading="saving === 'dify_upload_max_mb'" @click="save('dify_upload_max_mb')">保存</el-button>
-              </div>
-              <div class="field-hint">与 Dify 的 UPLOAD_FILE_SIZE_LIMIT 和网关限制保持一致；此处不会修改 Dify 服务配置。超限文件直接提示，不转为纯文本。</div>
-            </div>
-          </el-form-item>
-          <el-form-item label="配置列表">
-            <div class="profile-box">
-              <div class="profile-toolbar">
-                <el-button size="small" type="primary" @click="openProfileDialog()">+ 新增配置</el-button>
-              </div>
-              <el-table v-if="profiles.length" :data="profiles" size="small" style="margin-top: 8px">
-                <el-table-column label="生效" width="84">
-                  <template #default="{ row }">
-                    <el-switch
-                      :model-value="!!row.enabled"
-                      :aria-label="`设为生效 ${row.name}`"
-                      @change="(v: string | number | boolean) => enableProfile(String(row.id), !!v)"
-                    />
-                  </template>
-                </el-table-column>
-                <el-table-column prop="name" label="名称" min-width="120" />
-                <el-table-column prop="base_url" label="服务地址" min-width="200" />
-                <el-table-column label="API Key" min-width="150">
-                  <template #default="{ row }">
-                    <SecretKeyCell kind="dify" :row-id="row.id" :masked="row.api_key" :has-key="!!row.api_key" />
-                  </template>
-                </el-table-column>
-                <el-table-column label="操作" width="120">
-                  <template #default="{ row }">
-                    <el-button size="small" link type="primary" @click="openProfileDialog(row)">编辑</el-button>
-                    <el-button size="small" link type="danger" @click="removeProfile(row.id)">删除</el-button>
-                  </template>
-                </el-table-column>
-              </el-table>
-              <div v-else class="empty">尚无配置，请点击「新增配置」添加 Dify 实例。</div>
-              <div class="field-hint" style="margin-top: 6px">此处只维护 Dify「连接」（服务地址 + API Key）；启用某条即同步为系统生效连接，只能生效一条。具体检索/同步哪些知识库，请到「知识源管理」登记后按需选择。</div>
-            </div>
-          </el-form-item>
-
-          <el-divider content-position="left">RAGFlow 知识库</el-divider>
-          <el-form-item label="配置列表">
-            <div class="profile-box">
-              <div class="profile-toolbar">
-                <el-button size="small" type="primary" @click="openRfCreate">+ 新增配置</el-button>
-              </div>
-              <el-table v-if="ragflowProfiles.length" :data="ragflowProfiles" size="small" v-loading="ragflowLoading" style="margin-top: 8px">
-                <el-table-column label="生效" width="84">
-                  <template #default="{ row }">
-                    <el-switch
-                      :model-value="!!row.enabled"
-                      :aria-label="`设为生效 ${row.name}`"
-                      @change="(v: string | number | boolean) => enableRfProfile(row as RagflowProfile, !!v)"
-                    />
-                  </template>
-                </el-table-column>
-                <el-table-column prop="name" label="名称" min-width="140">
-                  <template #default="{ row }">
-                    <b>{{ row.name }}</b>
-                    <el-tag v-if="row.enabled" size="small" type="success" effect="light" style="margin-left: 6px">生效中</el-tag>
-                  </template>
-                </el-table-column>
-                <el-table-column prop="base_url" label="服务地址" min-width="220" show-overflow-tooltip />
-                <el-table-column label="API Key" min-width="150">
-                  <template #default="{ row }">
-                    <SecretKeyCell kind="ragflow" :row-id="row.id" :masked="row.api_key" :has-key="!!row.has_key" />
-                  </template>
-                </el-table-column>
-                <el-table-column label="操作" width="110">
-                  <template #default="{ row }">
-                    <el-button size="small" link type="primary" @click="openRfEdit(row as RagflowProfile)">编辑</el-button>
-                    <el-button size="small" link type="danger" @click="removeRfProfile(row as RagflowProfile)">删除</el-button>
-                  </template>
-                </el-table-column>
-              </el-table>
-              <div v-else class="empty">尚无 RAGFlow 配置，点击「新增 RAGFlow 配置」添加环境连接。</div>
-              <div class="field-hint" style="margin-top: 6px">RAGFlow 与 Dify 并列作为外部知识库引擎，可配置多条连接（如测试/生产环境），单选切换生效；服务地址需含端口与 /api/v1 后缀。具体哪些库可用请到「知识源管理」以 RAGFlow 类型登记。</div>
-            </div>
-          </el-form-item>
-
           <el-divider content-position="left">Embedding 向量模型</el-divider>
           <el-form-item label="配置列表">
             <div class="profile-box">
@@ -1178,7 +891,7 @@ const visibleMenuCount = computed(() => menuConfigItems.value.filter((x) => x.vi
                   </template>
                 </el-table-column>
               </el-table>
-              <div v-else class="empty">尚无 Embedding 配置，点击「新增配置」添加；未配置时本地 RAG 检索/入库不可用（Dify/RAGFlow 检索不受影响）。</div>
+              <div v-else class="empty">尚无 Embedding 配置，点击「新增配置」添加；未配置时本地 RAG 检索/入库不可用。</div>
               <div class="field-hint" style="margin-top: 6px">OpenAI 兼容 /embeddings 端点，可配置多条、单选切换生效；向量维度须与既有 ES 索引一致（当前 1024 维），切换模型需重建索引。</div>
             </div>
           </el-form-item>
@@ -1436,46 +1149,6 @@ const visibleMenuCount = computed(() => menuConfigItems.value.filter((x) => x.vi
       </template>
     </el-dialog>
 
-    <!-- Dify 配置编辑弹窗 -->
-    <el-dialog v-model="profileDialogVisible" :title="editingProfile.id ? '编辑配置' : '新增配置'" width="520px">
-      <el-form label-width="120px" @submit.prevent>
-        <el-form-item label="配置名称">
-          <el-input v-model="editingProfile.name" placeholder="如：生产环境 / 测试环境" />
-        </el-form-item>
-        <el-form-item label="API 端点">
-          <el-input v-model="editingProfile.base_url" placeholder="http://127.0.0.1:8088/v1" />
-          <div class="field-hint">Dify 知识库 Service API 端点，需含端口与 /v1，例如 http://127.0.0.1:8088/v1 或 https://dify.example.com/v1</div>
-        </el-form-item>
-        <el-form-item label="API Key">
-          <div class="key-field">
-            <el-input v-model="editingProfile.api_key" show-password :placeholder="editingProfile.id ? '••••••••' : 'Dataset API Key，如 dataset-R6qPqf7CfPC0Dbn6uT3LxIKw'" />
-            <el-tooltip content="复制 API Key" placement="top">
-              <el-button :icon="Copy" text aria-label="复制 API Key" @click="copySecret(editingProfile.api_key)" />
-            </el-tooltip>
-          </div>
-        </el-form-item>
-        <el-alert
-          v-if="profileTest.result?.ok"
-          type="success"
-          :closable="false"
-          show-icon
-          :title="`连接成功 · ${profileTest.result.latency_ms}ms · ${profileTest.result.message}`"
-        />
-        <el-alert
-          v-else-if="profileTest.result && !profileTest.result.ok"
-          type="error"
-          :closable="false"
-          show-icon
-          :title="profileTest.result.message || '连接失败'"
-        />
-      </el-form>
-      <template #footer>
-        <el-button :loading="profileTest.testing" @click="runProfileTest">测试连通性</el-button>
-        <el-button @click="profileDialogVisible = false">取消</el-button>
-        <el-button type="primary" :loading="savingProfile" @click="saveProfile">保存</el-button>
-      </template>
-    </el-dialog>
-
     <!-- Rerank 重排配置编辑弹窗 -->
     <el-dialog v-model="rrDlg.visible" :title="rrDlg.editingId ? '编辑重排配置' : '新增重排配置'" width="560px" destroy-on-close>
       <el-form label-position="top" @submit.prevent>
@@ -1569,42 +1242,6 @@ const visibleMenuCount = computed(() => menuConfigItems.value.filter((x) => x.vi
         <el-button :loading="emDlg.testing" @click="runEmTest">测试连通性</el-button>
         <el-button @click="emDlg.visible = false">取消</el-button>
         <el-button type="primary" :loading="emDlg.saving" @click="saveEmProfile">保存</el-button>
-      </template>
-    </el-dialog>
-
-    <!-- RAGFlow 配置编辑弹窗 -->
-    <el-dialog v-model="rfDlg.visible" :title="rfDlg.editingId ? '编辑 RAGFlow 配置' : '新增 RAGFlow 配置'" width="560px" destroy-on-close>
-      <el-form label-position="top" @submit.prevent>
-        <el-form-item required label="配置名称">
-          <el-input v-model="rfDlg.name" placeholder="如：RAGFlow 测试环境 / 生产环境" />
-        </el-form-item>
-        <el-form-item required label="服务地址">
-          <el-input v-model="rfDlg.base_url" placeholder="http://127.0.0.1:9380/api/v1（需含端口与 /api/v1 后缀）" />
-        </el-form-item>
-        <el-form-item required label="API Key">
-          <div class="key-field">
-            <el-input v-model="rfDlg.api_key" show-password :placeholder="rfDlg.has_key ? '••••••••（留空保持不变）' : 'RAGFlow API Key（RAGFlow 接口均需认证）'" />
-            <el-tooltip content="复制 API Key" placement="top">
-              <el-button :icon="Copy" text aria-label="复制 API Key" @click="copySecret(rfDlg.api_key)" />
-            </el-tooltip>
-          </div>
-          <div v-if="rfDlg.editingId && rfDlg.has_key" class="field-hint">留空表示不修改已保存的 Key</div>
-        </el-form-item>
-        <el-alert
-          v-if="rfDlg.testResult?.ok"
-          type="success" :closable="false" show-icon style="margin-top: 8px"
-          :title="rfDlg.testResult.message || '连接成功'"
-        />
-        <el-alert
-          v-else-if="rfDlg.testResult && !rfDlg.testResult.ok"
-          type="error" :closable="false" show-icon style="margin-top: 8px"
-          :title="rfDlg.testResult.message || '连接失败'"
-        />
-      </el-form>
-      <template #footer>
-        <el-button :loading="rfDlg.testing" @click="runRfTest">测试连通性</el-button>
-        <el-button @click="rfDlg.visible = false">取消</el-button>
-        <el-button type="primary" :loading="rfDlg.saving" @click="saveRfProfile">保存</el-button>
       </template>
     </el-dialog>
 

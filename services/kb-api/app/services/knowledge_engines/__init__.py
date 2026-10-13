@@ -9,7 +9,6 @@ class EngineError(Exception):
     """引擎操作失败（网络/契约/业务错误统一映射）。"""
 
 
-from .ragflow import RagflowEngine  # noqa: E402
 from .mineru import MinerUEngine, MinerUCloudEngine, job_state  # noqa: E402
 
-__all__ = ["EngineError", "RagflowEngine", "MinerUEngine", "MinerUCloudEngine", "job_state"]
+__all__ = ["EngineError", "MinerUEngine", "MinerUCloudEngine", "job_state"]

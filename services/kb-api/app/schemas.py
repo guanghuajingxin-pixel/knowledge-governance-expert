@@ -92,11 +92,9 @@ class SegmentOut(BaseModel):
 
 
 # ===== 知识源登记（企业知识库注册表）=====
-# 可检索/可同步的外部知识库引擎类型 + 钉钉数据源 + 业务系统占位。
+# 钉钉数据源 + 业务系统占位。
 VALID_SOURCE_TYPES = {
     "dingtalk_workspace",  # 钉钉知识库（数据源）
-    "dify_dataset",        # Dify 知识库（检索/同步目标）
-    "ragflow_dataset",     # RAGFlow 知识库（检索/同步目标，与 Dify 并列）
     "business_system",     # 业务系统（占位）
 }
 
@@ -109,7 +107,7 @@ def _validate_source_type(v: str | None) -> str | None:
 
 class KnowledgeSourceBase(BaseModel):
     name: str
-    source_type: str  # dingtalk_workspace | dify_dataset | ragflow_dataset | business_system
+    source_type: str  # dingtalk_workspace | business_system
     external_id: str
     description: str = ""
     config: dict | None = None
@@ -144,7 +142,7 @@ class KnowledgeSourceOut(KnowledgeSourceBase):
     updated_at: datetime
 
 
-# ===== 钉钉知识库 → Dify 定时增量同步 =====
+# ===== 钉钉知识库 → 本地文档库 定时增量同步 =====
 from pydantic import Field
 
 
@@ -153,17 +151,12 @@ class SyncSourceBase(BaseModel):
     workspace_id: str
     root_node_id: str
     start_dir: str = ""
-    # 目标引擎：dify | ragflow | library（默认 dify，历史行为不变）
-    backend_type: str = Field(default="dify", pattern="^(dify|ragflow|library)$")
-    # 目标知识库标识（对 dify 存 dataset_id/name，对 ragflow 存其 dataset_id/name）
-    dify_dataset_name: str
-    dify_dataset_id: str | None = None
+    # 目标本地文档库
+    dataset_name: str
+    dataset_id: str | None = None
     delete_policy: str = Field(default="keep", pattern="^(keep|sync)$")
     cron: str = "0 2 * * *"
     enabled: bool = True
-    # 流水线数据集的 input form 变量值（分段参数），如 {"max_chunk_length": 1024}。
-    # 普通数据集忽略；流水线数据集缺失必填变量时 Dify 会报 500。RAGFlow 忽略此字段。
-    pipeline_inputs: dict[str, Any] = Field(default_factory=dict)
     # 节点白名单：限定只同步这些钉钉文档节点（「添加知识」选择指定文档 + 自动同步）；
     # 空数组表示同步整棵目录树（历史行为）。
     node_whitelist: list[str] = Field(default_factory=list)
@@ -186,13 +179,11 @@ class SyncSourceUpdate(BaseModel):
     workspace_id: str | None = None
     root_node_id: str | None = None
     start_dir: str | None = None
-    backend_type: str | None = Field(default=None, pattern="^(dify|ragflow|library)$")
-    dify_dataset_name: str | None = None
-    dify_dataset_id: str | None = None
+    dataset_name: str | None = None
+    dataset_id: str | None = None
     delete_policy: str | None = Field(default=None, pattern="^(keep|sync)$")
     cron: str | None = None
     enabled: bool | None = None
-    pipeline_inputs: dict[str, Any] | None = None
     node_whitelist: list[str] | None = None
     owner_user_id: str | None = None
 
@@ -211,24 +202,9 @@ class SyncPreviewSettingsUpdate(BaseModel):
 class SyncSourceOut(SyncSourceBase):
     model_config = ConfigDict(from_attributes=True)
     id: int
-    dify_dataset_id: str | None = None
+    dataset_id: str | None = None
     created_at: datetime
     updated_at: datetime
-
-    @field_validator("pipeline_inputs", mode="before")
-    @classmethod
-    def _parse_pipeline_inputs(cls, value: Any) -> dict[str, Any]:
-        """ORM 里 pipeline_inputs 是 Text 存的 JSON 字符串，序列化时转回 dict。"""
-        import json as _json
-        if value is None or value == "":
-            return {}
-        if isinstance(value, dict):
-            return value
-        try:
-            parsed = _json.loads(value)
-            return parsed if isinstance(parsed, dict) else {}
-        except (ValueError, TypeError):
-            return {}
 
     @field_validator("node_whitelist", mode="before")
     @classmethod

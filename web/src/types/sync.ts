@@ -1,4 +1,4 @@
-// 钉钉知识库 → Dify 定时增量同步：类型定义
+// 钉钉知识库 → 本地文档库 定时增量同步：类型定义
 
 export interface Workspace {
   workspaceId: string
@@ -28,54 +28,29 @@ export interface Source {
   workspace_id: string
   root_node_id: string
   start_dir: string
-  /** 目标引擎：dify | ragflow */
-  backend_type: 'dify' | 'ragflow'
-  dify_dataset_name: string
-  dify_dataset_id: string | null
+  /** 目标文档库名称 */
+  dataset_name: string
+  /** 目标文档库 ID（本地 document-library ID 字符串化） */
+  dataset_id: string | null
   delete_policy: 'keep' | 'sync'
   cron: string
   enabled: boolean
-  /** 流水线数据集的 input form 变量值（分段参数），如 {max_chunk_length: 1024} */
-  pipeline_inputs: Record<string, any>
   created_at: string
   updated_at: string
 }
 
 export interface SourcePayload {
-  dify_dataset_id?: string | null
+  dataset_id?: string | null
   name: string
   workspace_id: string
   root_node_id: string
   start_dir?: string
-  /** 目标引擎：dify | ragflow | library（本地文档库） */
-  backend_type?: 'dify' | 'ragflow' | 'library'
-  dify_dataset_name: string
+  dataset_name: string
   delete_policy: 'keep' | 'sync'
   cron: string
   enabled: boolean
-  pipeline_inputs: Record<string, any>
   /** 节点白名单：限定只同步这些钉钉文档节点；空数组=同步整棵目录树 */
   node_whitelist?: string[]
-}
-
-/** Dify 流水线 input form 单个变量的 schema（来自 workflows.rag_pipeline_variables） */
-export interface PipelineVariable {
-  variable: string
-  label: string
-  type: 'number' | 'text-input' | 'select' | 'checkbox' | string
-  required: boolean
-  default_value: unknown
-  options: string[]
-  unit: string
-  tooltips: string
-}
-
-export interface PipelineVariablesResponse {
-  runtime_mode: string
-  schema_source: string
-  /** dify_db_url 是否已配置；false 时前端降级为 JSON 编辑器 */
-  configured: boolean
-  variables: PipelineVariable[]
 }
 
 /** 同步身份来源：owner 自己的钉钉绑定 / 全局服务账号兜底 / 空串=历史数据无记录 */

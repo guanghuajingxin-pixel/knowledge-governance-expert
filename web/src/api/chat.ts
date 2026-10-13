@@ -6,12 +6,8 @@ import { sso } from '@/auth/session'
 export interface ChatRequest {
   query: string
   kb_ids?: string[]
-  /** 首选：知识库（检索抽象层）ID，后端按 platform 解析为 dify/ragflow 两组 dataset */
+  /** 首选：知识库（检索抽象层）ID */
   library_ids?: number[] | null
-  /** 兼容旧字段：知识源注册表 ID（推送路径登记） */
-  knowledge_source_ids?: number[] | null
-  /** 兼容旧字段：直接指定 Dify 数据集 ID */
-  dify_dataset_ids?: string[] | null
   top_k?: number
   last_query?: string
   last_answer?: string

@@ -124,22 +124,6 @@ class RetrievalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.post.await_count, 1)
         retrieval._vectors.clear()
 
-    async def test_ragflow_zero_score_and_document_filter(self):
-        import httpx
-        from kb_common.clients import ragflow_client as rf
-        cfg = NS(ragflow_base_url='http://ragflow/api/v1', ragflow_api_key='key',
-                 ragflow_retrieval_top_k=8, ragflow_similarity_threshold=0,
-                 ragflow_vector_similarity_weight=.7, ragflow_rerank_id='')
-        client = AsyncMock()
-        client.__aenter__.return_value = client
-        client.post.return_value = httpx.Response(200, json={'code':0, 'data':{'chunks':[
-            {'similarity':0, 'vector_similarity':.9, 'content':'unrelated'}]}},
-            request=httpx.Request('POST', 'http://ragflow/api/v1/retrieval'))
-        with patch.object(rf, 'get_settings', return_value=cfg), patch.object(rf, '_binding_errors', AsyncMock(return_value=[])), patch.object(rf.httpx, 'AsyncClient', return_value=client):
-            result = await rf.retrieve_with_report(['dataset'], 'query', document_ids=['doc'])
-        self.assertEqual(result['hits'][0]['score'], 0)
-        self.assertEqual(client.post.call_args.kwargs['json']['document_ids'], ['doc'])
-
     async def test_equal_similarity_preserves_bm25_recall_rank(self):
         # Same title covers the query in both chunks. Prefer the body match,
         # not an arbitrary chunk UUID, when the final coverage scores tie.

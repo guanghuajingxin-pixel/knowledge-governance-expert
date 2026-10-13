@@ -829,7 +829,7 @@ async def get_task_stats(
 
 @router.get("/knowledge-sources", response_model=list[KnowledgeSourceOut])
 async def list_knowledge_sources(
-    source_type: str | None = Query(None, description="按类型筛选：dingtalk_workspace | dify_dataset | business_system"),
+    source_type: str | None = Query(None, description="按类型筛选：dingtalk_workspace | business_system"),
     enabled_only: bool = Query(False, description="只返回已启用的知识库"),
     u=Depends(get_current_user),
     s: AsyncSession = Depends(get_session),
@@ -916,7 +916,6 @@ async def get_knowledge_source_directories(
 
     目前支持：
     - dingtalk_workspace：调用钉钉开放平台列出子节点
-    - dify_dataset：返回 Dify 数据集内文档（简化为平铺列表）
     - business_system：返回空列表（待实现）
     """
     source = await s.get(KnowledgeSource, source_id)
@@ -953,42 +952,6 @@ async def get_knowledge_source_directories(
             raise
         except Exception as e:
             raise HTTPException(502, f"获取钉钉目录失败：{e}")
-
-    if source.source_type == "dify_dataset":
-        # Dify 数据集本身就是一层文档集合，无多级目录
-        return {"source_type": source.source_type, "root_node_id": source.external_id, "items": []}
-
-    if source.source_type == "ragflow_dataset":
-        # RAGFlow 数据集：实时列出库内文档（含解析状态），比 Dify 分支更有用
-        from kb_common.clients import ragflow_client
-        from kb_common.config import get_settings as _gs
-        from kb_common.models import Setting as _Setting
-        # 应用运行时连接配置（settings 表优先）
-        for _k in ("ragflow_base_url", "ragflow_api_key"):
-            _row = (await s.execute(select(_Setting).where(_Setting.key == _k))).scalar_one_or_none()
-            setattr(_gs(), _k, (_row.value if _row else None) or getattr(_gs(), _k, "") or "")
-        try:
-            docs = await ragflow_client.list_documents(source.external_id)
-        except ragflow_client.RagflowNotConfigured as e:
-            raise HTTPException(400, str(e))
-        except ragflow_client.RagflowError as e:
-            raise HTTPException(502, f"获取 RAGFlow 文档失败：{e}")
-        return {
-            "source_type": source.source_type,
-            "root_node_id": source.external_id,
-            "items": [
-                {
-                    "node_id": d.get("id"),
-                    "name": d.get("name") or "",
-                    "is_folder": False,
-                    "has_children": False,
-                    "extension": (d.get("name") or "").rsplit(".", 1)[-1].lower() if "." in (d.get("name") or "") else "",
-                    "run_status": d.get("run"),
-                    "chunk_count": d.get("chunk_count") or 0,
-                }
-                for d in docs
-            ],
-        }
 
     # business_system：暂未实现，返回空
     return {"source_type": source.source_type, "root_node_id": source.external_id, "items": []}
@@ -1033,7 +996,7 @@ async def _dingtalk_fallback(s: AsyncSession, doc_ids: list[str]) -> dict[str, d
     再经 SyncSource → KnowledgeSource 解析知识库名称（仅响应补全，不写库）。"""
     mappings = (await s.execute(
         select(SyncDocumentMapping)
-        .where(SyncDocumentMapping.dify_document_id.in_(doc_ids)))).scalars().all()
+        .where(SyncDocumentMapping.document_id.in_(doc_ids)))).scalars().all()
     if not mappings:
         return {}
     src_rows = (await s.execute(
@@ -1050,7 +1013,7 @@ async def _dingtalk_fallback(s: AsyncSession, doc_ids: list[str]) -> dict[str, d
     for m in mappings:
         if not m.node_id:
             continue
-        out[m.dify_document_id] = {
+        out[m.document_id] = {
             "source_url": _DT_NODE_URL.format(node_id=m.node_id),
             "source_workspace_name": ws_names.get(
                 next((sr.workspace_id for sr in src_rows if sr.id == m.source_id), ""), None),

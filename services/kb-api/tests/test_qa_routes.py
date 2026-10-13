@@ -31,14 +31,14 @@ class RouteTests(unittest.IsolatedAsyncioTestCase):
         with patch('app.services.agent.config.load_agent_config', AsyncMock(return_value=cfg)), \
              patch('app.services.llm_resolver.resolve_llm_config', AsyncMock(return_value={'api_key': 'test'})):
             params = await search._prepare_qa(
-                search.ChatIn(query='审批条件', dify_dataset_ids=[]), user, session)
-            self.assertEqual(params['dataset_ids'], [])
+                search.ChatIn(query='审批条件', library_ids=[]), user, session)
+            self.assertEqual(params['doc_library_ids'], [])
             self.assertEqual(params['top_k'], 7)
             self.assertEqual(params['disabled_tools'], [])
             self.assertTrue(params['thread_id'].startswith('anon-'))
             with self.assertRaises(HTTPException) as err:
                 await search._prepare_qa(
-                    search.ChatIn(query='审批条件', dify_dataset_ids=[uuid4()]), user, session)
+                    search.ChatIn(query='审批条件', library_ids=[999]), user, session)
             self.assertEqual(err.exception.status_code, 403)
 
     async def test_disabled_knowledge_search_clears_scope(self):
@@ -49,7 +49,7 @@ class RouteTests(unittest.IsolatedAsyncioTestCase):
         with patch('app.services.agent.config.load_agent_config', AsyncMock(return_value=cfg)), \
              patch('app.services.llm_resolver.resolve_llm_config', AsyncMock(return_value={'api_key': 'test'})):
             params = await search._prepare_qa(search.ChatIn(query='审批条件'), user, session)
-        self.assertEqual(params['dataset_ids'], [])
+        self.assertEqual(params['doc_library_ids'], [])
         self.assertEqual(params['kb_ids'], [])
         self.assertIn('knowledge_search', params['disabled_tools'])
 
@@ -77,7 +77,7 @@ class RouteTests(unittest.IsolatedAsyncioTestCase):
              patch('app.services.llm_resolver.resolve_llm_config', AsyncMock(return_value={'api_key': 'test'})), \
              patch('app.routes.chat_session_route._get_owned', AsyncMock(side_effect=HTTPException(404, '会话不存在'))):
             with self.assertRaises(HTTPException) as err:
-                await search._prepare_qa(search.ChatIn(query='上一条是谁', session_id='another-session', dify_dataset_ids=[]), user, session)
+                await search._prepare_qa(search.ChatIn(query='上一条是谁', session_id='another-session', library_ids=[]), user, session)
             self.assertEqual(err.exception.status_code, 404)
 
     async def test_qa_events_reports_unavailable_sidecar_without_fallback(self):
