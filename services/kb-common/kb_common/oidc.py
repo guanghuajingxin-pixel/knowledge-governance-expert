@@ -163,8 +163,47 @@ async def resolve_oidc_user(claims: dict) -> User:
         return user
 
 
+async def dev_user() -> User:
+    """本地调试账号：按 DEV_AUTH_USER 取用（缺则自动建档 super_admin），绝不与身份中心交互。"""
+    username = (get_settings().dev_auth_user or "admin").strip()
+    async with short_session() as session:
+        user = (await session.execute(select(User).where(User.username == username))).scalar_one_or_none()
+        if user is None:
+            user = User(username=username, role="super_admin", is_active=True,
+                        password_hash=hash_password(secrets.token_urlsafe(32)),
+                        must_change_password=False)
+            session.add(user)
+            try:
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+                user = (await session.execute(select(User).where(User.username == username))).scalar_one_or_none()
+        if not user or not user.is_active:
+            raise HTTPException(403, "本地调试账号不可用，请检查本地用户状态")
+        await session.refresh(user)
+        session.expunge(user)
+        return user
+
+
+async def _local_jwt_user(token: str) -> User | None:
+    """尝试按本地 JWT（HS256 + JWT_SECRET）解析用户；无效/停用返回 None。"""
+    try:
+        claims = decode_jwt(token)
+        async with short_session() as session:
+            user = await session.get(User, claims["sub"])
+    except Exception:
+        return None
+    return user if user and user.is_active else None
+
+
 async def authenticate(token: str) -> User:
     if enabled():
+        # 本地调试：显式配置 DEV_AUTH_TOKEN 后，接受 /auth/dev-login 换发的本地 JWT
+        # （生产 .env.app 不配置该开关，此分支完全不生效）。
+        if get_settings().dev_auth_token:
+            user = await _local_jwt_user(token)
+            if user is not None:
+                return user
         return await resolve_oidc_user(await verify_access_token(token))
     try:
         claims = decode_jwt(token)

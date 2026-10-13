@@ -5,7 +5,7 @@ export interface Identity { access_token: string; user: { username: string; role
 export class ApiError extends Error {
   constructor(message: string, public status = 0) { super(message); this.name = 'ApiError' }
 }
-async function post<T>(path: string, body: unknown, token?: string, signal?: AbortSignal): Promise<T> {
+export async function post<T>(path: string, body: unknown, token?: string, signal?: AbortSignal): Promise<T> {
   let response: Response
   try {
     response = await fetch(`/api/v1${path}`, {

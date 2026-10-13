@@ -37,8 +37,12 @@ export function createSsoClient(application: 'portal' | 'web', apiBase = '/api/v
       adapter.onAuthLogout = publish
       adapter.onAuthRefreshSuccess = publish
       adapter.onAuthRefreshError = () => { adapter?.clearToken(); publish() }
+      // 本地地址跳过自动 check-sso：其顶层重定向可能被身份中心以无效
+      // redirect_uri 拒绝（本地端口与生产回调白名单不一致），保留登录页上的
+      // 手动「使用企业统一账号登录 / 本地调试登录」两个入口。
+      const isLocal = ['localhost', '127.0.0.1', '[::1]', '::1'].includes(location.hostname)
       await adapter.init({
-        onLoad: window.self === window.top ? 'check-sso' : undefined,
+        onLoad: window.self === window.top && !isLocal ? 'check-sso' : undefined,
         checkLoginIframe: false,
         pkceMethod: 'S256', responseMode: 'query', flow: 'standard',
         redirectUri: `${location.origin}${location.pathname}`,

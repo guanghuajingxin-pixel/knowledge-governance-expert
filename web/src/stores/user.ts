@@ -2,7 +2,7 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import type { UserInfo, LoginRequest, LoginResponse } from '@/types/user'
 import { login as loginApi, getUserInfo } from '@/api/auth'
-import { sso } from '@/auth/session'
+import { devSession, sso } from '@/auth/session'
 
 export const useUserStore = defineStore('user', () => {
   const token = ref<string>(sso.isSso ? '' : localStorage.getItem('kb_token') || '')
@@ -41,11 +41,14 @@ export const useUserStore = defineStore('user', () => {
   }
 
   function logout(endSso = true) {
+    // 本地调试会话与远程 SSO 无关：只清本地态，不跳转身份中心
+    const wasDevSession = devSession.value
+    devSession.value = false
     token.value = ''
     userInfo.value = null
     localStorage.removeItem('kb_token')
     localStorage.removeItem('kb_user')
-    if (endSso && sso.isSso) void sso.logout()
+    if (endSso && sso.isSso && !wasDevSession) void sso.logout()
   }
 
   function restoreUser() {

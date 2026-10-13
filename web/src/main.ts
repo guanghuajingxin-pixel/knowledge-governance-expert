@@ -5,7 +5,7 @@ import 'element-plus/dist/index.css'
 import zhCn from 'element-plus/es/locale/lang/zh-cn'
 import * as ElementPlusIconsVue from '@element-plus/icons-vue'
 import App from './App.vue'
-import { initializeAuth, sso, authError } from './auth/session'
+import { devSession, initializeAuth, sso, authError } from './auth/session'
 import { useUserStore } from './stores/user'
 import './styles/global.scss'
 import { setupMock } from './mocks'
@@ -23,6 +23,8 @@ async function bootstrap() {
   if (sso.isSso) {
     userStore.logout(false)
     sso.subscribe(token => {
+      // 本地调试会话优先：SSO 适配器未认证时的空 token 不得清除调试 JWT
+      if (devSession.value) return
       if (token) userStore.setToken(token)
       else userStore.logout(false)
     })

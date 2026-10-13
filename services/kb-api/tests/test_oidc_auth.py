@@ -20,7 +20,8 @@ from app.routes import auth
 class OidcTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.cfg = SimpleNamespace(auth_provider='keycloak', oidc_issuer='https://sso.test/realms/jack',
-            oidc_jwks_url='', oidc_audience='kb-api', oidc_portal_client_id='jack-portal', oidc_web_client_id='knowledge-web')
+            oidc_jwks_url='', oidc_audience='kb-api', oidc_portal_client_id='jack-portal', oidc_web_client_id='knowledge-web',
+            dev_auth_token='', dev_auth_user='admin')
         self.settings = patch.object(oidc, 'get_settings', return_value=self.cfg)
         self.settings.start()
         self.addCleanup(self.settings.stop)
@@ -153,3 +154,89 @@ class OidcTests(unittest.IsolatedAsyncioTestCase):
         token = jwt.encode(self.claims, private, algorithm='RS256', headers={'kid': 'test-key'})
         with self.assertRaises(HTTPException):
             await oidc.verify_access_token(token)
+
+    def dev_session(self, first_lookup):
+        session = SimpleNamespace(execute=AsyncMock(side_effect=[first_lookup]),
+            commit=AsyncMock(), refresh=AsyncMock(), expunge=unittest.mock.Mock(), add=unittest.mock.Mock())
+
+        @asynccontextmanager
+        async def fake_session():
+            yield session
+        return session, fake_session
+
+    async def test_dev_login_endpoint_gate_and_issue(self):
+        from kb_common.security import create_jwt
+        user = User(id=uuid4(), username='admin', role='super_admin', is_active=True)
+        session = SimpleNamespace(execute=AsyncMock(
+            return_value=SimpleNamespace(scalar_one_or_none=lambda: None)))
+        # 未配置 DEV_AUTH_TOKEN：端点不存在
+        with patch.object(auth, 'get_settings', return_value=SimpleNamespace(dev_auth_token='')):
+            with self.assertRaises(HTTPException) as error:
+                await auth.dev_login(auth.DevLoginIn(token='x'), s=session)
+            self.assertEqual(error.exception.status_code, 404)
+        # 配置后：令牌不正确拒绝
+        cfg = SimpleNamespace(dev_auth_token='dev-token-x')
+        with patch.object(auth, 'get_settings', return_value=cfg):
+            with self.assertRaises(HTTPException) as error:
+                await auth.dev_login(auth.DevLoginIn(token='wrong'), s=session)
+            self.assertEqual(error.exception.status_code, 401)
+            # 令牌正确：换发与 /auth/login 同构的标准 JWT
+            with patch.object(auth, 'dev_user', AsyncMock(return_value=user)):
+                result = await auth.dev_login(auth.DevLoginIn(token='dev-token-x'), s=session)
+        self.assertTrue(result['access_token'])
+        self.assertEqual(result['user']['username'], 'admin')
+        self.assertEqual(jwt.get_unverified_claims(result['access_token'])['sub'], str(user.id))
+
+    async def test_local_jwt_accepted_only_with_dev_switch(self):
+        from kb_common.security import create_jwt
+        user = User(id=uuid4(), username='localdev', role='super_admin', is_active=True)
+        token = create_jwt(str(user.id), 'super_admin')
+
+        def session_yielding(found):
+            @asynccontextmanager
+            async def fake_session():
+                yield found
+            return fake_session
+
+        # 开关开启：接受 /auth/dev-login 换发的本地 JWT
+        self.cfg.dev_auth_token = 'dev-token-x'
+        with patch.object(oidc, 'short_session', session_yielding(SimpleNamespace(get=AsyncMock(return_value=user)))):
+            resolved = await oidc.authenticate(token)
+        self.assertEqual(resolved.username, 'localdev')
+        # 开关关闭：同一 JWT 必须走统一登录校验并被拒绝
+        self.cfg.dev_auth_token = ''
+        with self.assertRaises(HTTPException) as error:
+            await oidc.authenticate(token)
+        self.assertEqual(error.exception.status_code, 401)
+        # 停用用户即使开关开启也拒绝
+        self.cfg.dev_auth_token = 'dev-token-x'
+        disabled = User(id=user.id, username='localdev', is_active=False)
+        with patch.object(oidc, 'short_session', session_yielding(SimpleNamespace(get=AsyncMock(return_value=disabled)))), \
+                self.assertRaises(HTTPException) as error:
+            await oidc.authenticate(token)
+        self.assertEqual(error.exception.status_code, 401)
+
+    async def test_dev_user_reuses_or_creates_super_admin(self):
+        self.cfg.dev_auth_user = 'localdev'
+        existing = User(id=uuid4(), username='localdev', role='viewer', is_active=True)
+        found = SimpleNamespace(scalar_one_or_none=lambda: existing)
+        _, fake_session = self.dev_session(found)
+        with patch.object(oidc, 'short_session', fake_session):
+            resolved = await oidc.dev_user()
+        self.assertEqual(resolved.username, 'localdev')
+        # 缺失时自动建档 super_admin
+        missing = SimpleNamespace(scalar_one_or_none=lambda: None)
+        session, fake_session = self.dev_session(missing)
+        with patch.object(oidc, 'short_session', fake_session):
+            resolved = await oidc.dev_user()
+        self.assertEqual(resolved.username, 'localdev')
+        self.assertEqual(resolved.role, 'super_admin')
+        session.add.assert_called_once()
+        session.commit.assert_awaited_once()
+
+    async def test_dev_user_rejects_disabled_user(self):
+        disabled = SimpleNamespace(scalar_one_or_none=lambda: User(id=uuid4(), username='admin', is_active=False))
+        _, fake_session = self.dev_session(disabled)
+        with patch.object(oidc, 'short_session', fake_session), self.assertRaises(HTTPException) as error:
+            await oidc.dev_user()
+        self.assertEqual(error.exception.status_code, 403)

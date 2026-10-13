@@ -1,14 +1,15 @@
 <script setup lang="ts">
-import { ref } from 'vue'
-import { ElAlert, ElButton, ElForm, ElFormItem, ElIcon, ElInput } from 'element-plus'
+import { onMounted, ref } from 'vue'
+import { ElAlert, ElButton, ElForm, ElFormItem, ElIcon, ElInput, ElMessage } from 'element-plus'
 import { ArrowRight, KeyRound, Sparkles, UserRound } from '@lucide/vue'
 import heroUrl from '../assets/login-hero.jpg'
-import { authConfig, authError, isAuthReady, initializeAuth, signIn } from '../auth/session'
+import { authConfig, authError, devAuthEnabled, devSignIn, isAuthReady, initializeAuth, signIn } from '../auth/session'
 
 const username = ref<string>('')
 const password = ref<string>('')
 const error = ref<string>('')
 const isSubmitting = ref<boolean>(false)
+const isDevSigningIn = ref<boolean>(false)
 
 async function submit() {
   if (isSubmitting.value) return
@@ -18,6 +19,26 @@ async function submit() {
   catch (cause) { error.value = cause instanceof Error ? cause.message : '登录失败，请重试。' }
   finally { isSubmitting.value = false }
 }
+
+async function devSubmit() {
+  if (isDevSigningIn.value) return
+  isDevSigningIn.value = true
+  error.value = ''
+  try { await devSignIn() }
+  catch (cause) { error.value = cause instanceof Error ? cause.message : '本地调试登录失败。' }
+  finally { isDevSigningIn.value = false }
+}
+
+onMounted(async () => {
+  // 本地地址自动本地调试登录（免登录）；失败则留在登录页手动选择登录方式
+  if (!devAuthEnabled || authConfig.value?.provider !== 'keycloak') return
+  isDevSigningIn.value = true
+  try {
+    await devSignIn()
+    ElMessage.success('已本地调试登录')
+  } catch { /* 静默：登录页上的手动入口仍然可用 */ }
+  finally { isDevSigningIn.value = false }
+})
 </script>
 
 <template>
@@ -42,6 +63,9 @@ async function submit() {
           </el-form-item>
           <el-button class="login-submit" type="primary" size="large" native-type="submit" :loading="isSubmitting" :disabled="authConfig.provider === 'local' && (!username.trim() || !password)">
             {{ authConfig.provider === 'keycloak' ? '使用企业统一账号登录' : '登录' }}<el-icon class="submit-arrow"><ArrowRight /></el-icon>
+          </el-button>
+          <el-button v-if="devAuthEnabled" class="login-submit dev-submit" size="large" :loading="isDevSigningIn" @click="devSubmit">
+            本地调试登录（绕过统一登录）<el-icon class="submit-arrow"><ArrowRight /></el-icon>
           </el-button>
         </el-form>
         <p class="login-note">内部系统，请勿泄露账号信息 · 如遇问题请联系门户管理员</p>
@@ -74,6 +98,7 @@ h1 { margin: 0 0 10px; font-size: 30px; font-weight: 700; letter-spacing: 1px; c
 .login-form :deep(.el-form-item) { margin-bottom: 22px; }
 .login-form :deep(.el-form-item__label) { font-size: 13px; color: var(--el-text-color-regular); }
 .login-submit { width: 100%; font-weight: 600; letter-spacing: 2px; .submit-arrow { margin-left: 6px; font-size: 16px; } }
+.dev-submit { margin-top: 12px; margin-left: 0; font-weight: 500; color: var(--el-text-color-regular); }
 .login-note { margin: 28px 0 0; font-size: 11px; line-height: 1.8; color: var(--el-text-color-placeholder); }
 .login-hint { display: flex; align-items: center; gap: 6px; margin: 6px 0 0; font-size: 11px; color: var(--el-text-color-secondary); .el-icon { font-size: 13px; color: var(--app-brand-blue); } }
 .hero-panel { position: relative; overflow: hidden; background: var(--app-blue-900); }
