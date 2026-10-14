@@ -2,7 +2,7 @@
  * 解析引擎 API 文档入口的地址解析。
  *
  * 两类入口：
- *  - 「API 调用说明」：VitePress 文档站（含检索与解析指南），地址固定；
+ *  - 「产品手册」：VitePress 文档站（发版记录 + 检索与解析指南），地址固定；
  *  - 「OpenAPI」：Swagger 调试台 {Base}/docs，Base 与「自定义解析」页签
  *    （ParserCustomTab）、处理引擎页（ProcessEngine）共用同一份 localStorage 配置。
  * 后续新增其他 OpenAPI 服务时在此追加。

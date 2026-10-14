@@ -188,12 +188,12 @@ function navigate(path: string) {
 // 「关于我」产品介绍页
 const aboutUrl = `${import.meta.env.BASE_URL}about.html`
 
-// 左下角用户区菜单：关于我（新窗口）/ API 调用说明（新页签）/ 退出登录
+// 左下角用户区菜单：关于我（新窗口）/ 产品手册（新页签，含发版记录与接入指南）/ 退出登录
 function handleUserCommand(command: string | number | object) {
   if (command === 'about') {
     window.open(aboutUrl, '_blank', 'noopener')
   } else if (command === 'api-docs') {
-    // 解析引擎 API 调用说明文档页（自编静态页，含端到端示例），与处理引擎页入口同源
+    // VitePress 产品手册文档站（发版记录 + 解析/接入指南），与处理引擎页入口同源
     openParserApiGuide()
   } else if (command === 'logout') {
     userStore.logout()
@@ -325,7 +325,7 @@ function handleUserCommand(command: string | number | object) {
       </template>
     </nav>
 
-    <!-- 左下角：用户区（关于我 / API 调用说明 / 退出登录） -->
+    <!-- 左下角：用户区（关于我 / 产品手册 / 退出登录） -->
     <div class="sidebar-footer">
       <el-dropdown class="user-dropdown" trigger="click" @command="handleUserCommand">
         <span
@@ -343,7 +343,7 @@ function handleUserCommand(command: string | number | object) {
         <template #dropdown>
           <el-dropdown-menu>
             <el-dropdown-item command="about">关于我</el-dropdown-item>
-            <el-dropdown-item command="api-docs">API 调用说明</el-dropdown-item>
+            <el-dropdown-item command="api-docs">产品手册</el-dropdown-item>
             <el-dropdown-item command="logout" divided>退出登录</el-dropdown-item>
           </el-dropdown-menu>
         </template>

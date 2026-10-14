@@ -137,7 +137,7 @@ onBeforeUnmount(closeSecret)
     </el-form>
     <div class="toolbar">
       <el-button type="primary" :icon="Plus" :disabled="isLoading || !!error" @click="openCreate">签发 Key</el-button>
-      <el-button :icon="BookOpen" @click="openApiGuide('authentication')">查看调用说明</el-button>
+      <el-button :icon="BookOpen" @click="openApiGuide('authentication')">查看产品手册</el-button>
     </div>
     <el-alert v-if="error" :title="error" type="error" :closable="false" show-icon><el-button link type="primary" @click="load">重新加载</el-button></el-alert>
     <div class="table-fill">

@@ -6,6 +6,9 @@ hero:
   tagline: 从签发凭证到检索内容，在一份指南中完成接入。
   actions:
     - theme: brand
+      text: 发版记录
+      link: /release-notes
+    - theme: alt
       text: 开始接入
       link: /authentication
     - theme: alt
