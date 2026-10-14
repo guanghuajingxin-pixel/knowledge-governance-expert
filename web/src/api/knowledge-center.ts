@@ -1,5 +1,5 @@
 import request from './request'
-import type { DingTalkDocResult, DingTalkWorkspace, DingTalkNode, KnowledgeSource, KnowledgeSourcePayload, SourceDoc, SourceDocResult } from '@/types/knowledge-center'
+import type { BusinessCredentialIssued, BusinessCredentialSummary, DingTalkDocResult, DingTalkWorkspace, DingTalkNode, KnowledgeSource, KnowledgeSourcePayload, SourceDoc, SourceDocResult } from '@/types/knowledge-center'
 
 /** 钉钉知识库文件列表（读取服务端持久化快照；refresh=true 才后台重新遍历钉钉） */
 export function fetchDingTalkDocuments(params: {
@@ -64,6 +64,38 @@ export function updateKnowledgeSource(id: number, payload: Partial<KnowledgeSour
 /** 删除知识库登记 */
 export function deleteKnowledgeSource(id: number) {
   return request.delete<unknown, { ok: boolean }>(`/knowledge-center/knowledge-sources/${id}`)
+}
+
+// ========== 业务系统推送凭证（AK/SK）==========
+
+/** 查看业务系统凭证（SK 不回显） */
+export function getBusinessCredential(sourceId: number) {
+  return request.get<unknown, BusinessCredentialSummary>(
+    `/knowledge-center/knowledge-sources/${sourceId}/credential`)
+}
+
+/** 按需查看 SecretKey 明文（管理员；加密存储，仅此端点解密回显） */
+export function revealBusinessSecret(sourceId: number) {
+  return request.get<unknown, { secret_key: string }>(
+    `/knowledge-center/knowledge-sources/${sourceId}/credential/reveal`)
+}
+
+/** 颁发/轮换凭证：返回的 secret_key 明文仅此一次 */
+export function issueBusinessCredential(sourceId: number, libraryIds: number[]) {
+  return request.post<unknown, BusinessCredentialIssued>(
+    `/knowledge-center/knowledge-sources/${sourceId}/credential`, { library_ids: libraryIds })
+}
+
+/** 更新凭证的可推送文档库白名单（不动 AK/SK） */
+export function updateBusinessCredentialLibraries(sourceId: number, libraryIds: number[]) {
+  return request.put<unknown, BusinessCredentialSummary>(
+    `/knowledge-center/knowledge-sources/${sourceId}/credential`, { library_ids: libraryIds })
+}
+
+/** 吊销凭证（AK 立即失效） */
+export function revokeBusinessCredential(sourceId: number) {
+  return request.delete<unknown, { ok: boolean }>(
+    `/knowledge-center/knowledge-sources/${sourceId}/credential`)
 }
 
 /** 获取某知识库下的目录（通过知识库 ID 获取目录结构） */

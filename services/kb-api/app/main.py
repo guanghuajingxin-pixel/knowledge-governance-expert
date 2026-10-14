@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routes import auth, users, internal, knowledge_base, directory, document, search, settings_route, knowledge_center, knowledge_library, operate, governance, agent_route, agent_internal, chat_session_route, qa_route, sync_route, knowledge_gaps, metrics_route, sensitive, masking, mineru_route, managed_library
+from app.routes import auth, users, internal, knowledge_base, directory, document, search, settings_route, knowledge_center, knowledge_library, operate, governance, agent_route, agent_internal, chat_session_route, qa_route, sync_route, knowledge_gaps, metrics_route, sensitive, masking, mineru_route, managed_library, business_ingest
 
 
 @asynccontextmanager
@@ -121,6 +121,38 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="KB API", lifespan=lifespan)
 
+# 业务系统推送接口的 body 预读缓存：HMAC 签名要覆盖原始请求体，而 FastAPI 解析
+# multipart（File/Form）总是先于路由依赖消费 stream，之后 request.body() 会抛
+# "Stream consumed"。纯 ASGI 中间件在 receive 层读完整 body 后：
+# ① 注入「可重复返回完整 body」的 receive（供 File/Form 解析）；
+# ② 把原始字节写入 scope["_cached_body"]（签名验证直接读取，不触碰 stream 状态）。
+# 注意必须先于 CORS/慢日志注册（add_middleware 后注册在外层）：本中间件要处在
+# 最内层紧贴路由，中间隔任何 BaseHTTPMiddleware 都会破坏 receive 的可重复性。
+class _IngestBodyCacheMiddleware:
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope.get("path", "").startswith("/api/v1/ingest/"):
+            body = b""
+            while True:
+                message = await receive()
+                body += message.get("body", b"")
+                if not message.get("more_body"):
+                    break
+            scope["_cached_body"] = body
+
+            async def cached_receive() -> dict:
+                return {"type": "http.request", "body": body, "more_body": False}
+
+            await self.app(scope, cached_receive, send)
+        else:
+            await self.app(scope, receive, send)
+
+
+app.add_middleware(_IngestBodyCacheMiddleware)
+
+
 # CORS 白名单：默认覆盖 vite dev / 生产 nginx / 内网 IP，也可用 KGE_CORS_ORIGINS 逗号分隔覆盖。
 # 说明：nginx 同源部署（前端 8080 → /api/v1 → kb-api 8001）浏览器不发跨域预检，
 # 白名单主要给「本地起前端 + 远程 kb-api」「其它内网服务跨域调 API」用。
@@ -195,6 +227,7 @@ app.include_router(qa_route.router)
 app.include_router(sync_route.router)
 app.include_router(metrics_route.router)
 app.include_router(mineru_route.router)
+app.include_router(business_ingest.router)
 
 @app.get("/health")
 def health(): return {"status": "ok"}

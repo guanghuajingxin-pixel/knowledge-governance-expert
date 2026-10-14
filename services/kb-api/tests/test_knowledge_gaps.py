@@ -133,3 +133,98 @@ class NightlyGapRefreshTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await check(fresh))
         self.assertTrue(await check(stale))
         self.assertTrue(await check(None))
+
+
+class LinkFolderRowTests(unittest.IsolatedAsyncioTestCase):
+    """快捷方式链接（.dlink）单独成行：不计父文档数、不递归、带 is_link 标记。"""
+
+    async def test_walk_dlink_rows(self):
+        from kb_common.clients import dingtalk_client
+        seen_parents = []
+
+        async def fake_list_nodes(parent_id, operator_union_id=None):
+            seen_parents.append(parent_id)
+            if parent_id == 'root':
+                return [
+                    {'nodeId': 'sub', 'name': '子目录', 'type': 'FOLDER'},
+                    {'nodeId': 'lnk1', 'name': '架构.dlink', 'type': 'FILE', 'extension': 'dlink'},
+                    {'nodeId': 'lnk2', 'name': '引用', 'type': 'FOLDER', 'extension': 'dlink'},
+                    {'nodeId': 'doc', 'name': '说明.adoc', 'type': 'FILE', 'extension': 'adoc'},
+                ]
+            return []
+
+        with patch.object(dingtalk_client, 'list_nodes', fake_list_nodes):
+            rows = await dingtalk_client.walk_workspace_folders('root')
+        by_path = {r['path']: r for r in rows}
+        # .dlink 不计入父文件夹文档数（只剩 1 篇 adoc），FILE/FOLDER 两种类型均成链接行
+        self.assertEqual(by_path['']['document_count'], 1)
+        self.assertTrue(by_path['架构.dlink']['is_link'])
+        self.assertTrue(by_path['引用']['is_link'])
+        self.assertEqual(by_path['架构.dlink']['document_count'], 0)
+        self.assertNotIn('is_link', by_path['子目录'])
+        # 链接不递归：其子节点不会被列出
+        self.assertNotIn('lnk1', seen_parents)
+        self.assertNotIn('lnk2', seen_parents)
+
+    async def test_dingtalk_rows_expose_link_flag(self):
+        source = SimpleNamespace(external_id='kb-x', name='库', config={})
+        stat = SimpleNamespace(node_id='n1', path='A/架构.dlink', owner='张三',
+                               document_count=0, is_link=True)
+        result = SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [stat]))
+        session = SimpleNamespace(execute=AsyncMock(return_value=result))
+        rows = await gaps.dingtalk_folder_rows(session, source)
+        self.assertTrue(rows[0]['is_link'])
+        self.assertEqual(rows[0]['directory_path'], 'A/架构.dlink')
+
+    async def test_notify_rejects_link_row(self):
+        src = SimpleNamespace(external_id='kb-x')
+        stat = SimpleNamespace(is_link=True, owner='张三', document_count=0, path='A/架构.dlink')
+        session = SimpleNamespace(execute=AsyncMock(side_effect=[
+            SimpleNamespace(scalar_one_or_none=lambda: src),
+            SimpleNamespace(scalar_one_or_none=lambda: stat),
+        ]))
+        with self.assertRaises(HTTPException) as ctx:
+            await gaps.notify_dingtalk_owner(
+                gaps.DingtalkNotifyIn(kb_id='kb-x', node_id='n1'), None, session)
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertIn('快捷方式', ctx.exception.detail)
+
+
+class DepartmentCoverageTests(unittest.IsolatedAsyncioTestCase):
+    """看板占比：1 -（无内容目录数 - dlink 数）÷（文件夹总数 - dlink 数）。
+
+    dlink 行不占应上传文件夹数；但 dlink 算「已有内容」——目录下有文件、
+    子文件夹或 dlink 任一存在即为已有内容，放 dlink 的上级目录不算缺失。
+    """
+
+    @staticmethod
+    def _row(path, document_count=0, folder_count=0, is_link=False):
+        return dict(directory_id=path or 'root', kb_id='kb1', kb_name='部门A',
+                    directory_path=path or '（根目录）', path=path, owner='',
+                    document_count=document_count, is_link=is_link,
+                    folder_count=folder_count, source='dingtalk')
+
+    async def test_dlink_child_dirs_count_as_covered(self):
+        from app.routes import operate
+        rows = [
+            self._row('', document_count=1, folder_count=2),  # 根：有文档 → 有内容
+            self._row('A', folder_count=1),                   # A 下只有一个 dlink → dlink 算内容
+            self._row('A/公共库.dlink', is_link=True),        # dlink 行：不占应上传数
+            self._row('B', document_count=2),                # 有文档 → 有内容
+            self._row('C'),                                  # 空目录 → 未上传
+            self._row('D', folder_count=1),                   # D 下有真实子文件夹 → 有内容
+            self._row('D/子目录', document_count=3),          # 有文档 → 有内容
+        ]
+        session = SimpleNamespace(scalar=AsyncMock(return_value=None))
+        with patch('app.routes.knowledge_gaps.all_dingtalk_folder_rows',
+                   AsyncMock(return_value=rows)), \
+             patch('kb_common.database.SessionLocal', _fake_session_factory(session)):
+            result = await operate.knowledge_gap_departments(None)
+        item = result['items'][0]
+        # 应上传数不含 dlink 行（6 = 7 行 - 1 个 dlink）；只有空目录 C 未上传
+        self.assertEqual(item['expected_folder_count'], 6)
+        self.assertEqual(item['covered_folder_count'], 5)
+        self.assertEqual(item['missing_folder_count'], 1)
+        self.assertEqual(item['uploaded_file_count'], 6)
+        self.assertEqual(item['coverage_percent'], round(5 * 100 / 6, 2))
+        self.assertEqual(result['total']['covered_folder_count'], 5)

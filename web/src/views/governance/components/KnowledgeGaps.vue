@@ -122,9 +122,10 @@ const notifyDialog = ref(false)
 const notifying = ref(false)
 
 function canNotify(row: KnowledgeGap) {
-  return row.source === 'dingtalk' && row.document_count === 0 && !!row.owner
+  return row.source === 'dingtalk' && !row.is_link && row.document_count === 0 && !!row.owner
 }
 function notifyTip(row: KnowledgeGap) {
+  if (row.is_link) return '快捷方式链接，目标内容无法统计，不支持通知'
   if (!row.owner) return '未维护知识Owner，无法通知'
   if (row.document_count > 0) return '该目录已有文档，无需补充'
   return '通过钉钉机器人发单聊提醒'
@@ -264,7 +265,7 @@ onUnmounted(stopPolling)
         <el-button type="warning" :disabled="!isDingtalkSelected || dtRefreshing" :loading="dtRefreshing" @click="refreshDingtalk()">刷新数据</el-button>
         <el-tooltip placement="top" popper-class="gap-tip">
           <template #content>
-            <p class="gap-tip-text">按目录查看知识覆盖情况。选择钉钉知识库后点「查询」读取其文件夹快照，文档数量为文件夹直属文档数（含在线文档与本地上传文件，不含子文件夹）；数量为 0 即知识缺口。快照不会自动更新，点击「刷新数据」后台重新遍历（大知识库需数分钟）。</p>
+            <p class="gap-tip-text">按目录查看知识覆盖情况。选择钉钉知识库后点「查询」读取其文件夹快照，文档数量为文件夹直属文档数（含在线文档与本地上传文件，不含子文件夹与快捷方式链接）；数量为 0 即知识缺口；快捷方式链接以「链接」标记单独成行，目标内容无法统计。快照不会自动更新，点击「刷新数据」后台重新遍历（大知识库需数分钟）。</p>
           </template>
           <el-icon class="q refresh-q"><QuestionFilled /></el-icon>
         </el-tooltip>
@@ -311,7 +312,10 @@ onUnmounted(stopPolling)
       <el-table-column prop="document_count" label="文档数量" width="100" align="right" />
       <el-table-column prop="folder_count" label="文件夹数量" width="110" align="right" />
       <el-table-column label="文档状态" width="100">
-        <template #default="{ row }"><el-tag :type="row.document_count ? 'success' : 'warning'">{{ row.document_count ? '有文档' : '无文档' }}</el-tag></template>
+        <template #default="{ row }">
+          <el-tag v-if="(row as KnowledgeGap).is_link" type="info">链接</el-tag>
+          <el-tag v-else :type="row.document_count ? 'success' : 'warning'">{{ row.document_count ? '有文档' : '无文档' }}</el-tag>
+        </template>
       </el-table-column>
       <el-table-column v-if="canEdit" label="操作" width="170">
         <template #default="{ row }">

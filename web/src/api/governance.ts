@@ -108,6 +108,8 @@ export interface KnowledgeGap {
   document_count: number
   /** 直接子文件夹数（不含目录本身与孙级）；钉钉行为快照内直属子文件夹，本地行为直接子目录 */
   folder_count: number
+  /** 钉钉快捷方式链接行（.dlink）：目标内容无法统计，document_count 恒为 0 */
+  is_link?: boolean
   /** 行来源：local=本地知识库目录（可维护Owner） dingtalk=钉钉知识库文件夹（实时拉取） */
   source?: 'local' | 'dingtalk'
   /** 钉钉知识库首页链接（仅 dingtalk 行） */

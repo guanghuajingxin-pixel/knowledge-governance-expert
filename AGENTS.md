@@ -83,7 +83,7 @@ Docker infrastructure (dev-services compose, external dev-network):
 | Process | Port | Stack | Responsibilities |
 |---------|------|-------|-----------------|
 | **kb-api** | 8000 | FastAPI + Celery app | Auth (JWT + API Key, 账户管理上收门户后仅 local 密码登录 + /users/me), document KB CRUD, directory tree, document upload, search (hybrid kNN+BM25+RRF+rerank), enterprise QA via DeerFlow sidecar (search routes → deerflow_runner → services/deerflow qa_server; sidecar tools call back agent_internal), settings, MinerU orchestration |
-| **faq-service** | 8004 | FastAPI | FAQ KB CRUD, FAQ directory tree, Q&A pair CRUD, CSV/Excel batch import, FAQ search (exact + semantic fusion) |
+| **faq-service** | 8004 | FastAPI | FAQ KB CRUD, FAQ directory tree, Q&A pair CRUD (with per-question similar-question variants), CSV/Excel batch import (same-question rows auto-merged, similar questions in-cell split by `;`/newline), FAQ search (exact on question/similar/keywords + semantic fusion, fail-soft when embedding down) |
 | **kb-worker** | — | Celery (kb-api package) | Async ingestion pipeline: PENDING → PARSING (MinerU) → INDEXING (chunk+embed+ES) → COMPLETED |
 
 Embedding & rerank models are **all external** (OpenAI-compatible `/embeddings` + `/rerank` APIs, configured via `EMBEDDING_*` / `RERANK_*`). kb-api does not load any local model; faq-service and kb-worker go through `/internal/embed` on kb-api, which forwards to the external API.
@@ -119,7 +119,9 @@ users ──► knowledge_bases (kb_type: DOCUMENT|FAQ)
               ├──► directories (tree)
               │       └──► documents ──► segments (chunks, linked to ES)
               └──► faq_directories (tree)
-                      └──► faq_entries ──► segments (FAQ chunks, linked to ES)
+                      └──► faq_entries (similar_questions[]: per-question variants,
+                                       one list row each; ES docs per question+variant
+                                       share faq_entry_id) ──► segments (FAQ chunks, linked to ES)
 
 api_keys ──► users
 settings — runtime overrides for .env (LLM key, MinerU key, etc.)

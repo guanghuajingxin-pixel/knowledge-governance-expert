@@ -25,6 +25,7 @@ dependencies = [
   "python-multipart>=0.0.9",
   "httpx>=0.27",
   "python-jose[cryptography]>=3.3",
+  "cryptography>=42",        # 业务系统推送凭证 SecretKey 的 Fernet 加密存储
   "passlib[bcrypt]>=1.7",
   "bcrypt<4",  # passlib 1.7.4 incompatible with bcrypt>=4 (detect_wrap_bug); pin until passlib 1.8
 ]

@@ -3,24 +3,29 @@ import asyncio
 import json
 import logging
 import os
+import random
+import time
 import uuid as _uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select, func, case, and_, delete
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Literal
 from kb_common.database import get_session
 from kb_common.models import (
     KnowledgeBase, Directory, Document, User, KnowledgeSource, DingtalkFileSnapshot,
     DingtalkFolderStat, DingtalkFileReview, KnowledgeLibrary, LibraryDocument,
-    SyncDocumentMapping, SyncSource,
+    SyncDocumentMapping, SyncSource, BusinessCredential,
 )
 from kb_common.clients import es_client
+from kb_common.crypto import encrypt_secret, decrypt_secret
 from app.schemas import (
     DirOut, KcDocumentOut, TrashItemOut, TaskStatsOut,
     KnowledgeSourceCreate, KnowledgeSourceOut, KnowledgeSourceUpdate,
+    CredentialIssueIn, CredentialOut, CredentialIssuedOut, CredentialSummaryOut,
 )
 from app.deps import get_current_user, require_role
 
@@ -827,22 +832,46 @@ async def get_task_stats(
 
 # ========== 知识源登记（企业知识库注册表）==========
 
+def _gen_source_code() -> str:
+    """自动生成知识源编码：KD + 毫秒时间戳 + 4 位随机数（对齐参考系统格式）。"""
+    return f"KD{int(time.time() * 1000)}{random.randint(0, 9999):04d}"
+
+
 @router.get("/knowledge-sources", response_model=list[KnowledgeSourceOut])
 async def list_knowledge_sources(
-    source_type: str | None = Query(None, description="按类型筛选：dingtalk_workspace | business_system"),
+    source_type: str | None = Query(None, description="按类型筛选：dingtalk_workspace | business_system | local_upload"),
     enabled_only: bool = Query(False, description="只返回已启用的知识库"),
     u=Depends(get_current_user),
     s: AsyncSession = Depends(get_session),
 ):
-    """知识库列表：系统内所有「选择知识库」的地方均从此接口取数。"""
+    """知识库列表：系统内所有「选择知识库」的地方均从此接口取数。
+
+    业务系统附带推送凭证概要（AK 掩码/授权库/状态，SK 永不回显）。
+    排序：优先级升序（1 最高），同级按更新时间倒序。
+    """
     q = select(KnowledgeSource)
     if source_type:
         q = q.where(KnowledgeSource.source_type == source_type)
     if enabled_only:
-        q = q.where(KnowledgeSource.enabled == True)
-    q = q.order_by(KnowledgeSource.source_type, KnowledgeSource.id.desc())
+        q = q.where(KnowledgeSource.enabled == True)  # noqa: E712
+    q = q.order_by(KnowledgeSource.priority.asc(), KnowledgeSource.updated_at.desc())
     rows = (await s.execute(q)).scalars().all()
-    return rows
+    # 一次联查业务系统凭证，按 source_id 映射附加
+    cred_by_source: dict[int, BusinessCredential] = {}
+    bs_ids = [r.id for r in rows if r.source_type == "business_system"]
+    if bs_ids:
+        creds = (await s.execute(
+            select(BusinessCredential).where(BusinessCredential.source_id.in_(bs_ids))
+        )).scalars().all()
+        cred_by_source = {c.source_id: c for c in creds}
+    out: list[KnowledgeSourceOut] = []
+    for r in rows:
+        item = KnowledgeSourceOut.model_validate(r)
+        c = cred_by_source.get(r.id)
+        if c is not None:
+            item.credential = CredentialSummaryOut.model_validate(c)
+        out.append(item)
+    return out
 
 
 @router.post("/knowledge-sources", response_model=KnowledgeSourceOut,
@@ -857,14 +886,22 @@ async def create_knowledge_source(
         raise HTTPException(422, "知识库名称不能为空")
     if not payload.external_id.strip():
         raise HTTPException(422, "知识库 ID（external_id）不能为空")
-    source = KnowledgeSource(**payload.model_dump())
+    if payload.source_type == "local_upload":
+        raise HTTPException(422, "本地上传为系统内置渠道，无需手动创建")
+    data = payload.model_dump()
+    data["code"] = (payload.code or "").strip() or _gen_source_code()
+    data["updated_by"] = u.username
+    source = KnowledgeSource(**data)
     s.add(source)
-    await s.commit()
+    try:
+        await s.commit()
+    except IntegrityError:
+        await s.rollback()
+        raise HTTPException(409, "编码已存在，请更换后重试")
     await s.refresh(source)
     # 钉钉知识库：登记后立即后台拉取文件夹快照（知识缺口页数据源），
     # 避免用户首次进入该页时还要手动点刷新。
     if source.source_type == "dingtalk_workspace":
-        import asyncio
         from app.routes.knowledge_gaps import start_dingtalk_refresh
         start_dingtalk_refresh(asyncio.get_running_loop(), source)
     return source
@@ -878,13 +915,24 @@ async def update_knowledge_source(
     u=Depends(get_current_user),
     s: AsyncSession = Depends(get_session),
 ):
-    """更新知识库登记。"""
+    """更新知识库登记（记录最近更新人；内置本地上传渠道不可变更类型）。"""
     source = await s.get(KnowledgeSource, source_id)
     if source is None:
         raise HTTPException(404, "知识库不存在")
-    for key, value in payload.model_dump(exclude_unset=True).items():
+    data = payload.model_dump(exclude_unset=True)
+    if "source_type" in data and data["source_type"] != source.source_type:
+        if source.source_type == "local_upload" or data["source_type"] == "local_upload":
+            raise HTTPException(422, "本地上传为系统内置渠道，不可变更类型")
+    if "code" in data:
+        data["code"] = (data["code"] or "").strip() or source.code
+    data["updated_by"] = u.username
+    for key, value in data.items():
         setattr(source, key, value)
-    await s.commit()
+    try:
+        await s.commit()
+    except IntegrityError:
+        await s.rollback()
+        raise HTTPException(409, "编码已存在，请更换后重试")
     await s.refresh(source)
     return source
 
@@ -896,11 +944,137 @@ async def delete_knowledge_source(
     u=Depends(get_current_user),
     s: AsyncSession = Depends(get_session),
 ):
-    """删除知识库登记。"""
+    """删除知识库登记（业务系统的推送凭证随 FK 级联删除；内置本地上传渠道不可删除）。"""
     source = await s.get(KnowledgeSource, source_id)
     if source is None:
         raise HTTPException(404, "知识库不存在")
+    if source.source_type == "local_upload":
+        raise HTTPException(409, "本地上传为系统内置渠道，不可删除")
     await s.delete(source)
+    await s.commit()
+    return {"ok": True}
+
+
+# ========== 业务系统推送凭证（AK/SK + HMAC 请求签名）==========
+
+async def _get_business_source(s: AsyncSession, source_id: int) -> KnowledgeSource:
+    source = await s.get(KnowledgeSource, source_id)
+    if source is None:
+        raise HTTPException(404, "知识库不存在")
+    if source.source_type != "business_system":
+        raise HTTPException(409, "仅业务系统类型支持推送凭证")
+    return source
+
+
+async def _validate_library_ids(s: AsyncSession, library_ids: list[int]) -> list[int]:
+    """授权库白名单校验：必须存在且为文档库（library_type=document）。"""
+    ids = list(dict.fromkeys(int(i) for i in library_ids if i))
+    if not ids:
+        raise HTTPException(422, "请至少授权一个可推送的文档库")
+    rows = (await s.execute(select(KnowledgeLibrary).where(
+        KnowledgeLibrary.id.in_(ids), KnowledgeLibrary.library_type == "document",
+    ))).scalars().all()
+    missing = [i for i in ids if i not in {r.id for r in rows}]
+    if missing:
+        raise HTTPException(422, f"以下文档库不存在或不可推送：{missing}")
+    return ids
+
+
+@router.get("/knowledge-sources/{source_id}/credential", response_model=CredentialOut,
+            dependencies=[Depends(require_role("super_admin", "admin"))])
+async def get_credential(source_id: int,
+                         u=Depends(get_current_user),
+                         s: AsyncSession = Depends(get_session)):
+    """查看业务系统凭证（SK 不回显）。"""
+    await _get_business_source(s, source_id)
+    cred = (await s.execute(select(BusinessCredential).where(
+        BusinessCredential.source_id == source_id))).scalar_one_or_none()
+    if cred is None:
+        raise HTTPException(404, "尚未颁发凭证")
+    return CredentialOut.model_validate(cred)
+
+
+@router.get("/knowledge-sources/{source_id}/credential/reveal",
+            dependencies=[Depends(require_role("super_admin", "admin"))])
+async def reveal_credential_secret(source_id: int,
+                                   u=Depends(get_current_user),
+                                   s: AsyncSession = Depends(get_session)):
+    """按需查看 SecretKey 明文（仅管理员；凭证加密存储，此处解密回显）。
+
+    与系统配置页「完整密钥按需查看」同一口径：列表/详情永不回显，
+    仅此端点按需解密，用于编辑弹窗内查看与复制。
+    """
+    await _get_business_source(s, source_id)
+    cred = (await s.execute(select(BusinessCredential).where(
+        BusinessCredential.source_id == source_id))).scalar_one_or_none()
+    if cred is None:
+        raise HTTPException(404, "尚未颁发凭证")
+    if cred.status != "active":
+        raise HTTPException(409, "凭证已吊销，请重新颁发后查看")
+    return {"secret_key": decrypt_secret(cred.secret_cipher)}
+
+
+@router.post("/knowledge-sources/{source_id}/credential", response_model=CredentialIssuedOut,
+             dependencies=[Depends(require_role("super_admin", "admin"))])
+async def issue_credential(source_id: int, payload: CredentialIssueIn,
+                           u=Depends(get_current_user),
+                           s: AsyncSession = Depends(get_session)):
+    """颁发/轮换凭证：生成新 AK/SK 并立即作废旧凭证（一源一凭证）。
+
+    SecretKey 明文仅本次响应返回一次，服务端只存 Fernet 加密密文。
+    """
+    import secrets as _secrets
+
+    await _get_business_source(s, source_id)
+    library_ids = await _validate_library_ids(s, payload.library_ids)
+    # 轮换：删除旧凭证（同源唯一约束下整行替换）
+    await s.execute(delete(BusinessCredential).where(BusinessCredential.source_id == source_id))
+    access_key_id = f"bsk-{_secrets.token_hex(16)}"
+    secret_key = _secrets.token_hex(32)
+    cred = BusinessCredential(
+        source_id=source_id,
+        access_key_id=access_key_id,
+        secret_cipher=encrypt_secret(secret_key),
+        library_ids=library_ids,
+        status="active",
+    )
+    s.add(cred)
+    await s.commit()
+    await s.refresh(cred)
+    out = CredentialIssuedOut.model_validate(cred)
+    out.secret_key = secret_key
+    return out
+
+
+@router.put("/knowledge-sources/{source_id}/credential", response_model=CredentialOut,
+            dependencies=[Depends(require_role("super_admin", "admin"))])
+async def update_credential(source_id: int, payload: CredentialIssueIn,
+                            u=Depends(get_current_user),
+                            s: AsyncSession = Depends(get_session)):
+    """更新凭证的可推送文档库白名单（不动 AK/SK）。"""
+    await _get_business_source(s, source_id)
+    cred = (await s.execute(select(BusinessCredential).where(
+        BusinessCredential.source_id == source_id))).scalar_one_or_none()
+    if cred is None:
+        raise HTTPException(404, "尚未颁发凭证")
+    cred.library_ids = await _validate_library_ids(s, payload.library_ids)
+    await s.commit()
+    await s.refresh(cred)
+    return CredentialOut.model_validate(cred)
+
+
+@router.delete("/knowledge-sources/{source_id}/credential",
+               dependencies=[Depends(require_role("super_admin", "admin"))])
+async def revoke_credential(source_id: int,
+                            u=Depends(get_current_user),
+                            s: AsyncSession = Depends(get_session)):
+    """吊销凭证（AK 立即失效）。"""
+    await _get_business_source(s, source_id)
+    cred = (await s.execute(select(BusinessCredential).where(
+        BusinessCredential.source_id == source_id))).scalar_one_or_none()
+    if cred is None:
+        raise HTTPException(404, "尚未颁发凭证")
+    cred.status = "revoked"
     await s.commit()
     return {"ok": True}
 

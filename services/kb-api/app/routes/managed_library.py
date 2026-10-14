@@ -311,6 +311,35 @@ def _staging_prefix(library_id: int, staging_id) -> str:
     return f"document-libraries/{library_id}/staging/{staging_id}/"
 
 
+async def ingest_file(s: AsyncSession, library_id: int, name: str, content: bytes, *,
+                      source: str, updated_by: str) -> LibraryDocument:
+    """文档入库公共链路：MinIO 存储 → 建文档记录 → 自动解析。
+
+    本地用户上传（source='local'）、钉钉同步与业务系统推送共用；
+    解析失败沿用单文件上传语义（文档置 FAILED，可手动重新解析）。
+    """
+    from kb_common.clients import minio_client
+    doc_id = uuid.uuid4()
+    key = f"document-libraries/{library_id}/{doc_id}/{name}"
+    await asyncio.to_thread(minio_client.upload_bytes, minio_client.RAW, key, content)
+    doc = LibraryDocument(id=doc_id, library_id=library_id, name=name, storage_path=key, size=len(content),
+                          status="UPLOADED", progress=0, message="", chunk_count=0,
+                          source=source, updated_by=updated_by)
+    s.add(doc)
+    await s.commit()
+    await s.refresh(doc)
+    try:
+        await _do_parse(s, library_id, doc_id)
+        await s.refresh(doc)
+    except HTTPException:
+        raise
+    except Exception:
+        doc.status, doc.message = "FAILED", f"自动解析失败，请重新解析"
+        await s.commit()
+        await s.refresh(doc)
+    return doc
+
+
 @router.post("/{library_id}/documents")
 async def upload(library_id: int, file: UploadFile = File(...),
                  user: User = Depends(get_current_user), s: AsyncSession = Depends(get_session)):
@@ -319,28 +348,8 @@ async def upload(library_id: int, file: UploadFile = File(...),
     content = await file.read(_MAX_UPLOAD_BYTES + 1)
     if not content or len(content) > _MAX_UPLOAD_BYTES:
         raise HTTPException(413, "请上传非空且不超过 64 MB 的文件")
-    from kb_common.clients import minio_client
-    doc_id = uuid.uuid4()
-    key = f"document-libraries/{library_id}/{doc_id}/{name}"
-    await asyncio.to_thread(minio_client.upload_bytes, minio_client.RAW, key, content)
-    doc = LibraryDocument(id=doc_id, library_id=library_id, name=name, storage_path=key, size=len(content),
-                          status="UPLOADED", progress=0, message="", chunk_count=0,
-                          updated_by=user.username)
-    s.add(doc)
-    await s.commit()
-    await s.refresh(doc)
-    # Auto-parse synchronously: upload to MinerU + start parse job.
-    # Most documents finish engine-side upload within a few seconds; the user
-    # sees "解析中" immediately and the frontend polls for completion.
-    try:
-        await _do_parse(s, library_id, doc_id)
-        await s.refresh(doc)
-    except HTTPException:
-        raise
-    except Exception as exc:
-        doc.status, doc.message = "FAILED", f"自动解析失败，请重新解析"
-        await s.commit()
-        await s.refresh(doc)
+    doc = await ingest_file(s, library_id, name, content,
+                            source="local", updated_by=user.username)
     return doc_out(doc)
 
 

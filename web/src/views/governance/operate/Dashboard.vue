@@ -200,6 +200,7 @@ function gapSummary({ columns }: { columns: Array<{ property?: string }> }) {
   const values: Record<string, string> = {
     department: '合计',
     expected_folder_count: (total?.expected_folder_count || 0).toLocaleString(),
+    covered_folder_count: (total?.covered_folder_count || 0).toLocaleString(),
     missing_folder_count: (total?.missing_folder_count || 0).toLocaleString(),
     uploaded_file_count: (total?.uploaded_file_count || 0).toLocaleString(),
     coverage_percent: formatCoverage(total || {
@@ -230,12 +231,12 @@ function downloadBlob(blob: Blob, name: string) {
 // 导出表格：CSV（带 BOM，Excel 可直接打开），含合计行
 function exportGapCsv() {
   if (!gapDepartments.value?.items.length) return
-  const header = ['一级部门', '应上传文件夹数', '未上传文件夹数', '目前已上传文件数', '占比']
+  const header = ['一级部门', '应上传文件夹数', '已有内容文件夹数', '未上传文件夹数', '目前已上传文件数', '占比']
   const rows = gapDepartments.value.items.map((r) =>
-    [r.department, r.expected_folder_count, r.missing_folder_count, r.uploaded_file_count, formatCoverage(r)])
+    [r.department, r.expected_folder_count, r.covered_folder_count, r.missing_folder_count, r.uploaded_file_count, formatCoverage(r)])
   const total = gapDepartments.value.total
   if (total) {
-    rows.push(['合计', total.expected_folder_count, total.missing_folder_count,
+    rows.push(['合计', total.expected_folder_count, total.covered_folder_count, total.missing_folder_count,
                total.uploaded_file_count, formatCoverage(total)])
   }
   const escapeCell = (c: string | number) =>
@@ -498,7 +499,7 @@ const ownerStats = [
       <div class="panel gap-chart-panel" v-loading="gapLoading">
         <div class="panel-head">
           <span class="panel-title">部门目录覆盖情况</span>
-          <el-tooltip content="按知识库名称汇总；文件夹数量或文件数任一大于 0 即视为有内容"><el-icon class="q"><QuestionFilled /></el-icon></el-tooltip>
+          <el-tooltip content="按知识库名称汇总；已有内容 = 文件夹下有至少一个文件、子文件夹或 dlink 快捷方式；dlink 结尾的快捷方式目录本身不计入应上传文件夹数"><el-icon class="q"><QuestionFilled /></el-icon></el-tooltip>
         </div>
         <div v-if="gapError" class="gap-state"><el-empty :description="gapError" /></div>
         <div v-else-if="!gapDepartments?.has_snapshot || !gapDepartments.items.length" class="gap-state">
@@ -510,7 +511,7 @@ const ownerStats = [
         <div class="panel-head">
           <div class="head-left">
             <span class="panel-title">部门目录明细</span>
-            <el-tooltip content="占比 = 有内容文件夹数 ÷ 文件夹总数；有内容指文件夹数量或文件数任一大于 0"><el-icon class="q"><QuestionFilled /></el-icon></el-tooltip>
+            <el-tooltip content="占比 = 1 - 未上传文件夹数 ÷ 应上传文件夹数 × 100%；应上传文件夹数不含 dlink 结尾的快捷方式目录；已有内容 = 文件夹下有至少一个文件、子文件夹或 dlink 快捷方式，放 dlink 的目录不算缺失"><el-icon class="q"><QuestionFilled /></el-icon></el-tooltip>
           </div>
           <el-dropdown v-if="gapDepartments?.has_snapshot && gapDepartments.items.length" placement="bottom-end" @command="onExportCommand">
             <el-button size="small" :icon="Download" :loading="exporting">导出<el-icon class="el-icon--right"><ArrowDown /></el-icon></el-button>
@@ -525,6 +526,7 @@ const ownerStats = [
         <el-table v-if="gapDepartments?.has_snapshot && gapDepartments.items.length" :data="gapDepartments.items" border size="small" height="380" class="gap-table" show-summary :summary-method="gapSummary">
           <el-table-column prop="department" label="一级部门" min-width="130" show-overflow-tooltip />
           <el-table-column prop="expected_folder_count" label="应上传文件夹数" width="126" align="center" />
+          <el-table-column prop="covered_folder_count" label="已有内容文件夹数" width="120" align="center" />
           <el-table-column prop="missing_folder_count" label="未上传文件夹数" width="126" align="center" />
           <el-table-column prop="uploaded_file_count" label="目前已上传文件数" width="136" align="center" />
           <el-table-column prop="coverage_percent" label="占比" width="100" align="right">

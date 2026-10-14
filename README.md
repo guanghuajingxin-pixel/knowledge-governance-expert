@@ -1,6 +1,6 @@
 # Knowledge Governance Expert（知识治理专家）
 
-知识治理专家：文档采集 / 切片 / 向量检索 / LLM 问答 + FAQ 精准匹配 + **智能问答 Agent（本地文档库检索：MinerU 解析 + ES 混合检索 + 本地分段评分，无外部知识库平台依赖）**，3 进程微服务 + Docker 基础设施。
+知识治理专家：文档采集 / 切片 / 向量检索 / LLM 问答 + FAQ 精准匹配（支持相似问，命中任一相似问即召回同一答案）+ **智能问答 Agent（本地文档库检索：MinerU 解析 + ES 混合检索 + 本地分段评分，无外部知识库平台依赖）**，3 进程微服务 + Docker 基础设施。
 
 ## 架构
 
@@ -458,6 +458,8 @@ KB_API_INTERNAL_URL=http://kb-api:8000
 
 侧边栏「知识采集」（路由 `/collection`）为二级菜单：**知识源管理**（`/knowledge-sources`）、**钉钉知识同步**（`/collection/dingtalk`）、**知识中心**（`/collection/knowledge-center`）与**同步队列**（`/collection/queue`）。原「本地上传」二级页已删除，本地文档入库改走「知识应用 → 知识库」的「添加知识」入口；覆盖从钉钉单文件同步到定时增量同步与运行监控的采集动线：
 
+- **知识源管理**（`/knowledge-sources`，`GET/POST/PUT/DELETE /api/v1/knowledge-center/knowledge-sources`）：企业知识源注册表，纯表格列表（工具栏：新增 / 状态筛选 / 名称或编码搜索 / 刷新），字段含知识源名称（类型标签：钉钉知识库/业务系统/本地上传）、编码（全局唯一；**业务系统必填**，钉钉留空自动生成 `KD+时间戳`）、优先级（1 最高，默认 99，列表按其升序）、更新时间、更新人（记录最近一次操作的登录账号）、启用开关；行内操作「编辑 + 更多」（更多下拉：打开原知识库（钉钉）/ 接入说明、轮换密钥、吊销密钥（业务系统）/ 停用 / 删除（二次确认））。**本地上传为迁移 `0057` 内置的单条渠道记录**（`source_type=local_upload`，编码固定 `local_upload`，优先级 99）：仅可编辑名称/优先级/描述/启用，后端禁止手动创建、变更类型与删除（409/422）；编码唯一冲突返回 409。业务系统编辑弹窗内置**推送密钥详情**（AccessKeyId 常显可复制 / SecretKey 掩码按需解密查看 `GET .../credential/reveal`（管理员）/ 密钥状态 / 接入说明入口）；**未颁发凭证的业务系统保存时自动补颁发**（SK 仅颁发时展示一次）。下游「选择知识库」消费方（知识缺口过滤、同步源表单）均按 `source_type=dingtalk_workspace` 过滤，不受内置行影响。
+
 - **知识中心**：跨文档库聚合展示**所有来源的知识源文档**（`GET /api/v1/knowledge-center/source-documents`，分页 + 来源/标题筛选；原件存于 MinIO `raw-docs`，元数据来自 `library_documents` 表）。字段：知识标题、标签、来源系统、更新人、更新时间、过期时间、操作（编辑/下载原文）。**钉钉知识库来源**标记为「钉钉 · {知识库名称}」，知识标题渲染超链接（新窗口打开钉钉在线文档）；手动上传来源标记「手动上传」。钉钉链接与知识库名称在**入库时固化**到 `library_documents.source_url / source_workspace_name`（迁移 `0051`，写入点：手动从钉钉导入、library 同步源编目预建），迁移前的存量文档由 `sync_document_mappings` 反查 `node_id` 兜底回填（仅响应补全不写库）。**更新人**：手动上传=操作用户、钉钉同步=同步触发人（定时为「系统」）、编辑保存=当前登录用户；**过期时间**支持编辑设置/清除（过期行红色显示），标签编辑与库内口径一致（≤32 个、单个 ≤64 字符，`PUT /knowledge-center/source-documents/{id}`，需 editor 及以上角色）。
 
 - **从钉钉同步**：**按目录查询**（避免全量遍历超时）——依次选择钉钉知识库 + 文件夹（级联懒加载子目录，任意层级可选）后点「查询」，仅加载该目录的**直接子文档**；首次进入未选择时列表为空。实时数据 + 浏览器内存缓存（5 分钟 TTL，不持久化），「强制刷新」绕过缓存重新拉取。过滤文件名/分页为前端本地进行。后端轻量接口（[knowledge_center.py](services/kb-api/app/routes/knowledge_center.py)）：`GET /knowledge-center/dingtalk/workspaces`（实时列团队知识库，含根节点 ID）、`GET /knowledge-center/dingtalk/nodes?parent_node_id=`（实时列某父节点直接子节点），均为单次钉钉 API 调用（约 1.5s）。钉钉文档入库统一到本地文档库：单篇/批量走「知识应用 → 知识库 → 添加知识 → 钉钉文档」（`POST /document-libraries/{id}/import-dingtalk`，下载原文件 → MinIO → 建 `LibraryDocument` → 触发 MinerU 解析）；整目录定时增量走下方「同步源管理」。**源文档原样保留（不做有损转换）**：源文件先备份对象存储（Minio `raw-docs/dingtalk-sync/{node_id}/`）再入库。在线文档（adoc/axls/able 等）无 OSS 原文件，走钉钉官方导出接口得 docx/xlsx/pdf 后入库。
@@ -486,6 +488,16 @@ KB_API_INTERNAL_URL=http://kb-api:8000
   - **MinerU WebUI**：iframe 嵌入官方 WebUI（同源部署直连）。
   - **API 文档入口**（页签行最右侧，均新窗口打开）：【API 调用说明】打开文档页 [mineru-api-docs.html](web/public/mineru-api-docs.html)——基于 **Docsify**（组件 vendor 在 `web/public/vendor/docsify/`，内网不依赖 CDN）渲染 [mineru-api-docs.md](web/public/mineru-api-docs.md)，左侧边栏目录 + 全文搜索 + 代码一键复制。内容对应 **kb-api 统一契约**（`mineru_route.py` + `mineru_contract.py`）：双引擎（本地 Kit / 云端 SaaS）接入对照与 capabilities 能力发现、登录换 JWT、**全端点逐个配 curl + Python（requests）双语言调用示例**、page_range 语法、端到端 curl / Python 完整脚本、前端 axios 集成、错误排查；页内通过 `{{MINERU_BASE}}`/`{{SWAGGER_URL}}` 占位符自动跟随配置的引擎 Base URL。【OpenAPI】打开引擎 Swagger 调试台（`{Base}/docs`）。侧边栏左下角用户菜单同名入口「API 调用说明」（关于我下方，新浏览器页签打开）指向同一文档页，跳转逻辑共用 [api-docs.ts](web/src/utils/api-docs.ts)；后续新增其他 OpenAPI 服务在该工具与菜单中追加。
   - **CORS 代理**：浏览器直连 MinerU 会被 CORS 拦截（服务不带跨域头），全部请求经 kb-api 同源透传代理（[mineru_route.py](services/kb-api/app/routes/mineru_route.py)）`/api/v1/mineru/*`，目标地址由 `X-Mineru-Base` 请求头指定，仅 super_admin/admin 可用。
+
+## 问答库（FAQ）
+
+侧边栏「知识应用 → 知识库」的**问答库**页签（faq-service :8004，前端 [web/src/views/faq/](web/src/views/faq/)）：
+
+- **问答库管理**：创建 / 编辑 / 删除问答库（`kb_type=FAQ`，编辑仅改名称与描述，`PUT /api/v1/faq/knowledge-bases/{kb_id}`），列表展示问答数与创建时间；点击库名以独立门户页签打开问答明细。
+- **手动维护问答**：新增 / 编辑 / 删除问答（问题、答案、关键词、相似问），相似问逐行编辑（一行一条问句变体）。
+- **相似问（`faq_entries.similar_questions`，alembic 0055）**：归属于问题的问句变体，**列表中仅算一条数据**；检索命中任一相似问即召回同一答案。主问题与每条相似问各写一条 ES 向量文档（`faq_entry_id` 关联），编辑/删除时按 `faq_entry_id` 全量重建/清理。
+- **批量导入**：CSV / Excel 模板（列：问题、相似问、答案、关键词，弹窗内可下载带示例的 CSV 模板）。相似问单元格内用分号或换行分隔多个问句；**同一问题拆成多行（问题与答案相同）时自动合并为一条问答**，相似问聚合去重。返回 `imported / failed / index_failed` 三级结果（索引失败条目入库为 FAILED 状态，精准检索仍可用，外部向量服务恢复后重新编辑即可重建）。
+- **检索召回**（`POST /api/v1/faq/search`）：精准匹配（问题 / 相似问 / 关键词 ilike 置顶）+ ES kNN 语义（相似问已独立向量化）融合，按 entry 去重后返回标准问题、命中问句（`matched_question`）、答案；外部向量服务不可用时语义通道 fail-soft，精准结果不受影响。列表页搜索框同样覆盖问题、答案与相似问。
 
 ## 知识运营（原运营看板）
 

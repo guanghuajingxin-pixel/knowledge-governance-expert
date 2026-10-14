@@ -85,8 +85,8 @@ async def dingtalk_folder_rows(s: AsyncSession, source: KnowledgeSource) -> list
     root_node_id = (source.config or {}).get("root_node_id") or source.external_id
     kb_url = f"https://alidocs.dingtalk.com/i/nodes/{root_node_id}"
     return [dict(directory_id=r.node_id, kb_id=source.external_id, kb_name=source.name,
-                 directory_path=r.path or "（根目录）", owner=r.owner,
-                 document_count=r.document_count,
+                 directory_path=r.path or "（根目录）", path=r.path, owner=r.owner,
+                 document_count=r.document_count, is_link=r.is_link,
                  folder_count=child_counts.get(r.path, 0), source="dingtalk",
                  kb_url=kb_url,
                  dingtalk_url=f"https://alidocs.dingtalk.com/i/nodes/{r.node_id}")
@@ -139,6 +139,7 @@ async def _refresh_dingtalk_folders_task(source_id: int) -> None:
                             .where(DingtalkFolderStat.external_id == src.external_id))
             s.add_all([DingtalkFolderStat(external_id=src.external_id, node_id=f["node_id"],
                                           path=f["path"], document_count=f["document_count"],
+                                          is_link=bool(f.get("is_link")),
                                           owner=owners.get(f["node_id"], ""),
                                           fetched_at=now)
                        for f in folders])
@@ -486,6 +487,8 @@ async def notify_dingtalk_owner(body: DingtalkNotifyIn,
         DingtalkFolderStat.node_id == body.node_id))).scalar_one_or_none()
     if not stat:
         raise HTTPException(404, '文件夹不在快照中，请先刷新数据')
+    if stat.is_link:
+        raise HTTPException(400, '快捷方式链接指向的目标内容无法统计，不支持发送补充通知')
     if not (stat.owner or '').strip():
         raise HTTPException(400, '该文件夹尚未维护知识Owner，请先维护后再通知')
     if (stat.document_count or 0) > 0:

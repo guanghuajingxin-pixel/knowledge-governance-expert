@@ -26,6 +26,7 @@ const tagOptions = ref<Array<{ name: string; count: number }>>([])
 const SOURCE_OPTIONS = [
   { label: '钉钉知识库', value: 'dingtalk' },
   { label: '手动上传', value: 'local' },
+  { label: '业务系统', value: 'business' },
 ]
 
 async function loadTags() {
@@ -80,6 +81,9 @@ function onSizeChange(s: number) {
 function sourceLabel(row: SourceDoc): string {
   if (row.source === 'dingtalk') {
     return row.source_workspace_name ? `钉钉 · ${row.source_workspace_name}` : '钉钉'
+  }
+  if (row.source === 'business') {
+    return row.updated_by?.startsWith('业务系统:') ? row.updated_by : '业务系统推送'
   }
   return '手动上传'
 }
@@ -214,6 +218,7 @@ onMounted(() => {
             <el-tag v-if="row.source === 'dingtalk'" size="small" effect="light" type="primary" class="src-tag">
               {{ sourceLabel(row as SourceDoc) }}
             </el-tag>
+            <span v-else-if="row.source === 'business'" class="src-local">{{ sourceLabel(row as SourceDoc) }}</span>
             <span v-else class="src-local">手动上传</span>
           </template>
         </el-table-column>

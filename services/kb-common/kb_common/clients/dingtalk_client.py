@@ -386,10 +386,13 @@ async def walk_workspace_folders(root_node_id: str, max_folders: int = WALK_MAX_
     """递归遍历钉钉知识库，返回全部文件夹及各文件夹直属文档数量。
 
     直属文档 = 文件夹直接子节点中的非文件夹节点，包含在线文档（钉钉在线编辑）
-    和本地上传到知识库的文件两类。返回行字段：
+    和本地上传到知识库的文件两类；.dlink 快捷方式节点除外——它单独成行返回。
+    返回行字段：
     - node_id: 文件夹节点 ID（根节点也作为一行返回，path 为 ""）
     - path: 从根开始的文件夹路径（不带前导斜杠），如 "规章制度/研发流程"；根为 ""
-    - document_count: 该文件夹直属文档数（不含子文件夹内的文档）
+    - document_count: 该文件夹直属文档数（不含子文件夹与快捷方式链接内的文档）
+    - is_link: 是否为快捷方式链接行（.dlink，仅链接行为 True；目标内容无法
+      通过 API 统计，document_count 恒为 0）
     max_folders 为安全上限（达到后停止递归，调用方应据 len(folders) >= max_folders
     判断是否截断并向用户提示数据可能不完整）；on_progress(done: int) 在每完成一个
     文件夹后回调（用于进度展示）。
@@ -410,15 +413,16 @@ async def walk_workspace_folders(root_node_id: str, max_folders: int = WALK_MAX_
         doc_count = 0
         child_folders: list[tuple[str, str]] = []
         for n in nodes:
-            if n.get("type") == "FOLDER":
-                fname = n.get("name") or ""
-                # .dlink 为「文件夹快捷方式」：其子节点无法通过 API 列出（递归只会
-                # 得到空），作为父文件夹的一个文档计数；不递归，避免产生 0 文档的
-                # 假目录行且父文件夹漏计
-                if (n.get("extension") or "") == "dlink" or fname.endswith(".dlink"):
-                    doc_count += 1
-                else:
-                    child_folders.append((n.get("nodeId") or "", fname))
+            fname = n.get("name") or ""
+            # .dlink 为「快捷方式」节点：其子节点无法通过 API 列出（hasChildren 恒为
+            # false，递归只会得到空），不递归；单独成行带 is_link 标记，供知识缺口
+            # 列表把链接的目录路径放出来，且不计入父文件夹文档数
+            if (n.get("extension") or "") == "dlink" or fname.endswith(".dlink"):
+                folders.append({"node_id": n.get("nodeId") or "",
+                                "path": f"{path}/{fname}" if path else fname,
+                                "document_count": 0, "is_link": True})
+            elif n.get("type") == "FOLDER":
+                child_folders.append((n.get("nodeId") or "", fname))
             else:
                 doc_count += 1
         folders.append({"node_id": node_id, "path": path, "document_count": doc_count})

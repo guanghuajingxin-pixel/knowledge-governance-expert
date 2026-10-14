@@ -128,9 +128,12 @@ class FaqEntry(Base):
     question: Mapped[str] = mapped_column(Text)
     answer: Mapped[str] = mapped_column(Text)
     keywords: Mapped[list] = mapped_column(ARRAY(String), default=list)
+    # 相似问：归属于问题的问句变体（检索命中任一相似问即召回同一答案），列表中仅算一条问答数据
+    similar_questions: Mapped[list] = mapped_column(ARRAY(String), default=list)
     source_document_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("documents.id", ondelete="SET NULL"))
     status: Mapped[str] = mapped_column(String(20), default="DRAFT")  # DRAFT|INDEXED|FAILED
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
 class Setting(Base):
     """运行时可配置项（LLM/MinerU key 等），覆盖 .env 默认值。"""
@@ -287,9 +290,12 @@ class QaFeedback(Base):
 class KnowledgeSource(Base):
     """知识源登记：企业知识库注册表。
 
-    source_type: dingtalk_workspace（钉钉知识库）| business_system（业务系统）
+    source_type: dingtalk_workspace（钉钉知识库）| business_system（业务系统）| local_upload（本地上传，内置渠道）
     external_id: 外部系统中的知识库标识（钉钉 workspace_id / 业务系统标识）
     config: 类型特定配置（JSON），如钉钉 root_node_id、业务系统 base_url 等
+    code: 编码（全局唯一，创建时留空自动生成；local_upload 内置渠道固定 local_upload）
+    priority: 优先级（1 最高，默认 99）
+    updated_by: 更新人（最近一次创建/更新的登录账号 username）
     """
     __tablename__ = "knowledge_sources"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -299,6 +305,32 @@ class KnowledgeSource(Base):
     description: Mapped[str] = mapped_column(Text, server_default="", nullable=False)
     config: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, server_default=sa_text('true'), nullable=False)
+    code: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True)
+    priority: Mapped[int] = mapped_column(Integer, server_default="99", nullable=False)
+    updated_by: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class BusinessCredential(Base):
+    """业务系统推送凭证：知识源（business_system）对外颁发的 AK/SK。
+
+    - access_key_id 公开标识（bsk- 前缀）；secret_cipher 为 Fernet 加密的 SecretKey，
+      明文只在颁发时返回一次，服务端不可逆展示。
+    - library_ids：该凭证可推送的文档库（knowledge_libraries.id）白名单。
+    - 一源一凭证（source_id 唯一）；轮换即整行替换 AK/SK；知识源停用后凭证随之失效
+      （校验时判 source.enabled），删除知识源级联删除凭证。
+    """
+    __tablename__ = "business_credentials"
+    __table_args__ = (UniqueConstraint("source_id", name="uq_business_credential_source"),)
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    source_id: Mapped[int] = mapped_column(
+        ForeignKey("knowledge_sources.id", ondelete="CASCADE"), nullable=False, index=True)
+    access_key_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    secret_cipher: Mapped[str] = mapped_column(Text, nullable=False)
+    library_ids: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), server_default="active", nullable=False)  # active | revoked
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
@@ -428,6 +460,7 @@ class DingtalkFolderStat(Base):
     node_id: Mapped[str] = mapped_column(String(128), nullable=False)  # 钉钉文件夹节点 ID
     path: Mapped[str] = mapped_column(String(1000), server_default="", nullable=False)  # 不带前导斜杠；根为空串
     document_count: Mapped[int] = mapped_column(Integer, server_default="0", nullable=False)
+    is_link: Mapped[bool] = mapped_column(Boolean, server_default=sa_text("false"), nullable=False)  # .dlink 快捷方式行：单独成行展示路径，目标内容无法统计
     owner: Mapped[str] = mapped_column(String(200), server_default="", nullable=False)  # 手动维护/批量导入，刷新快照时保留
     fetched_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
 

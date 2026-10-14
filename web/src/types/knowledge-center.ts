@@ -74,13 +74,36 @@ export interface DingTalkDocResult {
 export interface KnowledgeSource {
   id: number
   name: string
-  source_type: 'dingtalk_workspace' | 'business_system'
+  source_type: 'dingtalk_workspace' | 'business_system' | 'local_upload'
   external_id: string
   description: string
   config: Record<string, any> | null
   enabled: boolean
+  /** 编码（全局唯一；local_upload 内置渠道固定 local_upload） */
+  code: string | null
+  /** 优先级：1 最高，默认 99 */
+  priority: number
+  /** 更新人（最近一次创建/更新的登录账号） */
+  updated_by: string | null
   created_at: string
   updated_at: string
+  /** 业务系统推送凭证概要（钉钉知识库为 null；SK 永不回显） */
+  credential: BusinessCredentialSummary | null
+}
+
+/** 业务系统推送凭证概要 */
+export interface BusinessCredentialSummary {
+  access_key_id: string
+  library_ids: number[]
+  status: 'active' | 'revoked'
+  last_used_at: string | null
+  created_at: string
+}
+
+/** 颁发/轮换凭证响应（secret_key 明文仅此一次） */
+export interface BusinessCredentialIssued extends BusinessCredentialSummary {
+  source_id: number
+  secret_key: string
 }
 
 /** 知识源创建/更新参数 */
@@ -91,6 +114,10 @@ export interface KnowledgeSourcePayload {
   description?: string
   config?: Record<string, any> | null
   enabled?: boolean
+  /** 编码：留空由后端自动生成 */
+  code?: string
+  /** 优先级：1 最高，默认 99 */
+  priority?: number
 }
 
 /** 知识中心文档（跨文档库聚合的知识源文档，原件存于 MinIO） */
@@ -98,8 +125,8 @@ export interface SourceDoc {
   id: string
   name: string
   tags: string[]
-  /** local=手动上传 | dingtalk=钉钉知识库 */
-  source: 'local' | 'dingtalk'
+  /** local=手动上传 | dingtalk=钉钉知识库 | business=业务系统推送 */
+  source: 'local' | 'dingtalk' | 'business'
   status: string
   size: number
   library_id: number

@@ -1,17 +1,33 @@
 import { http, HttpResponse } from 'msw'
 import { mockKnowledgeBases, mockDirectories } from '../data/knowledge-bases'
-import { mockFaqKb } from '../data/faq-entries'
 import type { KnowledgeBase, KbCreateRequest } from '@/types/knowledge-base'
 
 const base = '/api/v1'
+
+// FAQ 库的 KnowledgeBase 形状（与 mockFaqKb 解耦：那条数据服务于 faq-service 列表口径）
+const faqKbAsKnowledgeBase: KnowledgeBase = {
+  id: 'faq-kb-001',
+  name: '产品使用 FAQ',
+  description: '产品使用的常见问题与标准答案',
+  kb_type: 'FAQ',
+  owner_id: 'u-001',
+  chunk_strategy: 'PARAGRAPH',
+  chunk_size: 512,
+  chunk_overlap: 150,
+  embedding_model: 'bge-m3',
+  es_index_name: 'kb_faq-kb-001',
+  document_count: 8,
+  created_at: '2026-06-15T08:00:00Z',
+  updated_at: '2026-07-28T10:00:00Z',
+}
 
 export const kbHandlers = [
   http.get(`${base}/knowledge-bases`, ({ request }) => {
     const url = new URL(request.url)
     const kbType = url.searchParams.get('kb_type')
-    // Ensure a FAQ KB exists for the FAQ list page (brief Step 9 expects "产品使用 FAQ")
+    // Ensure a FAQ KB exists for hidden legacy routes (brief Step 9 expects "产品使用 FAQ")
     if (kbType === 'FAQ' && !mockKnowledgeBases.some((k) => k.kb_type === 'FAQ')) {
-      mockKnowledgeBases.push(mockFaqKb as unknown as KnowledgeBase)
+      mockKnowledgeBases.push(faqKbAsKnowledgeBase)
     }
     let items = mockKnowledgeBases
     if (kbType) items = items.filter((k) => k.kb_type === kbType)

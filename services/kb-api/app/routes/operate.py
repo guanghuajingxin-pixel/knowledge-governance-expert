@@ -400,8 +400,15 @@ async def knowledge_gap_departments(u=Depends(require_role("super_admin", "admin
             .where(KnowledgeSource.source_type == "dingtalk_workspace", KnowledgeSource.enabled.is_(True))
         )
 
+    # 占比口径：1 -（无内容目录数 - dlink 结尾目录数）÷（文件夹总数 - dlink 结尾目录数）。
+    # dlink 结尾的快捷方式行本身不计入应上传文件夹数（分子分母同时剔除）；
+    # 但目录「有内容」的判定中 dlink 算内容——文件夹下有文件、子文件夹或 dlink
+    # 快捷方式任一存在即为已有内容，放 dlink 的上级目录不算目录缺失。
     departments: dict[str, dict] = {}
     for row in rows:
+        # 快捷方式链接行不占部门应上传文件夹数，仅由其上级目录体现为「已有内容」
+        if row.get("is_link"):
+            continue
         department = row["kb_name"]
         item = departments.setdefault(department, {
             "department": department,
@@ -414,7 +421,7 @@ async def knowledge_gap_departments(u=Depends(require_role("super_admin", "admin
         document_count = row["document_count"] or 0
         folder_count = row["folder_count"] or 0
         item["uploaded_file_count"] += document_count
-        # 文件夹直属子目录数或直属文件数任一大于 0，就视为目录有内容。
+        # 直属文件数、或直属子项数（子文件夹，含 dlink 快捷方式）任一大于 0，视为已有内容。
         if folder_count > 0 or document_count > 0:
             item["covered_folder_count"] += 1
         else:

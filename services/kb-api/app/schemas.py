@@ -92,10 +92,11 @@ class SegmentOut(BaseModel):
 
 
 # ===== 知识源登记（企业知识库注册表）=====
-# 钉钉数据源 + 业务系统占位。
+# 钉钉数据源 + 业务系统。
 VALID_SOURCE_TYPES = {
     "dingtalk_workspace",  # 钉钉知识库（数据源）
-    "business_system",     # 业务系统（占位）
+    "business_system",     # 业务系统（推送方，持 AK/SK 调推送接口）
+    "local_upload",        # 本地上传（内置渠道，仅迁移插入，禁止手动创建/删除）
 }
 
 
@@ -107,11 +108,15 @@ def _validate_source_type(v: str | None) -> str | None:
 
 class KnowledgeSourceBase(BaseModel):
     name: str
-    source_type: str  # dingtalk_workspace | business_system
+    source_type: str  # dingtalk_workspace | business_system | local_upload（内置）
     external_id: str
     description: str = ""
     config: dict | None = None
     enabled: bool = True
+    # 编码：全局唯一，创建时留空自动生成（KD + 毫秒时间戳 + 随机数）
+    code: str | None = None
+    # 优先级：1 最高，默认 99
+    priority: int = 99
 
 
 class KnowledgeSourceCreate(KnowledgeSourceBase):
@@ -128,6 +133,8 @@ class KnowledgeSourceUpdate(BaseModel):
     description: str | None = None
     config: dict | None = None
     enabled: bool | None = None
+    code: str | None = None
+    priority: int | None = None
 
     @field_validator("source_type")
     @classmethod
@@ -135,11 +142,39 @@ class KnowledgeSourceUpdate(BaseModel):
         return _validate_source_type(v)
 
 
+class CredentialSummaryOut(BaseModel):
+    """业务系统凭证概要（列表/详情展示用，SK 永不回显）。"""
+    model_config = ConfigDict(from_attributes=True)
+    access_key_id: str
+    library_ids: list[int]
+    status: str
+    last_used_at: datetime | None = None
+    created_at: datetime
+
+
+class CredentialIssueIn(BaseModel):
+    """颁发/更新凭证入参：可推送的文档库 ID 白名单。"""
+    library_ids: list[int] = []
+
+
+class CredentialOut(CredentialSummaryOut):
+    source_id: int
+
+
+class CredentialIssuedOut(CredentialOut):
+    """颁发/轮换响应：secret_key 明文仅此一次返回，服务端只存加密密文。"""
+    secret_key: str = ""
+
+
 class KnowledgeSourceOut(KnowledgeSourceBase):
     model_config = ConfigDict(from_attributes=True)
     id: int
     created_at: datetime
     updated_at: datetime
+    # 更新人（最近一次创建/更新的登录账号）
+    updated_by: str | None = None
+    # 业务系统推送凭证概要（钉钉知识库为 null）
+    credential: CredentialSummaryOut | None = None
 
 
 # ===== 钉钉知识库 → 本地文档库 定时增量同步 =====
