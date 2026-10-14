@@ -77,6 +77,8 @@ ISSUER=https://sso.<域名>/realms/jack bash /home/jack/kc-build-scripts/verify-
 
 ## 3.1 门户统一入口与注册策略
 
+**端口口径（2026-10-14 起，本地与生产一致）**：默认端口 80 归 AIGC 门户。生产为「宿主 Nginx 80 反代门户容器 `127.0.0.1:3200`」——站点配置 [`deploy/intranet/nginx-portal-80.conf`](../intranet/nginx-portal-80.conf)，安装命令见该文件头注释；门户容器保持源站收紧（compose 仅发布 loopback:3200，无需 override）。本地开发 `pnpm dev` 直接监听 80。知识治理专家仍在 8080，入口经门户「应用中心」或直连 `http://10.10.166.2:8080`。
+
 本仓库提供 [`deploy/intranet/nginx-portal.conf`](../intranet/nginx-portal.conf) 作为外网入口样例。生产部署时必须先把示例主机名和证书路径换成正式值，并将门户、KGE、测评、SkillHub 的 HTTPS 主机路由到该入口；OAuth2 Proxy 配置见 [`portal/docker-compose.yml`](../../portal/docker-compose.yml)。
 
 对于已运行的 Realm，导入文件不会更新现有对象。需要手动创建 confidential OIDC 客户端 `jack-gateway`，回调地址只允许 `https://<门户域名>/oauth2/callback`，并将客户端密钥和独立随机 Cookie Secret 安全放入服务器 `portal/.env`。门户、OAuth2 Proxy、Keycloak 管理端及所有源站端口都不得直接暴露到公网。

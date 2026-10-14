@@ -11,7 +11,7 @@ cp .env.example .env
 pnpm dev
 ```
 
-访问 http://localhost:3200 。需要能访问 10.10.166.2 的内网环境。
+访问 http://localhost （默认端口 80 归门户，本地与生产口径一致）。需要能访问 10.10.166.2 的内网环境。
 
 ```bash
 pnpm type-check
@@ -48,7 +48,7 @@ cd portal
 docker compose up -d --build
 ```
 
-本机端口 `3200` 仅绑定到 loopback。`PORTAL_API_TARGET` 指向可信知识治理服务。生产前端链接在镜像构建时由 `VITE_KNOWLEDGE_URL`、`VITE_EVALUATION_URL`、`VITE_SKILLHUB_URL` 设置，不得配置裸 IP、HTTP 或端口直连。
+本机端口 `3200` 仅绑定到 loopback，对外统一由宿主 Nginx 默认端口（80）反代——**默认端口归门户**，站点配置见 [`deploy/intranet/nginx-portal-80.conf`](../deploy/intranet/nginx-portal-80.conf)（安装命令见该文件头注释）。`PORTAL_API_TARGET` 指向可信知识治理服务。生产前端链接在镜像构建时由 `VITE_KNOWLEDGE_URL`、`VITE_EVALUATION_URL`、`VITE_SKILLHUB_URL` 设置，不得配置裸 IP、HTTP 或端口直连。
 
 如不使用 Docker，将 `dist/` 部署到 Nginx 并按 `nginx.conf.template` 配置 API 代理。`pnpm preview` 仅用于检查静态产物，不代理问答服务。生产环境建议统一配置 HTTPS，包括被嵌入的应用。
 
