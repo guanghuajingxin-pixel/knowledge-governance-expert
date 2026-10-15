@@ -120,8 +120,9 @@ async def _write_dingtalk_snapshot(files: list, fetched_at: datetime) -> None:
 
 
 async def _refresh_dingtalk_files() -> None:
-    """手动刷新触发的后台任务：全量遍历钉钉 → 解析创建人姓名 → 持久化快照 + 更新内存缓存。
+    """手动刷新触发的后台任务：按启用知识源遍历钉钉 → 解析创建人姓名 → 持久化快照 + 更新内存缓存。
 
+    统一纳管口径：只遍历知识源管理中已启用的钉钉知识库（与运营看板/知识缺口一致）。
     创建人姓名在遍历结束时一次性解析并写入快照，列表接口因此无需再调用钉钉通讯录接口
     （钉钉配置异常时也能展示已持久化的列表）。
     """
@@ -129,7 +130,11 @@ async def _refresh_dingtalk_files() -> None:
     global _snapshot_loaded
     try:
         await dingtalk_client.sync_runtime_config()
-        files = await dingtalk_client.get_all_knowledge_files()
+        from app.routes.knowledge_gaps import enabled_dingtalk_workspace_ids
+        from kb_common.database import SessionLocal
+        async with SessionLocal() as s:
+            ws_ids = await enabled_dingtalk_workspace_ids(s)
+        files = await dingtalk_client.get_all_knowledge_files(workspace_ids=ws_ids)
         creator_ids = list({f.get("creator_id") for f in files if f.get("creator_id")})
         if creator_ids:
             name_map = await dingtalk_client.get_user_name_map(creator_ids)
@@ -141,7 +146,8 @@ async def _refresh_dingtalk_files() -> None:
         _dingtalk_cache["cached_at"] = fetched_at
         _dingtalk_cache["error"] = None
         _snapshot_loaded = True
-        logger.info("钉钉知识库文件快照刷新完成：%d 个文件", len(files))
+        logger.info("钉钉知识库文件快照刷新完成（启用知识源 %d 个）：%d 个文件",
+                    len(ws_ids), len(files))
     except Exception as e:
         _dingtalk_cache["error"] = f"钉钉数据拉取失败：{e}"
         logger.warning("钉钉知识库文件快照刷新失败：%s", e)

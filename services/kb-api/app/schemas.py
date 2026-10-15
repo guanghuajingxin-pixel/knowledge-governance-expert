@@ -238,6 +238,8 @@ class SyncSourceOut(SyncSourceBase):
     model_config = ConfigDict(from_attributes=True)
     id: int
     dataset_id: str | None = None
+    # 单次导入源（import-dingtalk 创建）：全部同步成功后自动停用，不周期执行
+    import_once: bool = False
     created_at: datetime
     updated_at: datetime
 

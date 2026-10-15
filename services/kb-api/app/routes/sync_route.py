@@ -21,7 +21,7 @@ from app.schemas import (
     SyncTaskBatchIn, SyncTaskOut,
 )
 from kb_common.models import (
-    SyncDocumentMapping, SyncFailure, SyncLog, SyncRun, SyncSource, SyncTask,
+    LibraryDocument, SyncDocumentMapping, SyncFailure, SyncLog, SyncRun, SyncSource, SyncTask,
 )
 
 from app.services.sync.dingtalk_sync_client import DingTalkError
@@ -600,15 +600,73 @@ def batch_retry_tasks(payload: SyncTaskBatchIn, db=Depends(get_sync_db)):
 
 
 @router.post("/tasks/batch-delete",
-             dependencies=[Depends(require_role("super_admin", "admin"))])
+             dependencies=[Depends(require_role("super_admin", "admin", "editor"))])
 def batch_delete_tasks(payload: SyncTaskBatchIn, db=Depends(get_sync_db)):
-    """批量清理已结束（成功/失败）的任务记录；进行中的不允许删除。"""
-    deleted = db.query(SyncTask).filter(
-        SyncTask.id.in_(payload.ids),
-        SyncTask.status.in_(["success", "failed"]),
-    ).delete(synchronize_session=False)
+    """批量清理任务记录：待处理/成功/失败均可清理，处理中的跳过。
+
+    - 已成功同步的任务：仅删除队列记录，已同步的知识与映射不受影响；
+    - 待处理/失败（未成功同步过）的任务：同时把映射置为「不参与同步」
+      （enabled=False，避免启用源的下一轮 cron 编目重建任务），并删除
+      预建的「待同步」占位文档；需要恢复同步时在「同步列表」重新打开
+      该文档的参与开关即可。
+    - 映射与文档用 IN 批量预取（勾选数千个积压任务时不逐任务往返查询）。
+    """
+    import uuid as _uuid
+    tasks = db.query(SyncTask).filter(SyncTask.id.in_(payload.ids)).all()
+    removable = [t for t in tasks if t.status != "running"]
+    skipped = len(tasks) - len(removable) + max(0, len(payload.ids) - len(tasks))
+
+    # 批量预取映射与预建文档，避免大批量勾选时逐任务往返
+    mapping_by_key: dict = {}
+    doc_by_key: dict = {}
+    keys = [(t.source_id, t.node_id) for t in removable
+            if t.node_id and t.source_id is not None]
+    if keys:
+        from sqlalchemy import tuple_
+        mrows = db.query(SyncDocumentMapping).filter(
+            tuple_(SyncDocumentMapping.source_id, SyncDocumentMapping.node_id).in_(keys)
+        ).all()
+        mapping_by_key = {(m.source_id, m.node_id): m for m in mrows}
+        doc_ids: dict[str, object] = {}
+        for m in mrows:
+            if m.status != "synced" and m.document_id:
+                try:
+                    doc_ids[m.document_id] = _uuid.UUID(m.document_id)
+                except ValueError:
+                    pass
+        if doc_ids:
+            doc_by_key = {str(d.id): d for d in db.query(LibraryDocument).filter(
+                LibraryDocument.id.in_(doc_ids.values())).all()}
+
+    removed = excluded = 0
+    for task in removable:
+        db.delete(task)
+        removed += 1
+        mapping = mapping_by_key.get((task.source_id, task.node_id))
+        # 未成功同步过的映射：排除自动同步，防下轮编目重建任务
+        if mapping is not None and mapping.status != "synced":
+            if mapping.enabled:
+                mapping.enabled = False
+                excluded += 1
+            # 预建的「待同步」占位文档（尚无内容）：一并清理，避免列表残留僵尸行
+            doc = doc_by_key.get(mapping.document_id) if mapping.document_id else None
+            if doc is not None and doc.status == "PENDING":
+                db.delete(doc)
+    # 关联 run 若已无未完成任务（任务全被移出），立即收尾——
+    # 否则 run 永远 running，cron 编目会一直以「上一轮批处理尚未完成」跳过
+    if removable:
+        from app.services.sync.batch import _finalize_run_if_done
+        for rid in {t.run_id for t in removable if t.run_id}:
+            _finalize_run_if_done(db, rid)
     db.commit()
-    return {"ok": True, "deleted": deleted, "message": f"已删除 {deleted} 条已结束的任务记录"}
+    message = f"已清理 {removed} 个任务"
+    if excluded:
+        message += (f"；{excluded} 篇未同步完成的文档已停止自动同步"
+                    f"（如需恢复，请在「钉钉知识同步 → 同步列表」重新开启）")
+    if skipped:
+        message += f"；{skipped} 个处理中或不存在，已跳过"
+    return {"ok": True, "removed": removed, "excluded": excluded, "skipped": skipped,
+            "message": message}
 
 
 @router.post("/tasks/{task_id}/retry",

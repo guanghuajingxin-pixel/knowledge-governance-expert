@@ -9,7 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from kb_common.clients import minio_client
@@ -41,6 +41,25 @@ def _meta_hash(node: dict) -> str:
     base = {"name": node.get("name", ""), "category": node.get("category", "")}
     raw = json.dumps({**base, **stamps}, sort_keys=True, ensure_ascii=False)
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:32]
+
+
+def _edit_quiet_elapsed(node: dict, quiet_minutes: int) -> bool:
+    """节点修改时间是否已静默超时（近似「用户已结束编辑」）。
+
+    - modifiedTimestamp 为钉钉 wiki 节点毫秒时间戳（UTC，list/详情接口均返回）；
+    - quiet_minutes<=0 视为禁用静默期，恒 True（变更即同步，向后兼容）；
+    - 时间戳缺失/非法恒 True：无法判定时保持旧行为，由批处理 content_hash 兜底。
+    """
+    if quiet_minutes <= 0:
+        return True
+    ts = node.get("modifiedTimestamp")
+    if not ts:
+        return True
+    try:
+        modified_at = datetime.fromtimestamp(int(ts) / 1000, tz=timezone.utc)
+    except (ValueError, OverflowError, OSError):
+        return True
+    return datetime.now(timezone.utc) - modified_at >= timedelta(minutes=quiet_minutes)
 
 
 def _local_storage_dir() -> Path:

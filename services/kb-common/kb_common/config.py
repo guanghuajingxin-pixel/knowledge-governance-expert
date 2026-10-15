@@ -109,6 +109,9 @@ class Settings(BaseSettings):
     sync_batch_cron: str = "0/30 * * * * ?"   # 批处理作业 cron（Quartz 6 段，含秒位；5 段 crontab 注册时自动转换）
     sync_batch_stale_run_seconds: int = Field(default=21600, ge=600)  # batch run 无推进收编阈值（6h）
     sync_batch_running_reclaim_seconds: int = Field(default=1800, ge=60)  # running 任务卡死自愈阈值（30min）
+    # 编辑静默期（分钟）：节点修改时间静默超过该窗口才建同步任务（近似「编辑结束后再同步」），
+    # 避免编辑过程中每轮 cron 反复同步中间状态；0=禁用（变更即同步）。手动同步不受限。
+    sync_edit_quiet_minutes: int = Field(default=10, ge=0)
 
     # 定时同步调度：XXL-Job 调度中心（替代内置 APScheduler）。
     # enabled=true 时 admin 不可达启动即报错（fail fast）；显式置 false 则定时同步整体关闭。

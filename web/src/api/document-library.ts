@@ -94,8 +94,9 @@ export const exportDocumentLibrary = (id: number) => request.get<unknown, Blob>(
 
 export const deleteDocumentLibrary = (id: number) => request.delete(`/document-libraries/${id}`)
 
-/** 从钉钉导入文档到文档库：指定节点列表或整库（递归）。整库遍历+下载耗时，放宽超时。 */
-export interface DingTalkImportResult { imported: number; failed: number; errors: string[]; documents: LibraryDocument[] }
+/** 从钉钉导入文档到文档库（单次导入）：异步走同步队列，任务分批下载解析，进度见「知识采集 → 同步队列」。 */
+export interface DingTalkImportResult { queued: boolean; source_id: number; source_name: string; message: string }
 export const importDingTalk = (id: number, payload: {
-  node_ids?: string[]; workspace_id?: string; root_node_id?: string; import_mode?: 'once' | 'sync'
-}) => request.post<unknown, DingTalkImportResult>(`${root}/${id}/import-dingtalk`, payload, { timeout: 10 * 60 * 1000 })
+  node_ids?: string[]; workspace_id?: string; root_node_id?: string;
+  workspace_name?: string; import_mode?: 'once' | 'sync'
+}) => request.post<unknown, DingTalkImportResult>(`${root}/${id}/import-dingtalk`, payload)

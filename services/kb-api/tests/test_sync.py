@@ -14,6 +14,22 @@ from kb_common.models import (Setting, SyncSource, SyncRun, SyncDocumentMapping,
 from app.services.sync import engine, runtime
 
 
+def _library_document_stub():
+    """SQLite 测试替身：LibraryDocument 带 PG ARRAY 列，SQLite 无法建表。"""
+    import uuid as _uuid
+    from sqlalchemy import Column, Integer, String
+    from sqlalchemy.dialects.postgresql import UUID
+    from sqlalchemy.orm import declarative_base
+
+    class _Doc(declarative_base()):
+        __tablename__ = 'library_documents'
+        id = Column(UUID(as_uuid=True), primary_key=True, default=_uuid.uuid4)
+        library_id = Column(Integer)
+        status = Column(String(20), default='PENDING')
+
+    return _Doc
+
+
 @contextmanager
 def free_lock(*args):
     yield True
@@ -197,6 +213,191 @@ class FetchSourceFormatTests(unittest.TestCase):
     def test_source_file_name_prefers_original_name(self):
         self.assertEqual(engine.SyncEngine._source_file_name('a.pdf', 'pdf', 'x.pdf'), 'a.pdf')
         self.assertEqual(engine.SyncEngine._source_file_name('a', '', ''), 'a')
+
+
+class RetireImportOnceTests(unittest.TestCase):
+    """单次导入源收编：队列清空且全部成功后自动停用源与调度作业。"""
+
+    def setUp(self):
+        self.sql = create_engine('sqlite://', poolclass=StaticPool, connect_args={'check_same_thread': False})
+        for model in (SyncSource, SyncRun, SyncDocumentMapping, SyncLog, SyncFailure, SyncTask, Setting):
+            model.__table__.create(self.sql)
+        self.sessions = sessionmaker(bind=self.sql, expire_on_commit=False)
+
+    def tearDown(self):
+        self.sql.dispose()
+
+    def _once_source(self, db, **kw):
+        defaults = dict(name='单次导入', workspace_id='w', root_node_id='r',
+                        dataset_id='1', dataset_name='t', enabled=True,
+                        import_once=True, xxl_job_id=99)
+        src = SyncSource(**{**defaults, **kw})
+        db.add(src)
+        db.commit()
+        return src
+
+    def test_retire_disables_once_source_when_queue_empty(self):
+        from app.services.sync import batch
+        with self.sessions() as db:
+            src = self._once_source(db)
+            with patch('app.services.sync.scheduler.stop_source_job') as stop:
+                batch.retire_import_once(db, src.id)
+            self.assertFalse(src.enabled)
+            stop.assert_called_once_with(99)
+
+    def test_retire_keeps_source_when_tasks_pending(self):
+        from app.services.sync import batch
+        with self.sessions() as db:
+            src = self._once_source(db)
+            run = SyncRun(source_id=src.id, status='running')
+            db.add(run)
+            db.commit()
+            db.add(SyncTask(run_id=run.id, source_id=src.id, kind='sync', action='create',
+                            node_id='n', name='n', dataset_id='1', dataset_name='t',
+                            status='pending'))
+            db.commit()
+            with patch('app.services.sync.scheduler.stop_source_job') as stop:
+                batch.retire_import_once(db, src.id)
+            self.assertTrue(src.enabled)
+            stop.assert_not_called()
+
+    def test_retire_ignores_periodic_source(self):
+        from app.services.sync import batch
+        with self.sessions() as db:
+            src = self._once_source(db, import_once=False)
+            with patch('app.services.sync.scheduler.stop_source_job') as stop:
+                batch.retire_import_once(db, src.id)
+            self.assertTrue(src.enabled)
+            stop.assert_not_called()
+
+    def test_finalize_retires_once_source_on_success_but_not_partial(self):
+        from app.services.sync import batch
+        # 全部成功 → 收编停用
+        with self.sessions() as db:
+            src = self._once_source(db)
+            run = SyncRun(source_id=src.id, status='running', total=1)
+            db.add(run)
+            db.commit()
+            db.add(SyncTask(run_id=run.id, source_id=src.id, kind='sync', action='create',
+                            node_id='n', name='n', dataset_id='1', dataset_name='t',
+                            status='success'))
+            db.commit()
+            with patch('app.services.sync.scheduler.stop_source_job'):
+                batch._finalize_run_if_done(db, run.id)
+            self.assertEqual(run.status, 'success')
+            self.assertFalse(src.enabled)
+        # 存在失败 → 保持启用，等 cron 增量重试
+        with self.sessions() as db:
+            src = self._once_source(db)
+            run = SyncRun(source_id=src.id, status='running', total=2, failed_count=1)
+            db.add(run)
+            db.commit()
+            for i, st in enumerate(('success', 'failed')):
+                db.add(SyncTask(run_id=run.id, source_id=src.id, kind='sync', action='create',
+                                node_id=f'n{i}', name=f'n{i}', dataset_id='1', dataset_name='t',
+                                status=st))
+            db.commit()
+            with patch('app.services.sync.scheduler.stop_source_job') as stop:
+                batch._finalize_run_if_done(db, run.id)
+            self.assertEqual(run.status, 'partial')
+            self.assertTrue(src.enabled)
+            stop.assert_not_called()
+
+
+class BatchDeleteTasksTests(unittest.TestCase):
+    """同步队列批量清理/移出：非处理中状态均可移出；未同步完成的联动排除自动同步。"""
+
+    def setUp(self):
+        self.sql = create_engine('sqlite://', poolclass=StaticPool, connect_args={'check_same_thread': False})
+        for model in (SyncSource, SyncRun, SyncDocumentMapping, SyncLog, SyncFailure, SyncTask, Setting):
+            model.__table__.create(self.sql)
+        self.doc_cls = _library_document_stub()
+        self.doc_cls.__table__.create(self.sql)
+        self.sessions = sessionmaker(bind=self.sql, expire_on_commit=False)
+
+    def tearDown(self):
+        self.sql.dispose()
+
+    def _source(self, db):
+        src = SyncSource(name='s', workspace_id='w', root_node_id='r',
+                         dataset_id='1', dataset_name='t', enabled=True)
+        db.add(src)
+        db.commit()
+        return src
+
+    def _pending_task(self, db, src, node_id='n1', status='pending',
+                      mapping_status='pending', doc_status='PENDING'):
+        """构造一条任务及其映射/预建文档，返回 (task, mapping, doc_id)。"""
+        run = db.query(SyncRun).filter_by(source_id=src.id, status='running').first()
+        if run is None:
+            run = SyncRun(source_id=src.id, status='running')
+            db.add(run)
+            db.commit()
+        doc_id = None
+        if doc_status is not None:
+            doc = self.doc_cls(library_id=1, status=doc_status)
+            db.add(doc)
+            db.commit()
+            doc_id = str(doc.id)
+        mapping = None
+        if mapping_status is not None:
+            mapping = SyncDocumentMapping(source_id=src.id, node_id=node_id, name='doc',
+                                           category='', status=mapping_status, document_id=doc_id)
+            db.add(mapping)
+            db.commit()
+        task = SyncTask(run_id=run.id, source_id=src.id, kind='sync', action='create',
+                        node_id=node_id, name='doc', dataset_id='1', dataset_name='t',
+                        status=status)
+        db.add(task)
+        db.commit()
+        return task, mapping, doc_id
+
+    def test_remove_pending_task_excludes_mapping_and_placeholder_doc(self):
+        from app.routes.sync_route import batch_delete_tasks
+        from app.schemas import SyncTaskBatchIn
+        import uuid as _uuid
+        with self.sessions() as db:
+            src = self._source(db)
+            task, mapping, doc_id = self._pending_task(db, src)
+            run_id = task.run_id
+            with patch('app.routes.sync_route.LibraryDocument', self.doc_cls):
+                res = batch_delete_tasks(SyncTaskBatchIn(ids=[task.id]), db)
+            self.assertEqual(res['removed'], 1)
+            self.assertEqual(res['excluded'], 1)
+            self.assertIsNone(db.get(SyncTask, task.id))
+            self.assertFalse(mapping.enabled)              # 排除自动同步，防 cron 重建
+            self.assertIsNone(db.get(self.doc_cls, _uuid.UUID(doc_id)))
+            # run 已无未完成任务 → 立即收尾，不留 running 卡住 cron 编目
+            run = db.get(SyncRun, run_id)
+            self.assertEqual(run.status, 'success')
+
+    def test_remove_success_task_keeps_mapping_and_doc(self):
+        from app.routes.sync_route import batch_delete_tasks
+        from app.schemas import SyncTaskBatchIn
+        import uuid as _uuid
+        with self.sessions() as db:
+            src = self._source(db)
+            task, mapping, doc_id = self._pending_task(
+                db, src, status='success', mapping_status='synced', doc_status='COMPLETED')
+            with patch('app.routes.sync_route.LibraryDocument', self.doc_cls):
+                res = batch_delete_tasks(SyncTaskBatchIn(ids=[task.id]), db)
+            self.assertEqual(res['removed'], 1)
+            self.assertEqual(res['excluded'], 0)
+            self.assertTrue(mapping.enabled)               # 已同步成果不受影响
+            self.assertIsNotNone(db.get(self.doc_cls, _uuid.UUID(doc_id)))
+
+    def test_running_task_skipped(self):
+        from app.routes.sync_route import batch_delete_tasks
+        from app.schemas import SyncTaskBatchIn
+        with self.sessions() as db:
+            src = self._source(db)
+            task, _, _ = self._pending_task(db, src, status='running',
+                                             mapping_status=None, doc_status=None)
+            with patch('app.routes.sync_route.LibraryDocument', self.doc_cls):
+                res = batch_delete_tasks(SyncTaskBatchIn(ids=[task.id]), db)
+            self.assertEqual(res['removed'], 0)
+            self.assertEqual(res['skipped'], 1)
+            self.assertIsNotNone(db.get(SyncTask, task.id))
 
 
 if __name__ == '__main__':

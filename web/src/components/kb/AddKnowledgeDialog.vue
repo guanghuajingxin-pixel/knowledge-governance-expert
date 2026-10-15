@@ -200,25 +200,39 @@ async function handleConfirm() {
   }
 }
 
-/** 单次导入：直接调 import-dingtalk 下载并解析 */
+/** 单次导入：创建一次性同步源，任务经 XXL-Job 进同步队列分批下载解析；
+ *  全部完成后源自动停用（内容不随钉钉源文件更新）。 */
 async function handleOnceImport() {
   const libId = props.libraryId!
   if (docSelection.value) {
-    const nodeIds = docSelection.value.nodes.map((n) => n.node_id)
-    const res = await importDingTalk(libId, { node_ids: nodeIds, import_mode: 'once' })
-    reportImportResult(res)
+    const sel = docSelection.value
+    const res = await importDingTalk(libId, {
+      node_ids: sel.nodes.map((n) => n.node_id),
+      workspace_id: sel.workspaceId, root_node_id: sel.rootNodeId,
+      workspace_name: sel.workspaceName, import_mode: 'once',
+    })
+    ElMessage.success(res.message || '导入任务已提交同步队列，进度可在「知识采集 → 同步队列」查看')
   } else if (kbSelection.value) {
-    let imported = 0, failed = 0
     const errors: string[] = []
+    let submitted = 0
     for (const ws of kbSelection.value.workspaces) {
-      const res = await importDingTalk(libId, {
-        workspace_id: ws.id, root_node_id: ws.root_node_id, import_mode: 'once',
-      })
-      imported += res.imported
-      failed += res.failed
-      errors.push(...res.errors)
+      try {
+        await importDingTalk(libId, {
+          workspace_id: ws.id, root_node_id: ws.root_node_id,
+          workspace_name: ws.name, import_mode: 'once',
+        })
+        submitted++
+      } catch (e: any) {
+        errors.push(`${ws.name}：${e?.response?.data?.detail || e?.message || '提交失败'}`)
+      }
     }
-    reportImportResult({ imported, failed, errors, documents: [] })
+    if (submitted === kbSelection.value.workspaces.length) {
+      ElMessage.success(`已提交 ${submitted} 个导入任务，进度可在「知识采集 → 同步队列」查看`)
+    } else if (submitted > 0) {
+      ElMessage.warning(`已提交 ${submitted} 个导入任务，${errors.length} 个未提交：${errors[0]}`)
+    } else {
+      ElMessage.error(`导入任务未能进入队列：${errors[0] || '请重试'}`)
+    }
   }
   emit('success')
   closeDialog()
@@ -291,16 +305,6 @@ async function submitKnowledgeSync(selection: KbSelection) {
     }
   } finally {
     confirming.value = false
-  }
-}
-
-function reportImportResult(res: { imported: number; failed: number; errors: string[]; documents?: unknown[] }) {
-  if (res.failed === 0) {
-    ElMessage.success(`成功导入 ${res.imported} 篇文档，正在后台解析`)
-  } else if (res.imported === 0) {
-    ElMessage.error(`导入失败：${res.errors[0] || '未知错误'}`)
-  } else {
-    ElMessage.warning(`导入 ${res.imported} 篇成功，${res.failed} 篇失败`)
   }
 }
 
@@ -398,7 +402,7 @@ async function handleClosed() {
             <el-radio-group v-model="importMode" class="import-mode-group">
               <label class="import-option" :class="{ checked: importMode === 'once' }">
                 <el-radio value="once">单次导入</el-radio>
-                <p class="import-desc">直接导入源文件，内容与权限不随源文件更新</p>
+                <p class="import-desc">导入源文件后不再随源更新；任务进同步队列分批执行</p>
               </label>
               <label class="import-option" :class="{ checked: importMode === 'sync' }">
                 <el-radio value="sync">自动同步</el-radio>

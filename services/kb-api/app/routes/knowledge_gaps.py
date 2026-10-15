@@ -28,6 +28,21 @@ def visible_kbs(user):
     return q
 
 
+async def enabled_dingtalk_workspace_ids(s: AsyncSession) -> list[str]:
+    """已启用的钉钉知识源 workspace_id（external_id）列表——全系统知识统计的统一纳管口径。
+
+    返回空列表表示未纳管任何知识库（统计应为 0，而非全量），
+    调用方必须区分 None（不限定）与 []（零纳管）传给遍历接口。
+    """
+    rows = (await s.execute(
+        select(KnowledgeSource.external_id).where(
+            KnowledgeSource.source_type == "dingtalk_workspace",
+            KnowledgeSource.enabled.is_(True),
+        )
+    )).scalars().all()
+    return [r for r in rows if r]
+
+
 async def resolve_kb_filter(s, kb_id: str | None) -> tuple[uuid.UUID | None, KnowledgeSource | None, bool]:
     """解析知识库过滤参数，返回 (本地KB-UUID, 钉钉知识源, 是否有过滤条件)。
 

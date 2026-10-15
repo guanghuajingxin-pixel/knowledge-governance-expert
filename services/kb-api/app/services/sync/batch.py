@@ -360,3 +360,29 @@ def _finalize_run_if_done(db, run_id: int | None) -> None:
                    level="INFO" if run.status == "success" else "WARNING",
                    message=run.message))
     db.commit()
+    # 单次导入源：本轮全部成功即完成使命（失败保持启用，由 cron 增量重试）
+    if failed == 0:
+        retire_import_once(db, run.source_id)
+
+
+def retire_import_once(db, source_id: int | None) -> None:
+    """单次导入源收编：源已无未消费任务时停用源与 XXL-Job 作业（幂等，best effort）。
+
+    仅在 import_once 且该源队列已清空时生效；作业停用失败仅记录日志
+    （disabled 源在下次 reload_sync_jobs 对齐时同样会被停）。
+    """
+    if not source_id:
+        return
+    source = db.get(SyncSource, source_id)
+    if source is None or not source.import_once or not source.enabled:
+        return
+    pending = db.query(SyncTask).filter(
+        SyncTask.source_id == source_id,
+        SyncTask.status.in_(("pending", "running"))).count()
+    if pending:
+        return
+    source.enabled = False
+    db.commit()
+    logger.info("单次导入源 %s 已完成，自动停用", source_id)
+    from .scheduler import stop_source_job
+    stop_source_job(source.xxl_job_id)

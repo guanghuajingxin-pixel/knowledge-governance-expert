@@ -119,7 +119,7 @@ def _start_job(trigger: str, include_hot: bool = True) -> bool:
 
 
 async def _run_full_stats(trigger: str, include_hot: bool = True) -> None:
-    """全量统计：存储总量 → 知识数量/分布（全量遍历）→ 热门 Top20，各完成即落库并更新快照。"""
+    """全量统计：存储总量 → 知识数量/分布（按启用知识源遍历）→ 热门 Top20，各完成即落库并更新快照。"""
     from kb_common.clients import dingtalk_client as dt
     try:
         await dt.sync_runtime_config()
@@ -140,16 +140,22 @@ async def _run_full_stats(trigger: str, include_hot: bool = True) -> None:
             await _save_metric_record("storage", sv, trigger)
             _snapshot["storage"] = {**sv, "created_at": _now_str()}
 
-        # ---- 2) 知识数量 + 企业分布（全量遍历，约 30 分钟） ----
+        # ---- 2) 知识数量 + 企业分布（按启用知识源遍历，约 30 分钟） ----
         _job["phase"] = "walk"
         data = None
         try:
-            data = await dt.get_all_workspaces_stats()
+            # 统一纳管口径：只统计知识源管理中已启用的钉钉知识库
+            # （与部门目录明细/知识缺口一致；未纳管库不计入企业知识数量）
+            from app.routes.knowledge_gaps import enabled_dingtalk_workspace_ids
+            async with SessionLocal() as s:
+                ws_ids = await enabled_dingtalk_workspace_ids(s)
+            data = await dt.get_all_workspaces_stats(workspace_ids=ws_ids)
             _stats_cache["data"] = data
             _stats_cache["walk_info"] = dt.get_last_walk_info()
             _stats_cache["expire_at"] = time.time() + 3600
             _stats_cache["error"] = None
-            logger.info("钉钉知识库遍历完成：%d 个知识库", len(data))
+            logger.info("钉钉知识库遍历完成（启用知识源 %d 个中命中 %d 个）",
+                        len(ws_ids), len(data))
         except Exception as e:
             _stats_cache["error"] = str(e)
             logger.warning("钉钉知识库遍历失败: %s", e)

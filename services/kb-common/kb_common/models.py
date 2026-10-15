@@ -524,6 +524,10 @@ class SyncSource(Base):
     # XXL-Job 调度中心作业 ID（迁移 0029）：同步源为作业配置唯一事实源，
     # 后端经 admin API 幂等增删改作业，作业 ID 回存本列。
     xxl_job_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # 单次导入标记（迁移 0059）：「添加知识 → 钉钉 → 单次导入」创建的一次性源，
+    # 任务仍进同步队列分批消费；该轮全部成功后自动停用源与 cron 作业
+    # （内容不随钉钉源文件更新）。失败保持启用，由 cron 增量重试直至全部成功。
+    import_once: Mapped[bool] = mapped_column(Boolean, server_default=sa_text("false"), nullable=False)
     # 同步身份归属：定时/后台同步用该用户的钉钉 unionId 调钉钉 API（迁移 0043）；
     # 为空或该用户未绑定钉钉时回退全局 dingtalk_operator_union_id 服务账号。
     owner_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))

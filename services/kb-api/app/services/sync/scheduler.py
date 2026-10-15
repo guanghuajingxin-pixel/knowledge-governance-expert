@@ -278,17 +278,15 @@ def trigger_source_sync(source_id: int, operator: str = "") -> dict:
             "message": "同步任务已提交调度中心（XXL-Job），进度见同步队列，执行日志见调度控制台"}
 
 
-def trigger_first_sync(source_id: int, operator: str = "") -> None:
-    """同步源创建后的首次同步：进程内直跑，绕过 XXL-Job 往返。
+def trigger_first_sync(source_id: int, operator: str = "") -> dict:
+    """同步源创建后的首次同步：经 XXL-Job admin 触发（与手动同步同一通道）。
 
-    用户预期「创建后立即开始同步」，而 admin→执行器回调存在间歇性失败
-    （开发态热重载窗口/网络抖动），首次同步不走调度往返、直跑最可靠；
-    后续周期同步仍由 cron（XXL-Job）驱动。
-    直跑的是编目（预建任务/文档，立即入队进列表），实际内容由
-    syncBatch 批处理作业分批同步。
+    触发记录留痕于调度日志，任务/文档进同步队列由批处理分批消费；
+    调度关闭（XXL_JOB_ENABLED=false）时 trigger_source_sync 内部降级直跑。
+    若 admin→执行器回调偶发失败（开发态热重载窗口），下一个 cron 刻度
+    会自然接管（增量编目），不会丢失同步。
     """
-    from .catalog import run_catalog
-    _direct_executor.submit(run_catalog, source_id, "manual", operator)
+    return trigger_source_sync(source_id, operator)
 
 
 def reload_sync_jobs() -> int:
@@ -306,6 +304,16 @@ def remove_source_job(job_id: int | None) -> None:
         get_admin_client().remove_job(job_id)
     except XxlJobAdminError as exc:
         logger.warning("删除 XXL-Job 作业 %s 失败（请在控制台手工清理）: %s", job_id, exc)
+
+
+def stop_source_job(job_id: int | None) -> None:
+    """停用调度中心作业（单次导入源收编用，best effort）。"""
+    if not job_id or not get_settings().xxl_job_enabled:
+        return
+    try:
+        get_admin_client().stop_job(job_id)
+    except XxlJobAdminError as exc:
+        logger.warning("停用 XXL-Job 作业 %s 失败: %s", job_id, exc)
 
 
 def _recovery_loop() -> None:

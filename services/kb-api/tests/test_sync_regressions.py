@@ -55,6 +55,26 @@ def test_source_metadata_preserves_original_format():
     assert online_type({'category': 'ALIDOC', 'name': '在线表格', 'extension': '.AXLS'}) == 'axls'
 
 
+def test_edit_quiet_elapsed():
+    from datetime import datetime, timedelta, timezone
+
+    def ts(minutes_ago: float) -> int:
+        return int((datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)).timestamp() * 1000)
+
+    # 禁用静默期（quiet_minutes<=0）：恒 True（变更即同步）
+    assert engine._edit_quiet_elapsed({'modifiedTimestamp': ts(0)}, 0) is True
+    # 编辑中（修改时间 5 分钟前 < 10 分钟窗口）→ 不静默
+    assert engine._edit_quiet_elapsed({'modifiedTimestamp': ts(5)}, 10) is False
+    # 编辑结束（修改时间 15 分钟前 ≥ 10 分钟窗口）→ 静默超时
+    assert engine._edit_quiet_elapsed({'modifiedTimestamp': ts(15)}, 10) is True
+    # 边界：恰好达到窗口 → True（>= 语义）
+    assert engine._edit_quiet_elapsed({'modifiedTimestamp': ts(10.1)}, 10) is True
+    # 时间戳缺失 / 非法：恒 True（保持旧行为，批处理 content_hash 兜底）
+    assert engine._edit_quiet_elapsed({}, 10) is True
+    assert engine._edit_quiet_elapsed({'modifiedTimestamp': 'not-a-number'}, 10) is True
+    assert engine._edit_quiet_elapsed({'modifiedTimestamp': 0}, 10) is True
+
+
 def test_changing_target_clears_old_ids_but_keeps_document_switches(setup_engine):
     from app.routes import sync_route
     from app.schemas import SyncSourceUpdate

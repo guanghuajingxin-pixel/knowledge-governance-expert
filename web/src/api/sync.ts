@@ -84,4 +84,5 @@ export const batchRetryTasks = (ids: number[]) =>
   request.post<unknown, { ok: boolean; submitted: number; skipped: number; message: string }>(`${BASE}/tasks/batch-retry`, { ids })
 
 export const batchDeleteTasks = (ids: number[]) =>
-  request.post<unknown, { ok: boolean; deleted: number; message: string }>(`${BASE}/tasks/batch-delete`, { ids })
+  request.post<unknown, { ok: boolean; removed: number; excluded: number; skipped: number; message: string }>(
+    `${BASE}/tasks/batch-delete`, { ids }, { timeout: 120000 })

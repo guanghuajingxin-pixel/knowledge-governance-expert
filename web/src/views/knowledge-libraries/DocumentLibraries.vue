@@ -517,7 +517,7 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(timer) })
         <div class="table-fill">
           <el-table :data="pagedDocuments" border height="100%" empty-text="暂无文档，请上传文件" @selection-change="onSelectionChange">
           <el-table-column type="selection" width="42" />
-          <el-table-column label="文档名称" min-width="260" show-overflow-tooltip><template #default="{row}"><div class="doc-name-cell"><img class="file-ico" :src="fileIcon(row.name)" alt="" /><el-button link type="primary" :disabled="row.status === 'PARSING' || row.status === 'PENDING'" @click="goSegments(row as LibraryDocument)">{{ row.name }}</el-button></div></template></el-table-column>
+          <el-table-column label="文档名称" min-width="390" show-overflow-tooltip><template #default="{row}"><div class="doc-name-cell"><img class="file-ico" :src="fileIcon(row.name)" alt="" /><el-button link type="primary" :disabled="row.status === 'PARSING' || row.status === 'PENDING'" @click="goSegments(row as LibraryDocument)">{{ row.name }}</el-button></div></template></el-table-column>
           <el-table-column label="标签" min-width="220"><template #default="{row}">
             <div class="tag-cell">
               <template v-for="t in truncatedTags(row.tags)" :key="t"><el-tag size="small" effect="plain" type="info">{{ t }}</el-tag></template>

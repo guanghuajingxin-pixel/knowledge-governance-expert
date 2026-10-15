@@ -517,6 +517,10 @@ async def _walk_workspace_files(workspace: dict, sem: asyncio.Semaphore,
             if n.get("type") == "FOLDER":
                 if n.get("hasChildren"):
                     child_folders.append((n.get("nodeId"), f"{dir_path}/{name}"))
+            elif (n.get("extension") or "") == "dlink" or name.endswith(".dlink"):
+                # dlink 快捷方式不是文档本体（指向其他库的链接），与目录明细口径
+                # 一致：不计入文档数量统计，也不进文件列表/热门扫描
+                continue
             else:
                 files.append({
                     "node_id": n.get("nodeId"),
@@ -539,13 +543,18 @@ async def _walk_workspace_files(workspace: dict, sem: asyncio.Semaphore,
     return files
 
 
-async def get_all_knowledge_files(operator_union_id: str | None = None) -> list[dict]:
-    """并发遍历全部团队知识库，返回所有文件的平铺列表。
+async def get_all_knowledge_files(operator_union_id: str | None = None,
+                                  workspace_ids: list[str] | None = None) -> list[dict]:
+    """并发遍历团队知识库，返回所有文件的平铺列表。
 
     operator_union_id：按登录用户维度遍历（仅其有权限的库/节点）；不传回退全局服务账号。
+    workspace_ids：限定遍历的知识库（纳管口径）；None 遍历全部团队库，
+    空列表则不遍历任何库（无已启用知识源时知识统计为 0）。
     """
     workspaces = await list_workspaces(operator_union_id=operator_union_id)
-    teams = [w for w in workspaces if w.get("type") != "PERSONAL"]
+    teams = [w for w in workspaces
+             if w.get("type") != "PERSONAL"
+             and (workspace_ids is None or w.get("workspaceId") in workspace_ids)]
     _walk_info["requests"] = 0
     _walk_info["failed_folders"] = 0
     sem = asyncio.Semaphore(_WALK_CONCURRENCY)
@@ -718,9 +727,12 @@ async def get_node_stats_via_cli(node_id: str) -> dict[str, int]:
     }
 
 
-async def get_all_workspaces_stats() -> list[dict]:
-    """按知识库聚合统计（文件数 / 总大小 / 文件明细），供运营看板使用。"""
-    files = await get_all_knowledge_files()
+async def get_all_workspaces_stats(workspace_ids: list[str] | None = None) -> list[dict]:
+    """按知识库聚合统计（文件数 / 总大小 / 文件明细），供运营看板使用。
+
+    workspace_ids：限定遍历的知识库（纳管口径）；None 遍历全部团队库。
+    """
+    files = await get_all_knowledge_files(workspace_ids=workspace_ids)
     stats: dict[str, dict] = {}
     for f in files:
         wid = f.get("workspace_id")

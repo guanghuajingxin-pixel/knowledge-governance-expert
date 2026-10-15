@@ -436,131 +436,66 @@ async def staging_commit(library_id: int, body: StagingCommitIn,
 class DingTalkImportIn(BaseModel):
     """钉钉导入请求体：指定文档节点列表 或 整个知识库。"""
     node_ids: list[str] = Field(default_factory=list, description="钉钉文档节点 ID 列表")
-    workspace_id: str = Field("", description="钉钉知识库 ID（整库导入时必填）")
-    root_node_id: str = Field("", description="知识库根节点 ID（整库导入时必填）")
-    import_mode: Literal["once", "sync"] = Field("once", description="once=一次性导入, sync=自动同步")
+    workspace_id: str = Field("", description="钉钉知识库 ID（必填：源归属与名称映射）")
+    root_node_id: str = Field("", description="知识库根节点 ID（必填：编目遍历起点）")
+    workspace_name: str = Field("", description="知识库/工作空间名称（同步源命名用）")
+    import_mode: Literal["once", "sync"] = Field("once", description="once=单次导入（异步队列）")
 
 
 @router.post("/{library_id}/import-dingtalk")
 async def import_dingtalk(library_id: int, body: DingTalkImportIn,
                           user: User = Depends(get_current_user), s: AsyncSession = Depends(get_session)):
-    """从钉钉知识库导入文档到文档库。
+    """从钉钉知识库导入文档到文档库（单次导入，异步队列执行）。
 
-    支持两种模式：
-    - 指定文档：传 node_ids 列表
-    - 整库导入：传 workspace_id + root_node_id，递归遍历所有文档
+    不再同步遍历下载（大知识库 HTTP 必超时）：创建一次性同步源
+    （import_once=True）→ 经 XXL-Job 立即触发编目 → 文档以「待同步」
+    入列表、任务进同步队列，由批处理分批下载解析；全部成功后源自动
+    停用（内容不随钉钉源文件更新，失败由 cron 增量重试直至成功）。
+    进度见「知识采集 → 同步队列」，执行留痕于 XXL-Job 调度控制台。
     """
-    await library(s, library_id)
+    lib = await library(s, library_id)
 
+    if body.import_mode == "sync":
+        raise HTTPException(422, "自动同步请通过同步源创建接口提交")
     if not body.node_ids and not body.root_node_id:
         raise HTTPException(422, "请指定钉钉文档节点或知识库")
+    # 指定文档模式也必须有根节点：SyncSource.root_node_id 非空列，编目以其为遍历起点
+    if not body.workspace_id or not body.root_node_id:
+        raise HTTPException(422, "请提供钉钉知识库 workspace_id 与 root_node_id")
 
-    # 获取钉钉客户端
+    import json as _json
+    from app.services.sync.scheduler import reload_sync_jobs, trigger_source_sync
     from app.services.sync.sync_database import SyncSessionLocal
-    from app.services.sync.sync_settings import make_dingtalk_client
-    from app.services.sync.source_files import fetch_source_file
-    from kb_common.clients import minio_client
-    import tempfile
-    from pathlib import Path
+    from kb_common.models import SyncSource
 
+    display = body.workspace_name or body.workspace_id
+    name = (f"钉钉单次导入 · {display}（{len(body.node_ids)} 篇）" if body.node_ids
+            else f"钉钉单次导入 · {display}")
     with SyncSessionLocal() as sync_db:
-        dt = make_dingtalk_client(sync_db)
-
+        source = SyncSource(
+            name=name[:200], workspace_id=body.workspace_id,
+            root_node_id=body.root_node_id,
+            dataset_name=lib.name, dataset_id=str(library_id),
+            delete_policy="keep", cron="*/5 * * * *", enabled=True,
+            node_whitelist=_json.dumps(body.node_ids), import_once=True,
+            owner_user_id=user.id)
+        sync_db.add(source)
+        sync_db.commit()
+        sync_db.refresh(source)
+        source_id = source.id
+    # 注册 cron 作业（作为失败后的增量重试通道），再经 XXL-Job 立即触发首次编目；
+    # admin 瞬时不可达不阻塞导入——源已创建，cron 会在下一个刻度自动接管
+    scheduled_now = True
     try:
-        # 知识库名称映射（workspaceId → 名称）：固化到文档行，供知识中心展示来源系统
-        try:
-            ws_names = {ws.get("workspaceId"): ws.get("name", "")
-                        for ws in dt.list_workspaces() if ws.get("workspaceId")}
-        except Exception:
-            ws_names = {}
-
-        def _dt_source(node: dict) -> dict:
-            """钉钉来源固化信息：在线文档链接 + 知识库名称。"""
-            node_id = node.get("nodeId") or node.get("node_id", "")
-            ws_id = node.get("workspaceId") or node.get("workspace_id", "") or body.workspace_id
-            return {"source_url": f"https://alidocs.dingtalk.com/i/nodes/{node_id}" if node_id else None,
-                    "source_workspace_name": ws_names.get(ws_id) or None}
-
-        # 确定要导入的节点列表
-        nodes_to_import: list[dict] = []
-        if body.node_ids:
-            # 指定文档模式：逐个获取节点信息
-            for nid in body.node_ids:
-                try:
-                    resp = dt.get_node(nid)
-                    node = resp.get("node") or resp
-                    node["nodeId"] = nid
-                    nodes_to_import.append(node)
-                except Exception as e:
-                    raise HTTPException(400, f"获取钉钉节点 {nid} 失败：{e}")
-        else:
-            # 整库模式：递归遍历
-            from kb_common.config import get_settings as gs
-            settings = gs()
-            nodes_to_import = dt.walk_tree(body.root_node_id,
-                                           settings.sync_max_depth,
-                                           settings.sync_max_results_per_page,
-                                           use_cache=False)
-
-        if not nodes_to_import:
-            raise HTTPException(400, "未找到可导入的钉钉文档")
-
-        # 逐个下载并创建文档
-        results = []
-        errors = []
-        with tempfile.TemporaryDirectory(prefix="dingtalk-import-") as tmp:
-            tmp_path = Path(tmp)
-            for node in nodes_to_import:
-                node_id = node.get("nodeId") or node.get("node_id", "")
-                name = node.get("name", node_id)
-                try:
-                    # 下载/导出钉钉文件
-                    local_file = fetch_source_file(dt, node, tmp_path)
-                    content = local_file.read_bytes()
-                    file_name = local_file.name
-
-                    # 检查文件类型是否支持
-                    ext = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
-                    if ext not in {"pdf", "docx", "txt", "md", "csv", "xlsx", "pptx", "html"}:
-                        errors.append(f"{name}: 不支持的文件类型 .{ext}")
-                        continue
-
-                    # 上传到 MinIO
-                    doc_id = uuid.uuid4()
-                    key = f"document-libraries/{library_id}/{doc_id}/{file_name}"
-                    await asyncio.to_thread(minio_client.upload_bytes, minio_client.RAW, key, content)
-
-                    # 创建文档记录（source=dingtalk：钉钉知识库同步来源，与本地上传区分；
-                    # 固化钉钉链接与知识库名称，更新人=导入操作者）
-                    doc = LibraryDocument(id=doc_id, library_id=library_id, name=file_name,
-                                          storage_path=key, size=len(content), source="dingtalk",
-                                          status="UPLOADED", progress=0, message="", chunk_count=0,
-                                          updated_by=user.username, **_dt_source(node))
-                    s.add(doc)
-                    await s.commit()
-                    await s.refresh(doc)
-
-                    # 触发解析
-                    try:
-                        await _do_parse(s, library_id, doc_id)
-                        await s.refresh(doc)
-                    except Exception:
-                        doc.status, doc.message = "FAILED", "自动解析失败，请重新解析"
-                        await s.commit()
-                        await s.refresh(doc)
-
-                    results.append(doc_out(doc))
-                except Exception as e:
-                    errors.append(f"{name}: {e}")
-
-        return {
-            "imported": len(results),
-            "failed": len(errors),
-            "errors": errors[:10],  # 最多返回 10 条错误
-            "documents": results,
-        }
-    finally:
-        dt.close()
+        await asyncio.to_thread(reload_sync_jobs)
+        await asyncio.to_thread(trigger_source_sync, source_id,
+                                getattr(user, "username", "") or "")
+    except Exception:  # noqa: BLE001 — 调度中心瞬时不可达：任务已建，等待 cron 接管
+        scheduled_now = False
+    return {"queued": True, "source_id": source_id, "source_name": name,
+            "message": ("导入任务已提交同步队列，分批同步中，进度可在「知识采集 → 同步队列」查看"
+                        if scheduled_now else
+                        "导入任务已创建，调度中心暂时不可达，将由定时调度自动开始同步")}
 
 
 async def bound_document(s, library_id, doc_id, lock=False):

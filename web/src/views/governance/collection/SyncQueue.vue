@@ -2,6 +2,8 @@
 // 同步队列：知识同步过程的逐文档任务列表。
 // 三个页签（待处理/处理中/已完成）+ 筛选（同步源/文档类型/执行结果/处理时长/名称/时间）
 // + 批量管理（批量重试/批量清理）+ 失败任务级重试（只重处理单个钉钉节点，不整源重跑）。
+// 清理：任意非「处理中」状态的任务均可清理（成功/失败/待处理）；未同步完成的任务
+// 清理时联动把映射置为不参与自动同步（防下轮编目重建），已同步的知识不受影响。
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -125,7 +127,7 @@ function retryableIds(): number[] {
 
 function deletableIds(): number[] {
   return selection.value
-    .filter((t) => t.status === 'success' || t.status === 'failed')
+    .filter((t) => t.status !== 'running')
     .map((t) => t.id)
 }
 
@@ -143,16 +145,26 @@ async function batchRetry() {
   } catch { /* 拦截器已提示 */ }
 }
 
+/** 含未同步完成（待处理/失败）任务时的清理提示：这些文档会停止自动同步 */
+function deleteConfirmText(ids: number[]): string {
+  const unsynced = selection.value
+    .filter((t) => t.status !== 'running' && t.status !== 'success').length
+  if (unsynced > 0) {
+    return `将清理 ${ids.length} 个任务；其中 ${unsynced} 个尚未同步完成，对应文档将停止自动同步（如需恢复，请在「钉钉知识同步 → 同步列表」重新开启）；已同步的知识不受影响。是否继续？`
+  }
+  return `将清理 ${ids.length} 个已结束的任务记录；已同步的知识不受影响。是否继续？`
+}
+
 async function batchDelete() {
   const ids = deletableIds()
   if (!ids.length) {
-    ElMessage.warning('仅已结束（成功/失败）的任务可清理')
+    ElMessage.warning('请先勾选要清理的任务（处理中的除外）')
     return
   }
   try {
     await ElMessageBox.confirm(
-      `将删除 ${ids.length} 条已结束的任务记录（不影响已同步的知识），是否继续？`,
-      '批量清理', { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
+      deleteConfirmText(ids),
+      '批量清理', { type: 'warning', confirmButtonText: '清理', cancelButtonText: '取消' },
     )
   } catch {
     return
@@ -161,6 +173,24 @@ async function batchDelete() {
     const res = await batchDeleteTasks(ids)
     ElMessage.success(res.message)
     selection.value = []
+    load()
+  } catch { /* 拦截器已提示 */ }
+}
+
+async function removeOne(row: SyncTask) {
+  try {
+    await ElMessageBox.confirm(
+      row.status === 'success'
+        ? '将清理该条任务记录；已同步的知识不受影响。是否继续？'
+        : '将清理该任务；尚未同步完成的文档将停止自动同步（如需恢复，请在「钉钉知识同步 → 同步列表」重新开启）。是否继续？',
+      '清理任务', { type: 'warning', confirmButtonText: '清理', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+  try {
+    const res = await batchDeleteTasks([row.id])
+    ElMessage.success(res.message)
     load()
   } catch { /* 拦截器已提示 */ }
 }
@@ -222,47 +252,47 @@ onBeforeUnmount(() => {
         </el-tab-pane>
       </el-tabs>
 
-      <!-- 筛选栏 -->
-      <el-form inline class="filter-bar" @submit.prevent>
-        <el-form-item label="同步源">
-          <el-select v-model="filters.source_id" placeholder="全部同步源" clearable style="width: 170px">
-            <el-option v-for="s in sources" :key="s.id" :label="s.name" :value="s.id" />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="文档类型">
-          <el-select v-model="filters.ext" placeholder="全部类型" clearable style="width: 130px">
-            <el-option v-for="e in EXT_OPTIONS" :key="e" :label="`.${e}`" :value="e" />
-          </el-select>
-        </el-form-item>
-        <el-form-item v-if="activeTab === 'done'" label="执行结果">
-          <el-select v-model="filters.status" placeholder="全部结果" clearable style="width: 130px">
-            <el-option label="成功" value="success" />
-            <el-option label="失败" value="failed" />
-          </el-select>
-        </el-form-item>
-        <template v-if="expanded">
-          <el-form-item label="处理时长">
-            <el-select v-model="filters.duration" placeholder="全部时长" clearable style="width: 150px">
+      <!-- 筛选栏：默认一行 3 个过滤器；次要项折叠进展开区；
+           查询/重置与展开开关固定在第一行右侧，展开时位置不动 -->
+      <div class="filter-bar" :class="{ expanded }">
+        <el-form inline class="filter-fields" label-width="68px" @submit.prevent>
+          <el-form-item label="同步源">
+            <el-select v-model="filters.source_id" placeholder="全部同步源" clearable style="width: 220px">
+              <el-option v-for="s in sources" :key="s.id" :label="s.name" :value="s.id" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="文档类型">
+            <el-select v-model="filters.ext" placeholder="全部类型" clearable style="width: 220px">
+              <el-option v-for="e in EXT_OPTIONS" :key="e" :label="`.${e}`" :value="e" />
+            </el-select>
+          </el-form-item>
+          <el-form-item v-if="activeTab === 'done'" label="执行结果">
+            <el-select v-model="filters.status" placeholder="全部结果" clearable style="width: 220px">
+              <el-option label="成功" value="success" />
+              <el-option label="失败" value="failed" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="处理时长" class="fi-extra">
+            <el-select v-model="filters.duration" placeholder="全部时长" clearable style="width: 220px">
               <el-option v-for="d in DURATION_OPTIONS" :key="d.value" :label="d.label" :value="d.value" />
             </el-select>
           </el-form-item>
-          <el-form-item label="任务名称">
-            <el-input v-model="advanced.keyword" placeholder="按文档名称搜索" clearable style="width: 180px"
+          <el-form-item label="任务名称" class="fi-extra">
+            <el-input v-model="advanced.keyword" placeholder="按文档名称搜索" clearable style="width: 220px"
                       @keyup.enter="search" />
           </el-form-item>
-          <el-form-item label="开始时间">
+          <el-form-item label="开始时间" class="fi-extra">
             <el-date-picker v-model="advanced.range" type="daterange" value-format="YYYY-MM-DD"
-                            start-placeholder="开始日期" end-placeholder="结束日期" style="width: 240px" />
+                            start-placeholder="开始日期" end-placeholder="结束日期" style="width: 220px" />
           </el-form-item>
-        </template>
-        <el-form-item class="filter-actions">
+        </el-form>
+        <div class="filter-actions">
           <el-button type="primary" @click="search">查询</el-button>
           <el-button @click="reset">重置</el-button>
-        </el-form-item>
-      </el-form>
-      <div class="expand-toggle" @click="expanded = !expanded">
-        <span>{{ expanded ? '收起' : '展开' }}</span>
-        <el-icon :size="12"><ArrowUp v-if="expanded" /><ArrowDown v-else /></el-icon>
+          <el-button link type="primary" @click="expanded = !expanded">
+            {{ expanded ? '收起' : '展开' }}<el-icon class="el-icon--right"><ArrowUp v-if="expanded" /><ArrowDown v-else /></el-icon>
+          </el-button>
+        </div>
       </div>
 
       <!-- 批量管理 -->
@@ -274,7 +304,7 @@ onBeforeUnmount(() => {
           <template #dropdown>
             <el-dropdown-menu>
               <el-dropdown-item command="retry">批量重试（仅失败）</el-dropdown-item>
-              <el-dropdown-item command="delete" divided>批量清理（仅已结束）</el-dropdown-item>
+              <el-dropdown-item command="delete" divided>批量清理</el-dropdown-item>
             </el-dropdown-menu>
           </template>
         </el-dropdown>
@@ -343,10 +373,11 @@ onBeforeUnmount(() => {
         <el-table-column label="操作人" width="100" show-overflow-tooltip>
           <template #default="{ row }">{{ row.operator || '-' }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="76" fixed="right">
+        <el-table-column label="操作" width="100" fixed="right">
           <template #default="{ row }">
             <el-button v-if="row.status === 'failed'" link type="primary" size="small" @click="retryOne(row as SyncTask)">重试</el-button>
-            <span v-else class="op-none">-</span>
+            <el-button v-if="row.status !== 'running'" link type="danger" size="small" @click="removeOne(row as SyncTask)">清理</el-button>
+            <span v-if="row.status === 'running'" class="op-none">-</span>
           </template>
         </el-table-column>
         <template #empty>
@@ -401,34 +432,35 @@ onBeforeUnmount(() => {
 .filter-bar {
   margin-top: 4px;
   display: flex;
-  flex-wrap: wrap;
   align-items: flex-start;
+  gap: 12px;
   flex-shrink: 0;
 }
 
-.filter-bar :deep(.el-form-item) {
+.filter-fields {
+  display: flex;
+  flex-wrap: wrap;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.filter-fields :deep(.el-form-item) {
   margin-bottom: 10px;
 }
 
-.filter-bar :deep(.filter-actions) {
-  margin-left: auto;
+/* 次要过滤器：收起时隐藏（display:none 不占位，查询/重置位置不动），展开时随行排布 */
+.filter-bar:not(.expanded) .fi-extra {
+  display: none;
 }
 
-.expand-toggle {
+/* 查询/重置/展开开关：固定第一行右侧（flex-start 顶部对齐），展开后位置不动 */
+.filter-actions {
+  margin-left: auto;
   display: flex;
   align-items: center;
-  justify-content: center;
-  gap: 4px;
-  padding: 2px 0 10px;
-  color: var(--el-text-color-secondary);
-  font-size: 13px;
-  cursor: pointer;
-  user-select: none;
+  gap: 0;
+  padding-top: 4px;
   flex-shrink: 0;
-}
-
-.expand-toggle:hover {
-  color: var(--el-color-primary);
 }
 
 .batch-bar {

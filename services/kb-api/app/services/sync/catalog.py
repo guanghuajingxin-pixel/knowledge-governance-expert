@@ -5,6 +5,8 @@
   文档立即以「待同步」（PENDING）状态进文档列表（一次编目、分批消费）；
 - 增量编目：mapping 已 synced 且节点元数据指纹（meta_hash）未变 → 不重建任务；
   新增/变更节点 → 预建 LibraryDocument(PENDING) + SyncTask(pending) + mapping(pending)；
+- 编辑静默期（sync_edit_quiet_minutes）：变更节点的修改时间静默不足窗口 → 视为
+  编辑中，本轮不建任务，静默超时后由下一轮 cron 接管（手动同步不受限）；
 - 钉钉侧消失的文档按 delete_policy 照旧立即删除（不进批处理）。
 """
 from __future__ import annotations
@@ -19,7 +21,7 @@ from kb_common.models import (
     LibraryDocument, SyncDocumentMapping, SyncLog, SyncRun, SyncSource, SyncTask,
 )
 
-from .engine import _meta_hash, _parse_whitelist
+from .engine import _edit_quiet_elapsed, _meta_hash, _parse_whitelist
 from .runtime import WORKER_LOCK, source_lock
 from .source_files import node_extension, skip_reason
 from .sync_database import SyncSessionLocal
@@ -123,7 +125,7 @@ def run_catalog(source_id: int, trigger: str = "manual", operator: str = "") -> 
                              f"钉钉侧已删除但策略为 keep，保留文档: {mapping.name}")
 
                 # ② 预建：任务进同步队列、文档进列表（PENDING 占位），一次 commit 落库
-                queued = skipped = 0
+                queued = skipped = quiet = 0
                 for node in nodes:
                     node_id = node.get("nodeId", "")
                     name = node.get("name", node_id) or node_id
@@ -140,6 +142,13 @@ def run_catalog(source_id: int, trigger: str = "manual", operator: str = "") -> 
                             and mapping.meta_hash
                             and _meta_hash(node) == mapping.meta_hash):
                         skipped += 1
+                        continue
+                    # 编辑静默期：节点修改时间距本轮编目不足静默窗口 → 疑似编辑中，
+                    # 本轮不建任务（避免同步中间状态/反复解析），修改时间静默超时后
+                    # 由下一轮 cron 接管；手动同步是明确指令，不受静默期约束。
+                    if (trigger != "manual"
+                            and not _edit_quiet_elapsed(node, s.sync_edit_quiet_minutes)):
+                        quiet += 1
                         continue
                     # action 判定依据 mapping 上轮状态（编目会提前写 document_id，
                     # 不能沿用直跑模式「有 document_id 即 update」的口径）
@@ -196,13 +205,24 @@ def run_catalog(source_id: int, trigger: str = "manual", operator: str = "") -> 
                 if queued == 0 and deleted == 0:
                     run.status = "success"
                     run.finished_at = datetime.utcnow()
-                    run.message = f"编目完成：无可同步内容（total={run.total} skipped={skipped}）"
+                    if quiet:
+                        run.message = (f"编目完成：无可同步内容"
+                                       f"（{quiet} 篇编辑中静默等待，skipped={skipped}）")
+                    else:
+                        run.message = f"编目完成：无可同步内容（total={run.total} skipped={skipped}）"
                     db.commit()
+                    if quiet:
+                        _log(db, run_id, "INFO", run.message)
+                    # 单次导入源编目无可同步内容：使命已完成，直接收编停用
+                    from .batch import retire_import_once
+                    retire_import_once(db, source.id)
                     return {"run_id": run_id, "status": run.status, "total": run.total,
                             "queued": queued, "deleted": deleted, "skipped": skipped,
-                            "message": run.message}
+                            "quiet": quiet, "message": run.message}
+                quiet_note = f"，{quiet} 篇编辑中静默等待" if quiet else ""
                 run.message = (f"编目完成：{queued} 篇文档已排队待同步"
-                               f"（删除 {deleted}，跳过 {skipped}），由批处理任务分批消费")
+                               f"（删除 {deleted}，跳过 {skipped}{quiet_note}），"
+                               f"由批处理任务分批消费")
                 db.commit()
                 _log(db, run_id, "INFO", run.message)
 
@@ -215,7 +235,7 @@ def run_catalog(source_id: int, trigger: str = "manual", operator: str = "") -> 
                 # 编目动作本身成功（run 保持 running，等批处理分批消费后收尾）
                 return {"run_id": run_id, "status": "success", "total": run.total,
                         "queued": queued, "deleted": deleted, "skipped": skipped,
-                        "message": run.message}
+                        "quiet": quiet, "message": run.message}
             finally:
                 dt.close()
                 backend.close()
