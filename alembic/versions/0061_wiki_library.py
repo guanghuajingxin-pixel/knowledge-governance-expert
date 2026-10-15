@@ -3,8 +3,8 @@ from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import UUID
 
-revision = "0060_wiki_library"
-down_revision = "0059_sync_source_import_once"
+revision = "0061_wiki_library"
+down_revision = "0060_utc_to_shanghai"
 branch_labels = None
 depends_on = None
 

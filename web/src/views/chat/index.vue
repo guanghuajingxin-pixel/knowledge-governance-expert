@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted, onBeforeUnmount, computed, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ArrowUp, Plus, CopyDocument, EditPen, Delete, FullScreen, Operation, ChatDotRound, MagicStick } from '@element-plus/icons-vue'
+import { ArrowUp, Plus, CopyDocument, EditPen, Delete, FullScreen, Operation, ChatDotRound, MagicStick, Notebook } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
@@ -26,6 +26,7 @@ import {
   getSessionMessages, saveChatTurn, type ChatSession,
 } from '@/api/chat-sessions'
 import { submitFeedback, ERROR_TYPES as QA_ERROR_TYPES } from '@/api/qa'
+import { listWikiLibraries, archiveQaToWiki, type WikiLibrary } from '@/api/wiki'
 import { ElMessageBox } from 'element-plus'
 
 const router = useRouter()
