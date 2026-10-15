@@ -29,7 +29,6 @@ from fastapi import HTTPException, Response
 from sqlalchemy import select
 
 from kb_common.config import get_settings
-from kb_common.database import SessionLocal
 from kb_common.models import Setting
 
 from app.routes.mineru_contract import SEMANTIC_TIERS, resolve_tier
@@ -58,7 +57,10 @@ async def _effective_conn() -> tuple[str, str]:
     """SaaS 地址与 Key：settings 表覆盖 > .env（get_settings）。"""
     base = (get_settings().mineru_api_url or "").strip().rstrip("/")
     key = (get_settings().mineru_api_key or "").strip()
-    async with SessionLocal() as s:
+    # 批处理/XXL 执行器线程的临时事件循环不能复用绑定主 loop 的全局连接池，
+    # 与全局 SessionLocal 同池会报 "Future attached to a different loop"——用独立短命引擎。
+    from kb_common.database import fresh_session
+    async with fresh_session() as s:
         rows = (await s.execute(select(Setting).where(Setting.key.in_(["mineru_api_url", "mineru_api_key"])))).scalars().all()
     for row in rows:
         v = (row.value or "").strip()
