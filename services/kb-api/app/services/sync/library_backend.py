@@ -151,11 +151,14 @@ class LibraryBackend:
     async def _async_parse_and_wait(self, doc_id: uuid.UUID) -> None:
         """触发解析并轮询直到完成/失败（复用 managed_library 的状态机）。"""
         import time
-        from kb_common.database import SessionLocal
+        from kb_common.database import fresh_session
         from app.routes.managed_library import _do_parse, refresh_state, engine
 
         timeout = float(get_settings().sync_indexing_timeout_seconds or 600)
-        async with SessionLocal() as s:
+        # 独立短命引擎：本协程跑在批处理线程 asyncio.run 的临时事件循环里，
+        # 不能复用绑定主 loop 的全局 SessionLocal（asyncpg 连接池），
+        # 否则跨 loop await 报 "Future attached to a different loop" 并打乱协议状态机。
+        async with fresh_session() as s:
             await _do_parse(s, self.library_id, doc_id)
             await s.commit()
 
@@ -163,7 +166,7 @@ class LibraryBackend:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             await asyncio.sleep(3)
-            async with SessionLocal() as s:
+            async with fresh_session() as s:
                 from sqlalchemy import select
                 doc = (await s.execute(
                     select(LibraryDocument).where(LibraryDocument.id == doc_id)
