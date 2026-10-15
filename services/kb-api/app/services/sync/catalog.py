@@ -102,7 +102,7 @@ def run_catalog(source_id: int, trigger: str = "manual", operator: str = "") -> 
                             node_id=node_id, name=(mapping.name or node_id)[:500],
                             file_ext=Path(mapping.name or "").suffix.lower().lstrip("."),
                             dataset_id=str(library_id), dataset_name=dataset_name,
-                            status="running", started_at=datetime.utcnow(),
+                            status="running", started_at=datetime.now(),
                             trigger=run.trigger, operator=run.operator)
                         db.add(task)
                         db.commit()
@@ -112,11 +112,11 @@ def run_catalog(source_id: int, trigger: str = "manual", operator: str = "") -> 
                             db.delete(mapping)
                             deleted += 1
                             task.status = "success"
-                            task.finished_at = datetime.utcnow()
+                            task.finished_at = datetime.now()
                             _log(db, run_id, "INFO", f"删除已同步文档: {mapping.name}")
                         except Exception as exc:  # noqa: BLE001
                             task.status = "failed"
-                            task.finished_at = datetime.utcnow()
+                            task.finished_at = datetime.now()
                             task.error = f"删除失败: {exc}"[:2000]
                             _log(db, run_id, "ERROR", f"删除失败 [{mapping.name}]: {exc}")
                         db.commit()
@@ -204,7 +204,7 @@ def run_catalog(source_id: int, trigger: str = "manual", operator: str = "") -> 
                 run.deleted_count = deleted
                 if queued == 0 and deleted == 0:
                     run.status = "success"
-                    run.finished_at = datetime.utcnow()
+                    run.finished_at = datetime.now()
                     if quiet:
                         run.message = (f"编目完成：无可同步内容"
                                        f"（{quiet} 篇编辑中静默等待，skipped={skipped}）")

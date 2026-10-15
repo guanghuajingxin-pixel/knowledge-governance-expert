@@ -101,9 +101,10 @@ const toolCatalog = ref<AgentTool[]>([])
 // 知识库抽象层全部库（不含物料库）；「添加知识库」弹窗内按类型筛选后勾选
 const kbLibraries = ref<KnowledgeLibrary[]>([])
 const kbLibrariesError = ref('')
-type KbFilterType = 'document'
+type KbFilterType = 'document' | 'wiki'
 const KB_FILTERS: Array<{ value: KbFilterType; label: string; match: (l: KnowledgeLibrary) => boolean }> = [
   { value: 'document', label: KB_TYPE_META.document.label, match: (l) => l.library_type === 'document' },
+  { value: 'wiki', label: KB_TYPE_META.wiki.label, match: (l) => l.library_type === 'wiki' },
 ]
 // 弹窗状态：类型筛选（默认文档库）+ 视图（卡片/列表，默认卡片）+ 弹窗内暂存勾选（确认后写回 form）
 const kbDialogVisible = ref(false)

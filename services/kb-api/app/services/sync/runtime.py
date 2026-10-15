@@ -45,7 +45,7 @@ def finish_interrupted(run_id: int, reason: str) -> None:
             return
         succeeded = (run.created_count or 0) + (run.updated_count or 0) + (run.deleted_count or 0)
         failed = run.failed_count or 0
-        run.finished_at = datetime.utcnow()
+        run.finished_at = datetime.now()
         if succeeded > 0:
             run.status = 'partial'
             summary = f"{reason}；已部分同步：成功 {succeeded} 个，失败 {failed} 个，其余未同步"
@@ -60,7 +60,7 @@ def finish_interrupted(run_id: int, reason: str) -> None:
         db.query(SyncTask).filter(
             SyncTask.run_id == run_id,
             SyncTask.status.in_(['pending', 'running']),
-        ).update({'status': 'failed', 'finished_at': datetime.utcnow(),
+        ).update({'status': 'failed', 'finished_at': datetime.now(),
                   'error': reason[:2000]}, synchronize_session=False)
         db.commit()
 
@@ -86,7 +86,7 @@ def recover_interrupted_runs() -> None:
         batch_run_ids = {r[0] for r in db.query(SyncTask.run_id).filter(
             SyncTask.library_document_id.isnot(None),
             SyncTask.run_id.isnot(None)).distinct()}
-        stale_before = datetime.utcnow() - timedelta(
+        stale_before = datetime.now() - timedelta(
             seconds=get_settings().sync_batch_stale_run_seconds)
         rows = db.query(SyncRun.id, SyncRun.source_id, SyncRun.started_at).filter_by(
             status='running').all()

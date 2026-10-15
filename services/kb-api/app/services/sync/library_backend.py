@@ -101,7 +101,7 @@ class LibraryBackend:
             db.query(SyncTask).filter(
                 SyncTask.library_document_id == str(doc_id),
                 SyncTask.status == "pending",
-            ).update({"status": "failed", "finished_at": datetime.utcnow(),
+            ).update({"status": "failed", "finished_at": datetime.now(),
                       "error": "目标文档已删除，任务取消"}, synchronize_session=False)
             if doc:
                 # 删除 MinIO 文件

@@ -176,7 +176,7 @@ class SyncEngine:
                             node_id=node_id, name=(mapping.name or node_id)[:500],
                             file_ext=Path(mapping.name or "").suffix.lower().lstrip("."),
                             dataset_id=dataset_id, dataset_name=dataset_name,
-                            status="running", started_at=datetime.utcnow(),
+                            status="running", started_at=datetime.now(),
                             trigger=run.trigger, operator=operator)
                         db.add(task)
                         db.commit()
@@ -186,11 +186,11 @@ class SyncEngine:
                             db.delete(mapping)
                             stats["deleted"] += 1
                             task.status = "success"
-                            task.finished_at = datetime.utcnow()
+                            task.finished_at = datetime.now()
                             self._log(db, run.id, "INFO", f"删除已同步文档: {mapping.name}")
                         except Exception as exc:  # noqa: BLE001
                             task.status = "failed"
-                            task.finished_at = datetime.utcnow()
+                            task.finished_at = datetime.now()
                             task.error = f"删除失败: {exc}"[:2000]
                             self._record_failure(db, run, source.id, mapping.node_id,
                                                  mapping.name, f"删除失败: {exc}")
@@ -251,7 +251,7 @@ class SyncEngine:
                 run.updated_count = stats["updated"]
                 run.deleted_count = stats["deleted"]
                 run.failed_count = stats["failed"]
-                run.finished_at = datetime.utcnow()
+                run.finished_at = datetime.now()
                 if stats["failed"] == 0:
                     run.status = "success"
                 elif stats["created"] + stats["updated"] + stats["deleted"] + stats["skipped"] == 0:
@@ -266,7 +266,7 @@ class SyncEngine:
                 db.query(SyncTask).filter(
                     SyncTask.run_id == run.id,
                     SyncTask.status.in_(["pending", "running"]),
-                ).update({"status": "failed", "finished_at": datetime.utcnow(),
+                ).update({"status": "failed", "finished_at": datetime.now(),
                           "error": "同步运行已结束，该文档未被处理"},
                          synchronize_session=False)
                 db.commit()
@@ -298,7 +298,7 @@ class SyncEngine:
         run_id = run.id if run is not None else None
         if task is not None:
             task.status = "running"
-            task.started_at = datetime.utcnow()
+            task.started_at = datetime.now()
             task.finished_at = None
             task.error = ""
         meta_hash = _meta_hash(node)
@@ -314,7 +314,7 @@ class SyncEngine:
                 self._log(db, run_id, "INFO", f"内容未变化，跳过: {name}")
                 if task is not None:
                     task.status = "success"
-                    task.finished_at = datetime.utcnow()
+                    task.finished_at = datetime.now()
                     task.error = ""
                 return "skipped", ""
             # 用户口径：预演开关打开的文档一律老实同步，不做内容 hash 跳过；
@@ -358,10 +358,10 @@ class SyncEngine:
             mapping.batch_id = batch
             mapping.status = "synced"
             mapping.error = ""
-            mapping.last_synced_at = datetime.utcnow()
+            mapping.last_synced_at = datetime.now()
             if task is not None:
                 task.status = "success"
-                task.finished_at = datetime.utcnow()
+                task.finished_at = datetime.now()
                 task.error = ""
                 try:
                     task.file_size = local_file.stat().st_size
@@ -386,7 +386,7 @@ class SyncEngine:
                                        error=error))
         if task is not None:
             task.status = "failed"
-            task.finished_at = datetime.utcnow()
+            task.finished_at = datetime.now()
             task.error = error[:2000]
         return "failed", error
 

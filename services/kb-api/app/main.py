@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routes import auth, users, internal, knowledge_base, directory, document, search, settings_route, knowledge_center, knowledge_library, operate, governance, agent_route, agent_internal, chat_session_route, qa_route, sync_route, knowledge_gaps, metrics_route, sensitive, masking, mineru_route, managed_library, business_ingest
+from app.routes import auth, users, internal, knowledge_base, directory, document, search, settings_route, knowledge_center, knowledge_library, operate, governance, agent_route, agent_internal, chat_session_route, qa_route, sync_route, knowledge_gaps, metrics_route, sensitive, masking, mineru_route, managed_library, business_ingest, wiki_route
 
 
 @asynccontextmanager
@@ -102,6 +102,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         import logging
         logging.getLogger(__name__).warning("钉钉机器人启动检查失败: %s", e)
+
+    # Wiki 库：恢复上次运行中被打断的生成/检查任务（置 FAILED 供用户重试）
+    try:
+        from app.services.wiki.generator import recover_interrupted_runs
+        await recover_interrupted_runs()
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("Wiki 生成任务启动恢复失败（不影响启动）: %s", e)
 
     try:
         yield
@@ -228,6 +236,7 @@ app.include_router(sync_route.router)
 app.include_router(metrics_route.router)
 app.include_router(mineru_route.router)
 app.include_router(business_ingest.router)
+app.include_router(wiki_route.router)
 
 @app.get("/health")
 def health(): return {"status": "ok"}

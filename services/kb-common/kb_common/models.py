@@ -712,6 +712,65 @@ class LibraryChunk(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
+# ===== Wiki 知识库（卡帕提 LLM Wiki 模式）=====
+# 三层结构：原料层（LibraryDocument，复用文档库管线）→ Wiki 层（WikiPage，
+# LLM 依据原料自动生成/维护的互链知识页面）→ 规范层（内置在生成器 prompt）。
+# wiki 库检索只命中页面段落；原料不直接参与检索，经页面 source_refs 溯源可达。
+
+class WikiPage(Base):
+    """Wiki 页面：LLM 依据库内原料生成/维护的结构化知识页面。
+
+    - title 为 wikilink 解析目标，库内唯一；
+    - page_type: overview(库索引页) | topic(主题) | entity(实体) | comparison(对比) | qa(问答沉淀)；
+    - content 为 markdown，含 [[wikilink]] 互链与 ^[来源:文档名] 溯源标记；
+    - edited_by_human=True 时自动生成跳过该页（人工修正保护），可手动重新生成；
+    - version 每次生成更新 +1；qa 沉淀页不经 LLM，直接以回答原文入库。
+    """
+    __tablename__ = "wiki_pages"
+    __table_args__ = (UniqueConstraint("library_id", "title", name="uq_wiki_page_library_title"),)
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    library_id: Mapped[int] = mapped_column(
+        ForeignKey("knowledge_libraries.id", ondelete="CASCADE"), index=True)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    page_type: Mapped[str] = mapped_column(String(20), server_default="topic", nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    summary: Mapped[str] = mapped_column(String(500), server_default="", nullable=False)
+    # 溯源原料：[{"document_id","document_name"}]；qa 页为 [{"question"}]
+    source_refs: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), server_default="STABLE", nullable=False)  # STABLE | FAILED
+    message: Mapped[str] = mapped_column(Text, server_default="", nullable=False)
+    version: Mapped[int] = mapped_column(Integer, server_default="1", nullable=False)
+    edited_by_human: Mapped[bool] = mapped_column(Boolean, server_default=sa_text('false'), nullable=False)
+    generated_model: Mapped[str] = mapped_column(String(100), server_default="", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class WikiGenerationRun(Base):
+    """Wiki 生成/检查任务：一次对若干原料的消化过程（自动/重试），或一次 Lint 健康检查。
+
+    - kind: ingest(消化原料生成页面) | lint(健康检查)；
+    - 入队合并：自动触发时若库内已有 PENDING 的 ingest run 则 append document_ids；
+    - 同库同时只有一个 RUNNING；批次快照后新原料并入下一批；
+    - lint 报告存 report JSON（contradictions/orphans/missing_topics/stale_pages）。
+    """
+    __tablename__ = "wiki_generation_runs"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    library_id: Mapped[int] = mapped_column(
+        ForeignKey("knowledge_libraries.id", ondelete="CASCADE"), index=True)
+    kind: Mapped[str] = mapped_column(String(16), server_default="ingest", nullable=False)
+    document_ids: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), server_default="PENDING", nullable=False)  # PENDING | RUNNING | COMPLETED | FAILED
+    pages_created: Mapped[int] = mapped_column(Integer, server_default="0", nullable=False)
+    pages_updated: Mapped[int] = mapped_column(Integer, server_default="0", nullable=False)
+    report: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    error: Mapped[str] = mapped_column(Text, server_default="", nullable=False)
+    triggered_by: Mapped[str] = mapped_column(String(100), server_default="auto", nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+
 # ===== 知识治理标准（本地可管理 + 版本 + 审核流转）=====
 # 治理标准从「钉钉多维表只读代理」升级为本地可管理：
 # - 主表存当前对外展示版本的字段快照（列表查询直接读，无需 join 版本表）

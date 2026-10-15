@@ -383,7 +383,7 @@ async def edit_image(library_id: int, image_id: UUID, body: p.ImageEdit, s: Asyn
 async def retry_image(library_id: int, image_id: UUID, body: p.RetryIn, s: AsyncSession = Depends(get_session)):
     lib = await library(s, library_id, lock=True)
     row = await image_row(s, library_id, image_id, lock=True)
-    if row.status in {"PENDING", "PROCESSING", "INDEXING", "RETRYING"} and row.updated_at > datetime.utcnow()-timedelta(minutes=10):
+    if row.status in {"PENDING", "PROCESSING", "INDEXING", "RETRYING"} and row.updated_at > datetime.now()-timedelta(minutes=10):
         raise HTTPException(409, "图片正在处理，请稍后重试；任务中断超过 10 分钟可重新提交")
     config = p.LibraryConfig(**lib.engine_config) if body.use_library_config else p.LibraryConfig(
         embedding_id=row.embedding_id, remover_id=row.remover_id, preprocess=row.preprocess)

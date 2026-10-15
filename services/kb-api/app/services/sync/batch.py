@@ -41,7 +41,7 @@ def run_sync_batch_tick(job_log=None) -> tuple[int, str]:
     try:
         with SyncSessionLocal() as db:
             # (a) 自愈：认领后进程中断的 running 任务回退 pending（下轮重新处理）
-            reclaim_before = datetime.utcnow() - timedelta(seconds=s.sync_batch_running_reclaim_seconds)
+            reclaim_before = datetime.now() - timedelta(seconds=s.sync_batch_running_reclaim_seconds)
             db.query(SyncTask).filter(
                 SyncTask.status == "running",
                 SyncTask.library_document_id.isnot(None),
@@ -64,7 +64,7 @@ def run_sync_batch_tick(job_log=None) -> tuple[int, str]:
             ).scalars().all()
             for t in claimed:
                 t.status = "running"
-                t.started_at = datetime.utcnow()
+                t.started_at = datetime.now()
                 t.finished_at = None
                 t.error = ""
                 tasks.append(t.id)
@@ -209,7 +209,7 @@ def _process_locked(db, task: SyncTask, source: SyncSource) -> tuple[str, str]:
                 and mapping.content_hash == content_hash):
             if task is not None:
                 task.status = "success"
-                task.finished_at = datetime.utcnow()
+                task.finished_at = datetime.now()
                 task.error = ""
             mapping.name = name
             mapping.meta_hash = _meta_hash(node)
@@ -241,10 +241,10 @@ def _process_locked(db, task: SyncTask, source: SyncSource) -> tuple[str, str]:
         mapping.local_path = str(local_file)
         mapping.status = "synced"
         mapping.error = ""
-        mapping.last_synced_at = datetime.utcnow()
+        mapping.last_synced_at = datetime.now()
 
         task.status = "success"
-        task.finished_at = datetime.utcnow()
+        task.finished_at = datetime.now()
         task.error = ""
         try:
             task.file_size = local_file.stat().st_size
@@ -275,7 +275,7 @@ def _record_task_failure(db, task: SyncTask, source: SyncSource,
                          node_id: str, name: str, error: str) -> None:
     """任务失败落库：task failed + mapping error + SyncFailure + 预建文档标 FAILED。"""
     task.status = "failed"
-    task.finished_at = datetime.utcnow()
+    task.finished_at = datetime.now()
     task.error = error[:2000]
     mapping = _mapping_for(db, source.id, node_id)
     if mapping is not None:
@@ -312,7 +312,7 @@ def _mapping_for(db, source_id: int, node_id: str | None):
 
 def _finish_task(db, task: SyncTask, status: str, message: str) -> None:
     task.status = status
-    task.finished_at = datetime.utcnow()
+    task.finished_at = datetime.now()
     task.error = "" if status == "success" else message[:2000]
     db.commit()
 
@@ -347,7 +347,7 @@ def _finalize_run_if_done(db, run_id: int | None) -> None:
     failed = run.failed_count or 0
     total = run.total or 0
     skipped = max(total - created - updated - deleted - failed, 0)
-    run.finished_at = datetime.utcnow()
+    run.finished_at = datetime.now()
     if failed == 0:
         run.status = "success"
     elif created + updated + deleted + skipped == 0:

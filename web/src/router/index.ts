@@ -85,6 +85,22 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '知识库详情', hidden: true, roles: ['super_admin', 'admin', 'editor'] },
       },
       {
+        // Wiki 库详情：页面/原料双视图，从 Wiki 库列表点击进入，门户页签独立打开
+        path: 'apply/knowledge-libraries/:libId/wiki',
+        name: 'WikiLibraryDetail',
+        component: () => import('@/views/knowledge-libraries/WikiLibraryDetail.vue'),
+        props: (route) => ({ libId: Number(route.params.libId) }),
+        meta: { title: 'Wiki 库详情', hidden: true, roles: ['super_admin', 'admin', 'editor'] },
+      },
+      {
+        // Wiki 页面阅读：wikilink 跳转/溯源入口，门户页签独立打开
+        path: 'apply/knowledge-libraries/:libId/wiki/pages/:pageId',
+        name: 'WikiPageView',
+        component: () => import('@/views/knowledge-libraries/WikiPageView.vue'),
+        props: (route) => ({ libId: Number(route.params.libId), pageId: String(route.params.pageId) }),
+        meta: { title: 'Wiki 页面', hidden: true, roles: ['super_admin', 'admin', 'editor'] },
+      },
+      {
         // 文档分段详情：文档库内点击文件名进入，门户页签独立打开
         path: 'apply/knowledge-libraries/:libId/documents/:docId',
         name: 'LibraryDocumentSegments',

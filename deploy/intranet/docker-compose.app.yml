@@ -14,6 +14,8 @@ services:
       - "9998:9998"
     env_file: .env.app
     environment:
+      # 统一东 8 区：naive timestamp 语义 = 北京时间（datetime.now()/func.now() 同基准）
+      TZ: Asia/Shanghai
       # 认证模式开关在 .env.app 的 AUTH_PROVIDER（keycloak/local）；HTTPS 证书
       # 就位前保持 local，切换步骤见 deploy/keycloak/INTRANET-CUTOVER.md 第 3 节。
       MINERU_LOCAL_URL: ""
@@ -35,6 +37,8 @@ services:
       - "127.0.0.1:2027:2027"
     env_file: .env.app
     environment:
+      # 统一东 8 区：naive timestamp 语义 = 北京时间（datetime.now()/func.now() 同基准）
+      TZ: Asia/Shanghai
       KB_API_URL: http://kb-api:8000
     depends_on:
       - kb-api
@@ -53,7 +57,11 @@ services:
       - "127.0.0.1:8004:8004"
     env_file: .env.app
     environment:
-      AUTH_PROVIDER: keycloak
+      # 认证模式与 kb-api 同口径：开关在 .env.app 的 AUTH_PROVIDER，
+      # keycloak 切换必须 kb-api + faq 同时生效（INTRANET-CUTOVER 第 3 节），
+      # 不允许 compose 单方面强制任一侧。
+      # 统一东 8 区：naive timestamp 语义 = 北京时间
+      TZ: Asia/Shanghai
     networks: [kge-network]
 
   kb-worker:
@@ -66,6 +74,7 @@ services:
     command: ["uv", "run", "celery", "-A", "app.worker", "worker", "-Q", "ingestion", "--concurrency=1", "-l", "info"]
     env_file: .env.app
     environment:
+      TZ: Asia/Shanghai
       EMBED_VIA_INTERNAL: "true"
     networks: [kge-network]
 

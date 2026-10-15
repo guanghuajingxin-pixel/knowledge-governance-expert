@@ -9,6 +9,8 @@ services:
     ports:
       - "127.0.0.1:3200:80"
     environment:
+      # 统一东 8 区（日志时间基准）
+      TZ: Asia/Shanghai
       PORTAL_API_TARGET: ${PORTAL_API_TARGET:-http://host.docker.internal:8000}
     extra_hosts:
       - "host.docker.internal:host-gateway"

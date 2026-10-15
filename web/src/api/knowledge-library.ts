@@ -10,7 +10,7 @@ export interface KnowledgeLibrary {
   /** 历史保留字段（外部镜像下线后本地库为空串） */
   platform: string
   dataset_id: string
-  library_type: 'document' | 'material'
+  library_type: 'document' | 'material' | 'wiki'
   description: string
   enabled: boolean
   updated_at: string

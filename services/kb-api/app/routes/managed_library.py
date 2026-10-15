@@ -143,7 +143,9 @@ class DocumentConfigIn(BaseModel):
 
 
 async def library(s, library_id, lock=False):
-    q = select(KnowledgeLibrary).where(KnowledgeLibrary.id == library_id, KnowledgeLibrary.library_type == "document")
+    # wiki 库的原料文档管理与文档库同一管线（上传/解析/分段/下载）
+    q = select(KnowledgeLibrary).where(KnowledgeLibrary.id == library_id,
+                                       KnowledgeLibrary.library_type.in_(("document", "wiki")))
     if lock:
         q = q.with_for_update()
     lib = (await s.execute(q)).scalar_one_or_none()
@@ -648,6 +650,11 @@ async def _apply_chunks(s: AsyncSession, doc, markdown: str, processing: dict,
     from datetime import datetime as _dt
     doc.parsed_at = _dt.utcnow()
     await _store_parsed_markdown(doc, markdown)
+    # Wiki 库：原料消化完成自动触发页面生成（engine_config.wiki.auto_generate，默认开）。
+    # 覆盖 MinerU 完成轮询与 txt/md/csv 本地解析两条完成路径（本函数为唯一汇聚点）；
+    # 入队走独立会话即时提交，不依赖调用方事务的提交时序。
+    from app.services.wiki.generator import auto_trigger_for_document
+    await auto_trigger_for_document(doc)
 
 
 def _parsed_markdown_key(doc) -> str:

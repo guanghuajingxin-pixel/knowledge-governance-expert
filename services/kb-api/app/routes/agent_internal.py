@@ -210,9 +210,10 @@ async def internal_kb_retrieve(body: RetrieveIn, s: AsyncSession = Depends(get_s
     # 逐库隔离：单库失败记入告警，不影响其他库结果。
     if doc_library_ids:
         from app.services.library_retrieval import search as doc_library_search
+        # wiki 库检索命中 LLM 生成的知识页面段落（原料不直接参与该库检索）
         libs = (await s.execute(select(KnowledgeLibrary).where(
             KnowledgeLibrary.id.in_(doc_library_ids),
-            KnowledgeLibrary.library_type == "document",
+            KnowledgeLibrary.library_type.in_(("document", "wiki")),
         ))).scalars().all()
         for lib in libs:
             try:

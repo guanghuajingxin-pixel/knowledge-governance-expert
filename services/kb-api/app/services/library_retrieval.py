@@ -6,6 +6,7 @@ content/model cache; all eligible leaf chunks participate before top-k selection
 import asyncio
 import hashlib
 import logging
+import re
 from collections import OrderedDict
 from uuid import UUID
 
@@ -149,8 +150,130 @@ async def rerank_hits(session, query, hits, profile_id):
 
 
 
+# Wiki 页面切段长度（字符）：标题/段落聚合为检索小节，与文档库分段量级对齐
+_WIKI_SECTION_CHARS = 800
+
+
+def _wiki_sections(content: str, max_chars: int = _WIKI_SECTION_CHARS) -> list[str]:
+    """Wiki 页面 markdown → 检索小节：按标题切块、长块按段落聚合、超长段落硬切。"""
+    sections: list[str] = []
+    current: list[str] = []
+    current_len = 0
+
+    def flush():
+        nonlocal current, current_len
+        if current:
+            sections.append("\n\n".join(current))
+        current, current_len = [], 0
+
+    for block in re.split(r"\n(?=#{1,4} )", content):
+        block = block.strip()
+        if not block:
+            continue
+        pieces = [block] if len(block) <= max_chars else [
+            p for p in block.split("\n\n") if p.strip()]
+        for piece in pieces:
+            piece = piece.strip()
+            if not piece:
+                continue
+            for start in range(0, len(piece), max_chars):
+                part = piece[start:start + max_chars]
+                if current and current_len + len(part) > max_chars:
+                    flush()
+                current.append(part)
+                current_len += len(part)
+    flush()
+    return sections
+
+
+async def _search_wiki(session, lib, query, top_k, mode='hybrid', *,
+                       threshold=0.0, vector_weight=0.7, rerank=False, rerank_model_id=None):
+    """Wiki 库检索：候选单元 = STABLE 页面的检索小节（原料文档不直接参与该库检索）。
+
+    评分管线与文档库一致（词项 + 向量 + rerank）；命中返回小节文本与页面元信息。
+    """
+    from kb_common.models import WikiPage
+    pages = (await session.execute(select(WikiPage).where(
+        WikiPage.library_id == lib.id, WikiPage.status == "STABLE")
+        .order_by(WikiPage.id))).scalars().all()
+    leaves: list[tuple] = []
+    for page in pages:
+        for section in _wiki_sections(page.content):
+            leaves.append((page, section))
+    if not leaves:
+        return []
+    if mode not in {'hybrid', 'vector', 'fulltext'}:
+        raise ValueError('未知的检索模式')
+    if not 1 <= top_k <= 100 or not 0 <= threshold <= 1 or not 0 <= vector_weight <= 1:
+        raise ValueError('检索参数超出有效范围')
+    prepared = await asyncio.to_thread(prepare_query, query)
+    if not prepared.keywords:
+        return []
+    weight = {'vector': 1.0, 'fulltext': 0.0}.get(mode, vector_weight)
+    texts = [{'text': section, 'title': page.title, 'keywords': []} for page, section in leaves]
+    recall_count = max(1024, top_k * 5)
+    lexical_ids = await asyncio.to_thread(lexical_candidates, prepared, texts, recall_count) if weight < 1 else []
+    similarities = [None] * len(leaves)
+    dense_ids = []
+    if weight > 0:
+        try:
+            vectors = await embeddings([query] + [section for _, section in leaves],
+                                       await config(session, 'embedding'))
+            similarities = [cosine(vectors[0], vector) for vector in vectors[1:]]
+            dense_ids = sorted(range(len(leaves)), key=lambda i: (-similarities[i], i))[:recall_count]
+        except ValueError as e:  # 向量模型未配置/不可用/超时：降级纯全文，不阻断检索
+            logger.warning("wiki library %s vector embedding failed, fallback to fulltext: %s", lib.id, e)
+            weight = 0.0
+            if not lexical_ids:
+                lexical_ids = await asyncio.to_thread(lexical_candidates, prepared, texts, recall_count)
+    candidates = list(dict.fromkeys(lexical_ids + dense_ids))
+    if not candidates:
+        return []
+
+    def lexical_scores():
+        fields = [document_tokens(texts[i]['text'], texts[i]['title'], texts[i]['keywords'])
+                  for i in candidates]
+        return term_scores(prepared, fields)
+
+    lexical = await asyncio.to_thread(lexical_scores)
+    hits = []
+    for i, token_score in zip(candidates, lexical):
+        page, section = leaves[i]
+        semantic = similarities[i]
+        score = blend(token_score, semantic or 0.0, weight)
+        key = f"{page.id}:{i}"
+        hits.append({'content': section, 'matched_content': section, 'score': score,
+            'score_type': 'ragflow_token' if weight == 0 else ('cosine' if weight == 1 else 'ragflow_hybrid'),
+            'semantic_weight': weight if weight > 0 else vector_weight,
+            'token_similarity': token_score, 'vector_similarity': semantic,
+            'important_keywords': [], 'retrieval_enhancements': {},
+            'document_title': page.title, 'document_id': None,
+            'wiki_page_id': str(page.id), 'page_type': page.page_type,
+            'segment_id': key, 'parent_segment_id': key})
+    hits.sort(key=lambda h: -h['score'])
+    if rerank and hits:
+        hits = hits[:max(64, top_k * 5)]
+        try:
+            await rerank_hits(session, query, hits, rerank_model_id)
+            hits.sort(key=lambda h: -h['score'])
+        except ValueError as e:  # 重排模型不可用/超时：跳过重排，保留召回原始排序
+            logger.warning("wiki library %s rerank failed, keep original order: %s", lib.id, e)
+    output = []
+    for hit in hits:
+        if hit['score'] <= 0 or hit['score'] < threshold:
+            continue
+        output.append(hit)
+        if len(output) == top_k:
+            break
+    return output
+
+
 async def search(session, lib, query, top_k, mode='hybrid', *, document_ids=None,
                  threshold=0.0, vector_weight=0.7, rerank=False, rerank_model_id=None):
+    if getattr(lib, "library_type", "document") == "wiki":
+        return await _search_wiki(session, lib, query, top_k, mode, threshold=threshold,
+                                  vector_weight=vector_weight, rerank=rerank,
+                                  rerank_model_id=rerank_model_id)
     conditions = [LibraryDocument.library_id == lib.id, LibraryDocument.enabled.is_(True),
                   LibraryChunk.available.is_(True)]
     if document_ids:

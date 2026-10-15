@@ -3,10 +3,11 @@ import { ref, watch, defineAsyncComponent } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import DocumentLibraries from './DocumentLibraries.vue'
 const FaqLibrary = defineAsyncComponent(() => import('@/views/faq/index.vue'))
-const MaterialLibraries = defineAsyncComponent(() => import('./MaterialLibraries.vue'))
+const MaterialLibraries = defineAsyncComponent(() => import('@/views/knowledge-libraries/MaterialLibraries.vue'))
+const WikiLibraries = defineAsyncComponent(() => import('@/views/knowledge-libraries/WikiLibraries.vue'))
 const route = useRoute()
 const router = useRouter()
-const activeTab = ref(['document', 'material', 'faq'].includes(String(route.query.type)) ? String(route.query.type) : 'document')
+const activeTab = ref(['document', 'material', 'faq', 'wiki'].includes(String(route.query.type)) ? String(route.query.type) : 'document')
 watch(activeTab, type => { void router.replace({ query: { ...route.query, type } }) })
 </script>
 <template>
@@ -14,6 +15,7 @@ watch(activeTab, type => { void router.replace({ query: { ...route.query, type }
     <el-tab-pane label="文档库" name="document" lazy><DocumentLibraries /></el-tab-pane>
     <el-tab-pane label="物料库" name="material" lazy><MaterialLibraries /></el-tab-pane>
     <el-tab-pane label="问答库" name="faq" lazy><FaqLibrary /></el-tab-pane>
+    <el-tab-pane label="Wiki 库" name="wiki" lazy><WikiLibraries /></el-tab-pane>
   </el-tabs>
 </template>
 <style scoped>

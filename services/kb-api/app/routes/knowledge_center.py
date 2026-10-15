@@ -742,7 +742,7 @@ async def list_recycle_bin(
     q = q.offset(offset).limit(size)
     rows = (await s.execute(q)).all()
 
-    now = datetime.utcnow()
+    now = datetime.now()
     items = []
     for row in rows:
         doc = row[0]

@@ -9,6 +9,9 @@ services:
       POSTGRES_USER: dev
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: dev_db
+      # 统一东 8 区：naive timestamp 语义 = 北京时间（与业务容器 TZ 一致）
+      TZ: Asia/Shanghai
+      PGTZ: Asia/Shanghai
     ports:
       - "5432:5432"
     volumes:
