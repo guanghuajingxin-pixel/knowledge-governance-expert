@@ -360,6 +360,16 @@ function goRetrievalTest() {
   if (!selected.value) return
   router.push({ path: `/apply/knowledge-libraries/${selected.value.id}/retrieval-test` })
 }
+// 「添加知识」确认后的期待窗口：编目经 XXL-Job 异步执行，「待同步」占位文档
+// 几秒后才会落库；窗口内轮询无条件静默重拉列表，让新文档第一时间回显，
+// 之后由下方 PENDING/PARSING 既有轮询接管状态推进（PENDING→PARSING→COMPLETED）
+const AWAIT_ADDED_MS = 60_000
+const awaitAddedUntil = ref(0)
+function onAddSuccess() {
+  awaitAddedUntil.value = Date.now() + AWAIT_ADDED_MS
+  load()
+}
+
 let timer: ReturnType<typeof setTimeout> | undefined
 let disposed = false
 async function poll() {
@@ -370,9 +380,10 @@ async function poll() {
         const remote = await libraryDocumentAction(id, doc.id, 'refresh')
         if (selected.value?.id === id) Object.assign(doc, remote)
       }
-      // 待同步文档由批处理任务分批推进（PENDING→PARSING→COMPLETED）：
-      // 静默重拉列表以感知状态变化与新入列的文档
-      if (selected.value?.id === id && documents.value.some(d => d.status === 'PENDING')) {
+      // 待同步文档由批处理任务分批推进：静默重拉列表以感知状态变化与新入列的文档；
+      // 期待窗口内无条件重拉（新入列文档落库前，列表中还没有 PENDING 可感知）
+      const awaiting = Date.now() < awaitAddedUntil.value
+      if (selected.value?.id === id && (awaiting || documents.value.some(d => d.status === 'PENDING'))) {
         documents.value = await listLibraryDocuments(id)
       }
     }
@@ -672,7 +683,7 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(timer) })
         <el-button type="primary" :disabled="detailDoc?.status === 'PARSING'" @click="detailVisible = false; openSettings(detailDoc!)">编辑</el-button>
       </template>
     </el-drawer>
-    <AddKnowledgeDialog v-model="addKnowledgeVisible" :library-id="selected?.id" :library-name="selected?.name" @success="load" />
+    <AddKnowledgeDialog v-model="addKnowledgeVisible" :library-id="selected?.id" :library-name="selected?.name" @success="onAddSuccess" />
   </div>
 </template>
 <style scoped>

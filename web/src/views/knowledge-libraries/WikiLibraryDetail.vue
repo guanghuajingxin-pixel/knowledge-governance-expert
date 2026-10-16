@@ -190,6 +190,15 @@ function goRetrievalTest() {
 }
 
 // ===== 轮询：生成任务/健康检查进行中 或 原料解析中 时自动刷新 =====
+// 「添加知识」确认后的期待窗口：编目经 XXL-Job 异步执行，「待同步」占位文档
+// 几秒后才会落库；窗口内轮询无条件刷新，让新文档第一时间回显到原料列表
+const AWAIT_ADDED_MS = 60_000
+const awaitAddedUntil = ref(0)
+function onAddSuccess() {
+  awaitAddedUntil.value = Date.now() + AWAIT_ADDED_MS
+  load()
+}
+
 let disposed = false
 let timer: ReturnType<typeof setTimeout> | undefined
 async function poll() {
@@ -197,7 +206,7 @@ async function poll() {
     if (!busy.value && !loading.value) {
       const active = runs.value.some(r => ['PENDING', 'RUNNING'].includes(r.status))
       const parsing = documents.value.some(d => d.status === 'PARSING' || d.status === 'PENDING')
-      if (active || parsing) await load()
+      if (active || parsing || Date.now() < awaitAddedUntil.value) await load()
       if (lintVisible.value && lintRun.value?.status === 'RUNNING') await refreshLint()
     }
   } catch { /* 静默：下一轮重试 */ }
@@ -445,7 +454,7 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(timer) })
       </template>
     </el-dialog>
 
-    <AddKnowledgeDialog v-model="addKnowledgeVisible" :library-id="libId" :library-name="lib?.name" @success="load" />
+    <AddKnowledgeDialog v-model="addKnowledgeVisible" :library-id="libId" :library-name="lib?.name" @success="onAddSuccess" />
   </div>
 </template>
 <style scoped>

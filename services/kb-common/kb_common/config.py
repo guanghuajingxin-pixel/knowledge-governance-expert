@@ -46,10 +46,6 @@ class Settings(BaseSettings):
     oidc_admin_url: str = ""  # 可选内部 /admin/realms/{realm}
     oidc_admin_client_id: str = ""
     oidc_admin_client_secret: SecretStr = SecretStr("")
-    # 仅本地调试：配置后该静态令牌直接认证为 dev_auth_user（super_admin），绕过统一登录；
-    # 生产环境（.env.app）不得配置。默认空 = 功能完全关闭。
-    dev_auth_token: str = ""
-    dev_auth_user: str = "admin"
     jwt_secret: str = "change-me-in-prod"
     jwt_algo: str = "HS256"
     jwt_ttl_minutes: int = 1440

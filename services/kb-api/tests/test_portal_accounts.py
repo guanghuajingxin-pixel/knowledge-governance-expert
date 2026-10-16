@@ -53,6 +53,15 @@ class KeycloakAdminTests(unittest.IsolatedAsyncioTestCase):
 class ServiceTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.remote = AsyncMock()
+        # 本地会话 mock：validate_role 的 portal_roles 查询默认命中 None（未知角色 → 400）。
+        # 注意 AsyncMock.return_value 仍是 AsyncMock，须用普通 lambda 覆写 scalar_one_or_none。
+        self.session = AsyncMock()
+        self.session.execute.return_value.scalar_one_or_none = lambda: None
+        # 显式固定 keycloak 路径（不依赖测试环境 .env 的 AUTH_PROVIDER）
+        settings = patch.object(service, 'get_settings',
+                                return_value=SimpleNamespace(auth_provider='keycloak'))
+        settings.start()
+        self.addCleanup(settings.stop)
 
         @asynccontextmanager
         async def session():
@@ -70,7 +79,8 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_create_account_sequence_and_payload(self):
         self.remote.call.side_effect = [
             [{'id': 'rid'}], {'name': 'viewer'}, None, [self.row], None, None]
-        result = await service.create_account(username='jack', name='Jack', email='jack@example.com',
+        result = await service.create_account(self.session, username='jack', name='Jack',
+                                              email='jack@example.com',
                                               role='viewer', password=PASSWORD, temporary=True)
         calls = self.remote.call.call_args_list
         self.assertEqual(calls[2].args, ('POST', 'users'))
@@ -85,7 +95,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_create_without_email_omits_email_fields(self):
         self.remote.call.side_effect = [
             [{'id': 'rid'}], {'name': 'viewer'}, None, [self.row], None, None]
-        await service.create_account(username='jack', name='Jack', email=None,
+        await service.create_account(self.session, username='jack', name='Jack', email=None,
                                      role='viewer', password=PASSWORD, temporary=False)
         payload = self.remote.call.call_args_list[2].kwargs['json']
         self.assertNotIn('email', payload)
@@ -95,20 +105,20 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.remote.call.side_effect = [
             [{'id': 'rid'}], {'name': 'viewer'}, None, [self.row], HTTPException(503), None]
         with self.assertRaises(HTTPException):
-            await service.create_account(username='jack', name='Jack', email=None,
+            await service.create_account(self.session, username='jack', name='Jack', email=None,
                                          role='viewer', password=PASSWORD, temporary=True)
         self.remote.call.assert_awaited_with('DELETE', f'users/{self.user_id}')
 
     async def test_username_conflict_message(self):
         self.remote.call.side_effect = [[{'id': 'rid'}], {'name': 'viewer'}, HTTPException(409, '用户名已存在，请更换后重试')]
         with self.assertRaises(HTTPException) as error:
-            await service.create_account(username='jack', name='Jack', email=None,
+            await service.create_account(self.session, username='jack', name='Jack', email=None,
                                          role='viewer', password=PASSWORD, temporary=True)
         self.assertEqual(error.exception.detail, '用户名已存在，请更换后重试')
 
     async def test_invalid_role_rejected(self):
         with self.assertRaises(HTTPException) as error:
-            await service.create_account(username='jack', name='Jack', email=None,
+            await service.create_account(self.session, username='jack', name='Jack', email=None,
                                          role='guest', password=PASSWORD, temporary=True)
         self.assertEqual(error.exception.status_code, 400)
 
@@ -116,7 +126,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         service_row = {'id': 'svc', 'username': 'service-account-x', 'serviceAccountClientLink': 'rid'}
         self.remote.call.side_effect = [
             [self.row, service_row], [{'id': 'rid'}], [{'name': 'admin'}]]
-        rows = await service.list_accounts(search='jack', first=0, max_results=21)
+        rows = await service.list_accounts(self.session, search='jack', first=0, max_results=21)
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]['roles'], ['admin'])
         self.assertEqual(rows[0]['username'], 'jack')
@@ -129,7 +139,8 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.remote.call.side_effect = [
             self.row, None, [{'id': 'rid'}], [{'name': 'viewer'}],
             {'name': 'admin'}, None, [{'name': 'viewer'}]]
-        result = await service.update_account(self.user_id, name='New', role='admin', enabled=True)
+        result = await service.update_account(self.session, self.user_id, name='New',
+                                              role='admin', enabled=True)
         calls = self.remote.call.call_args_list
         self.assertEqual(calls[1].kwargs['json'], {'firstName': 'New', 'enabled': True})
         self.assertEqual(calls[5].args[1], f'users/{self.user_id}/role-mappings/clients/rid')
@@ -138,7 +149,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_update_clears_email(self):
         self.remote.call.side_effect = [self.row, None, [{'id': 'rid'}], []]
-        result = await service.update_account(self.user_id, email='')
+        result = await service.update_account(self.session, self.user_id, email='')
         changes = self.remote.call.call_args_list[1].kwargs['json']
         self.assertIsNone(changes['email'])
         self.assertFalse(changes['emailVerified'])
@@ -146,19 +157,28 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_reset_password_and_delete(self):
         self.remote.call.side_effect = [self.row, None]
-        await service.reset_password(self.user_id, password=PASSWORD, temporary=True)
+        await service.reset_password(self.session, self.user_id, password=PASSWORD, temporary=True)
         self.remote.call.assert_awaited_with(
             'PUT', f'users/{self.user_id}/reset-password',
             json={'type': 'password', 'value': PASSWORD, 'temporary': True})
         self.remote.call.side_effect = [self.row, None]
-        await service.delete_account(self.user_id)
+        await service.delete_account(self.session, self.user_id)
         self.remote.call.assert_awaited_with('DELETE', f'users/{self.user_id}')
 
     async def test_missing_user_maps_to_404(self):
         self.remote.call.side_effect = [HTTPException(404, '账号不存在')]
         with self.assertRaises(HTTPException) as error:
-            await service.delete_account(uuid4())
+            await service.delete_account(self.session, uuid4())
         self.assertEqual(error.exception.status_code, 404)
+
+    async def test_local_mode_password_policy(self):
+        with patch.object(service, '_is_local', return_value=True):
+            with self.assertRaises(HTTPException) as error:
+                await service.create_account(self.session, username='jack', name='Jack',
+                                             email=None, role='viewer',
+                                             password='short', temporary=True)
+            self.assertEqual(error.exception.status_code, 400)
+            self.assertIn('12 位', error.exception.detail)
 
 
 class RouteTests(unittest.TestCase):
@@ -177,6 +197,8 @@ class RouteTests(unittest.TestCase):
         for method, url, kwargs in [('GET', self.base, {}), ('POST', self.base, self.create_body()),
                                     ('PATCH', target, {'json': {'enabled': False}}),
                                     ('PUT', target + '/password', {'json': {'password': PASSWORD}}),
+                                    ('PUT', target + '/menu-permissions',
+                                     {'json': {'menu_permissions': ['/chat']}}),
                                     ('DELETE', target, {})]:
             self.assertEqual(self.client.request(method, url, **kwargs).status_code, 403)
 
@@ -234,12 +256,57 @@ class RouteTests(unittest.TestCase):
     def test_list_has_more_trims_extra(self):
         items = [{'id': str(uuid4()), 'username': f'u{i}', 'name': '', 'email': None,
                   'enabled': True, 'created_at': None, 'roles': []} for i in range(21)]
-        with patch.object(service, 'list_accounts', new_callable=AsyncMock, return_value=items):
+        with patch.object(service, 'list_accounts', new_callable=AsyncMock, return_value=items), \
+                patch.object(routes, 'overrides_for', new_callable=AsyncMock, return_value={}) as ov:
             r = self.client.get(self.base)
         body = r.json()
         self.assertEqual(r.status_code, 200)
         self.assertEqual(len(body['items']), 20)
         self.assertTrue(body['has_more'])
+        self.assertEqual(len(ov.call_args[0][1]), 20)
+        for row in body['items']:
+            self.assertIsNone(row['menu_permissions'])
+
+    def test_menu_permissions_success_and_follow(self):
+        target = {'id': str(uuid4()), 'username': 'newbie', 'roles': ['viewer'], 'enabled': True}
+        result = {'menu_permissions': ['/chat'], 'effective': ['/chat']}
+        with patch.object(service, 'get_account', new_callable=AsyncMock, return_value=target), \
+                patch.object(routes, 'set_role_menu_override', new_callable=AsyncMock) as setter, \
+                patch.object(routes, 'resolve_for_account', new_callable=AsyncMock,
+                             return_value=['/chat']), \
+                patch.object(routes, 'write_audit', new_callable=AsyncMock):
+            r = self.client.put(f'{self.base}/{target["id"]}/menu-permissions',
+                                json={'menu_permissions': ['/chat']})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json(), result)
+        setter.assert_awaited_once()
+        # null = 恢复跟随角色
+        with patch.object(service, 'get_account', new_callable=AsyncMock, return_value=target), \
+                patch.object(routes, 'set_role_menu_override', new_callable=AsyncMock) as setter, \
+                patch.object(routes, 'resolve_for_account', new_callable=AsyncMock, return_value=None), \
+                patch.object(routes, 'write_audit', new_callable=AsyncMock):
+            r = self.client.put(f'{self.base}/{target["id"]}/menu-permissions',
+                                json={'menu_permissions': None})
+        self.assertEqual(r.status_code, 200)
+        self.assertIsNone(r.json()['menu_permissions'])
+        setter.assert_awaited_once()
+
+    def test_menu_permissions_rejects_empty_and_unknown_keys(self):
+        target = {'id': str(uuid4()), 'username': 'newbie', 'roles': ['viewer'], 'enabled': True}
+        with patch.object(service, 'get_account', new_callable=AsyncMock, return_value=target):
+            r = self.client.put(f'{self.base}/{target["id"]}/menu-permissions',
+                                json={'menu_permissions': []})
+            self.assertEqual(r.status_code, 422)
+            r = self.client.put(f'{self.base}/{target["id"]}/menu-permissions',
+                                json={'menu_permissions': ['/nonexistent']})
+            self.assertEqual(r.status_code, 422)
+
+    def test_admin_cannot_override_super_admin_menus(self):
+        target = {'id': str(uuid4()), 'username': 'root', 'roles': ['super_admin'], 'enabled': True}
+        with patch.object(service, 'get_account', new_callable=AsyncMock, return_value=target):
+            r = self.client.put(f'{self.base}/{target["id"]}/menu-permissions',
+                                json={'menu_permissions': ['/chat']})
+        self.assertEqual(r.status_code, 403)
 
     def test_empty_username_rejected(self):
         for bad in ('', ' '):

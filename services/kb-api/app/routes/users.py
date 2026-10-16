@@ -17,4 +17,6 @@ async def me(u: User = Depends(get_current_user), s: AsyncSession = Depends(get_
     """Return full UserInfo - aligns with frontend type {id,username,email,role,is_active,created_at}."""
     binding = (await s.execute(select(DingtalkBinding).where(
         DingtalkBinding.user_id == u.id))).scalar_one_or_none()
-    return user_public_dict(u, binding)
+    from app.services.menu_permissions import resolve_menu_permissions
+    menus = await resolve_menu_permissions(s, u)
+    return user_public_dict(u, binding, menus)

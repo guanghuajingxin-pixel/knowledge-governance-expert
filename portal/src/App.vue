@@ -1,15 +1,16 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
-import { ElAlert, ElButton, ElDialog, ElForm, ElFormItem, ElIcon, ElInput, ElTooltip, vLoading } from 'element-plus'
+import { ElAlert, ElButton, ElDialog, ElEmpty, ElForm, ElFormItem, ElIcon, ElInput, ElTooltip, vLoading } from 'element-plus'
 import { ArrowUp, ArrowUpRight, ExternalLink, LogIn, LogOut, MessageCircle, PanelLeftClose, PanelLeftOpen, Plus, RotateCw, Sparkles, Square, UserCog } from '@lucide/vue'
 import DOMPurify from 'dompurify'
 import { marked } from 'marked'
-import { applications, pageFromHash, type PageId } from './config/apps'
+import { applications, pageFromHash, HOME_PERM_KEY, type PageId } from './config/apps'
 import { authConfig, identity as sharedIdentity } from './auth/session'
 import { useChat } from './composables/use-chat'
 import { lucideIconMap } from './utils/lucide-icons'
 import LoginView from './views/LoginView.vue'
 import AccountsView from './views/AccountsView.vue'
+import RolesView from './views/RolesView.vue'
 
 const loggedIn = computed(() => Boolean(sharedIdentity.value))
 function logoutPortal() { signOut() }
@@ -21,9 +22,17 @@ const isFrameSlow = ref<boolean>(false)
 const isFrameBlocked = computed(() => location.protocol === 'https:' && currentApp.value?.url.startsWith('http:'))
 const currentApp = computed(() => applications.find(app => app.id === page.value))
 const { conversations, activeId, draft, identity, isSending, isLoginOpen, isLoggingIn, loginError, error, username, password, messageArea, messages, newConversation, selectConversation, send, signIn, signOut, closeLogin, stop } = useChat()
-/** 账号管理入口：仅统一登录下的管理员可见（local 模式无身份中心，后端亦不可用） */
-const canManageAccounts = computed(() => authConfig.value?.provider === 'keycloak' && ['admin', 'super_admin'].includes(identity.value?.user.role || ''))
-const pageTitle = computed(() => page.value === 'accounts' ? '账号管理' : currentApp.value?.name || '小杰 · 智能助手')
+/** 系统管理入口：管理员可见（local 模式操作本地账号，keycloak 模式操作身份中心账号） */
+const canManageAccounts = computed(() => ['admin', 'super_admin'].includes(identity.value?.user.role || ''))
+/** 菜单权限（null = 未配置 = 全部可见）；super_admin 后端恒返回 null */
+const menuPerms = computed<string[] | null>(() => identity.value?.user.menu_permissions ?? null)
+const homeAllowed = computed(() => !menuPerms.value || menuPerms.value.includes(HOME_PERM_KEY))
+const visibleApplications = computed(() =>
+  menuPerms.value ? applications.filter(app => menuPerms.value!.includes(app.permKey)) : applications)
+const pageTitle = computed(() =>
+  page.value === 'accounts' ? '用户管理'
+  : page.value === 'roles' ? '角色管理'
+  : currentApp.value?.name || '小杰 · 智能助手')
 let frameTimer: ReturnType<typeof setTimeout> | undefined
 function navigate(id: PageId) { page.value = id; location.hash = id === 'home' ? '/' : `/${id}` }
 /** 应用中心统一行为：直接在新页签打开应用，门户内容保持当前页面不变 */
@@ -62,17 +71,18 @@ const prompts = ['帮我梳理一份产品知识文档', '如何评估智能体�
         <span class="brand-copy"><strong>杰克科技</strong><small>JACK TECHNOLOGY</small></span>
       </a>
       <div class="workspace-label">AIGC 工作空间</div>
-      <button class="new-chat" aria-label="开启新对话" title="开启新对话" @click="startConversation"><el-icon><Plus /></el-icon><span>开启新对话</span><kbd>+</kbd></button>
+      <button v-if="homeAllowed" class="new-chat" aria-label="开启新对话" title="开启新对话" @click="startConversation"><el-icon><Plus /></el-icon><span>开启新对话</span><kbd>+</kbd></button>
       <nav>
-        <button class="nav-item" :class="{ active: page === 'home' }" :aria-current="page === 'home' ? 'page' : undefined" title="与小杰对话" @click="navigate('home')"><el-icon><MessageCircle /></el-icon><span>与小杰对话</span><span class="nav-dot" /></button>
+        <button v-if="homeAllowed" class="nav-item" :class="{ active: page === 'home' }" :aria-current="page === 'home' ? 'page' : undefined" title="与小杰对话" @click="navigate('home')"><el-icon><MessageCircle /></el-icon><span>与小杰对话</span><span class="nav-dot" /></button>
         <div class="nav-section">应用中心</div>
-        <button v-for="app in applications" :key="app.id" class="nav-item" :class="{ active: page === app.id }" :aria-current="page === app.id ? 'page' : undefined" :title="`${app.name}（新页签打开）`" @click="openApp(app)"><el-icon><component :is="lucideIconMap[app.icon]" /></el-icon><span>{{ app.name }}</span><el-icon class="nav-arrow"><ArrowUpRight /></el-icon></button>
+        <button v-for="app in visibleApplications" :key="app.id" class="nav-item" :class="{ active: page === app.id }" :aria-current="page === app.id ? 'page' : undefined" :title="`${app.name}（新页签打开）`" @click="openApp(app)"><el-icon><component :is="lucideIconMap[app.icon]" /></el-icon><span>{{ app.name }}</span><el-icon class="nav-arrow"><ArrowUpRight /></el-icon></button>
         <template v-if="canManageAccounts">
           <div class="nav-section">系统管理</div>
-          <button class="nav-item" :class="{ active: page === 'accounts' }" :aria-current="page === 'accounts' ? 'page' : undefined" title="账号管理" @click="navigate('accounts')"><el-icon><UserCog /></el-icon><span>账号管理</span><span class="nav-dot" /></button>
+          <button class="nav-item" :class="{ active: page === 'accounts' }" :aria-current="page === 'accounts' ? 'page' : undefined" title="用户管理" @click="navigate('accounts')"><el-icon><UserCog /></el-icon><span>用户管理</span><span class="nav-dot" /></button>
+          <button class="nav-item" :class="{ active: page === 'roles' }" :aria-current="page === 'roles' ? 'page' : undefined" title="角色管理" @click="navigate('roles')"><el-icon><component :is="lucideIconMap['ShieldCheck']" /></el-icon><span>角色管理</span><span class="nav-dot" /></button>
         </template>
       </nav>
-      <section class="history" aria-label="本次访问的对话">
+      <section v-if="homeAllowed" class="history" aria-label="本次访问的对话">
         <div class="nav-section">最近对话 <el-tooltip content="对话仅保留在当前页面，刷新后清空"><span class="history-note">本次访问</span></el-tooltip></div>
         <p v-if="!conversations.length" class="no-history">从一个好问题开始</p>
         <button v-for="item in conversations" :key="item.id" class="history-item" :class="{ selected: item.id === activeId && page === 'home' }" :title="item.title" @click="openConversation(item.id)"><el-icon><MessageCircle /></el-icon><span>{{ item.title }}</span></button>
@@ -92,7 +102,7 @@ const prompts = ['帮我梳理一份产品知识文档', '如何评估智能体�
         <span class="topbar-brand">杰克科技 <span>/</span> AIGC 门户</span>
       </header>
 
-      <section v-if="page === 'home'" class="chat-page" :class="{ 'has-messages': messages.length }">
+      <section v-if="page === 'home' && homeAllowed" class="chat-page" :class="{ 'has-messages': messages.length }">
         <div v-if="!messages.length" class="welcome">
           <div class="eyebrow"><span /> YOUR AI WORKSPACE</div>
           <div class="mascot" aria-hidden="true"><div class="mascot-face"><i /><i /><span /></div><el-icon class="mascot-spark"><Sparkles /></el-icon></div>
@@ -118,11 +128,17 @@ const prompts = ['帮我梳理一份产品知识文档', '如何评估智能体�
           <div v-if="!messages.length" class="suggestions"><button v-for="prompt in prompts" :key="prompt" @click="usePrompt(prompt)">{{ prompt }}<el-icon><ArrowUpRight /></el-icon></button></div>
         </div>
 
-        <section v-if="!messages.length" class="application-section" aria-label="快捷应用入口"><div class="section-heading"><span>从这里，开启更多可能</span><span>探索企业 AI 应用</span></div><div class="application-grid"><button v-for="(app, index) in applications" :key="app.id" class="application-card" :title="`${app.name}（新页签打开）`" @click="openApp(app)"><div class="card-top"><span class="application-icon"><el-icon><component :is="lucideIconMap[app.icon]" /></el-icon></span><span class="card-number">0{{ index + 1 }}</span></div><div class="card-title">{{ app.name }}<el-icon><ArrowUpRight /></el-icon></div><p>{{ app.description }}</p></button></div></section>
+        <section v-if="!messages.length" class="application-section" aria-label="快捷应用入口"><div class="section-heading"><span>从这里，开启更多可能</span><span>探索企业 AI 应用</span></div><div class="application-grid"><button v-for="(app, index) in visibleApplications" :key="app.id" class="application-card" :title="`${app.name}（新页签打开）`" @click="openApp(app)"><div class="card-top"><span class="application-icon"><el-icon><component :is="lucideIconMap[app.icon]" /></el-icon></span><span class="card-number">0{{ index + 1 }}</span></div><div class="card-title">{{ app.name }}<el-icon><ArrowUpRight /></el-icon></div><p>{{ app.description }}</p></button></div></section>
         <footer class="chat-footer">小杰与你一起，智造更多可能<span>AI 生成内容仅供参考，请核实重要信息</span></footer>
       </section>
 
       <AccountsView v-else-if="page === 'accounts'" />
+
+      <RolesView v-else-if="page === 'roles'" />
+
+      <section v-else-if="page === 'home'" class="chat-page">
+        <div class="welcome"><el-empty description="当前账号没有可用的门户功能，请联系管理员调整菜单权限" /></div>
+      </section>
 
       <section v-else-if="currentApp" class="app-page">
         <div class="app-toolbar"><div><strong>{{ currentApp.name }}</strong><span>{{ currentApp.caption }}</span></div><div class="app-actions"><el-tooltip content="若内嵌页面空白或登录受限，请在新窗口打开"><span class="embed-hint">独立应用</span></el-tooltip><el-button :icon="RotateCw" @click="reloadFrame">刷新页面</el-button><a :href="currentApp.url" target="_blank" rel="noopener noreferrer" class="external-link"><el-icon><ExternalLink /></el-icon>新窗口打开</a></div></div>
@@ -133,7 +149,7 @@ const prompts = ['帮我梳理一份产品知识文档', '如何评估智能体�
     </main>
 
     <el-dialog v-model="isLoginOpen" :title="identity ? '企业账号' : '登录，与小杰开始对话'" width="min(440px, 92vw)" @closed="closeLogin">
-      <template v-if="identity"><p>当前账号：{{ identity.user.username }}</p><p v-if="authConfig?.provider === 'keycloak'"><a :href="authConfig.account_url" target="_blank" rel="noopener noreferrer">管理我的账号</a><a v-if="['admin', 'super_admin'].includes(identity.user.role || '')" href="#/accounts" style="margin-left: 24px" @click="isLoginOpen = false">账号管理</a></p><el-button :icon="LogOut" @click="signOut(); isLoginOpen = false">退出登录</el-button></template>
+      <template v-if="identity"><p>当前账号：{{ identity.user.username }}</p><p v-if="authConfig?.provider === 'keycloak'"><a :href="authConfig.account_url" target="_blank" rel="noopener noreferrer">管理我的账号</a><a v-if="['admin', 'super_admin'].includes(identity.user.role || '')" href="#/accounts" style="margin-left: 24px" @click="isLoginOpen = false">用户管理</a></p><el-button :icon="LogOut" @click="signOut(); isLoginOpen = false">退出登录</el-button></template>
       <template v-else-if="authConfig?.provider === 'local'"><p class="login-description">使用知识治理专家的企业账号登录。</p><el-alert v-if="loginError" :title="loginError" type="error" show-icon :closable="false" /><el-form label-position="top" @submit.prevent="signIn"><el-form-item label="账号"><el-input v-model="username" autocomplete="username" placeholder="请输入企业账号" @keyup.enter="signIn" /></el-form-item><el-form-item label="密码"><el-input v-model="password" type="password" show-password autocomplete="current-password" placeholder="请输入密码" @keyup.enter="signIn" /></el-form-item><el-button type="primary" class="login-submit" :loading="isLoggingIn" :disabled="!username.trim() || !password" @click="signIn">登录并继续</el-button></el-form><a class="login-help" :href="applications[0].url" target="_blank" rel="noopener noreferrer">前往知识治理专家管理账号 <el-icon><ArrowUpRight /></el-icon></a></template>
     </el-dialog>
   </div>

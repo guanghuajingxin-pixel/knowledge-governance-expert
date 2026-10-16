@@ -12,7 +12,8 @@ class User(Base):
     username: Mapped[str] = mapped_column(String(100), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(256))
     email: Mapped[str | None] = mapped_column(String(200))
-    role: Mapped[str] = mapped_column(String(20), default="viewer")  # super_admin|admin|editor|viewer
+    # super_admin|admin|editor|viewer 或自定义角色 code（引用 portal_roles.code，无 FK 保持松耦合）
+    role: Mapped[str] = mapped_column(String(50), default="viewer")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     # 钉钉建档/管理员重置密码后为 true：下次登录强制跳设密页（迁移 0041）
@@ -32,6 +33,25 @@ class UserIdentity(Base):
     issuer: Mapped[str] = mapped_column(String(500))
     subject: Mapped[str] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+class PortalRole(Base):
+    """门户角色：4 个系统角色（is_system）+ 自定义角色。menu_permissions 为 NULL 表示未配置（全部菜单）。"""
+    __tablename__ = "portal_roles"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    code: Mapped[str] = mapped_column(String(50), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(100))
+    description: Mapped[str | None] = mapped_column(Text)
+    is_system: Mapped[bool] = mapped_column(Boolean, server_default=sa_text("false"), nullable=False)
+    menu_permissions: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+class PortalUserMenuOverride(Base):
+    """用户级菜单权限覆盖（优先于角色配置）。user_id 兼容本地 UUID 与 Keycloak UUID（首登前无本地行）。"""
+    __tablename__ = "portal_user_menu_overrides"
+    user_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    menu_permissions: Mapped[list] = mapped_column(JSON, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
 class ApiKey(Base):
     __tablename__ = "api_keys"
@@ -544,7 +564,9 @@ class SyncRun(Base):
     # 触发人：定时为「系统」，手动为登录用户名；同步队列的逐文档任务行继承该值。
     operator: Mapped[str] = mapped_column(String(100), server_default="", nullable=False)
     status: Mapped[str] = mapped_column(String(20), server_default="running", nullable=False)  # running | success | partial | failed
-    started_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    # 应用侧本地默认（东 8 区统一口径）：server_default=func.now() 在 sqlite（测试）
+    # 下为 UTC，与生产 PG（PGTZ=Asia/Shanghai）基准不一致；default 让 sqlite/生产同径。
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(), nullable=False)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     total: Mapped[int] = mapped_column(Integer, server_default="0", nullable=False)
     created_count: Mapped[int] = mapped_column(Integer, server_default="0", nullable=False)

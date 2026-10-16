@@ -3,7 +3,9 @@ from kb_common.clients import minio_client
 from kb_common.models import Document
 import uuid, io
 
-ALLOWED = {"pdf", "doc", "docx", "txt", "md", "csv", "xlsx", "xls"}
+# 图片格式（png/jpg/jpeg/webp/bmp）经 MinerU OCR 解析为文本后入库
+ALLOWED = {"pdf", "doc", "docx", "txt", "md", "csv", "xlsx", "xls",
+           "png", "jpg", "jpeg", "webp", "bmp"}
 
 
 async def upload_document(s, kb, file, directory_id, enqueue, uploader_id=None):

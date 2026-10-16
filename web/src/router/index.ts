@@ -1,4 +1,5 @@
 import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
+import { ElMessage } from 'element-plus'
 import { useUserStore } from '@/stores/user'
 
 const routes: RouteRecordRaw[] = [
@@ -277,6 +278,24 @@ const router = createRouter({
   routes,
 })
 
+/** 菜单注册表（与后端 menu_registry 对齐，key 即路由 path）；hidden 详情路由继承最长匹配前缀 */
+const MENU_PATH_KEYS = [
+  '/chat', '/deap-agent', '/hiagent', '/dify',
+  '/knowledge-sources', '/collection/knowledge-center', '/collection/queue',
+  '/apply/masking', '/apply/knowledge-libraries',
+  '/operate/dashboard', '/operate/qa', '/operate/corrections',
+  '/govern/gaps', '/govern/review',
+  '/model', '/agent-config', '/settings/api-keys',
+]
+
+function menuKeyFor(path: string): string | null {
+  if (MENU_PATH_KEYS.includes(path)) return path
+  const matched = MENU_PATH_KEYS
+    .filter(key => path.startsWith(key + '/'))
+    .sort((a, b) => b.length - a.length)[0]
+  return matched || null
+}
+
 router.beforeEach((to, _from, next) => {
   const userStore = useUserStore()
   userStore.restoreUser()
@@ -295,6 +314,20 @@ router.beforeEach((to, _from, next) => {
   if (roles && userInfoRole(userStore) && !roles.includes(userInfoRole(userStore) as string)) {
     next('/chat')
     return
+  }
+
+  // 菜单权限白名单（null/undefined = 未配置不限制；super_admin 后端恒为 null）
+  const menus = userStore.userInfo?.menu_permissions
+  if (Array.isArray(menus)) {
+    const key = menuKeyFor(to.path)
+    if (key && !menus.includes(key)) {
+      const fallback = menus.find(m => m.startsWith('/')) || '/chat'
+      if (to.path !== fallback) {
+        ElMessage.warning('当前账号无该菜单的访问权限')
+        next(fallback)
+        return
+      }
+    }
   }
 
   next()

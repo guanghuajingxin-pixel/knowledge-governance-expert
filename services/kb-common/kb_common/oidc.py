@@ -17,7 +17,7 @@ from sqlalchemy.exc import IntegrityError
 
 from kb_common.config import get_settings
 from kb_common.database import short_session
-from kb_common.models import User, UserIdentity
+from kb_common.models import PortalRole, User, UserIdentity
 from kb_common.security import decode_jwt, hash_password
 
 ROLE_ORDER = ("super_admin", "admin", "editor", "viewer")
@@ -52,7 +52,13 @@ def oidc_config() -> dict:
             "admin_url": f"{base}/admin/{realm}/console/"}
 
 
-def role_from_claims(claims: dict) -> str:
+def role_from_claims(claims: dict, known_codes: set[str] | None = None) -> str:
+    """Resolve the business role from signed client-role claims.
+
+    Legacy behaviour (known_codes=None): only the four system roles are accepted.
+    With known_codes (portal_roles codes), a matching custom role is accepted as well —
+    custom roles only gate menu visibility; require_role still recognises system codes only.
+    """
     resources = claims.get("resource_access")
     access = resources.get(get_settings().oidc_audience) if isinstance(resources, dict) else None
     roles = access.get("roles", []) if isinstance(access, dict) else []
@@ -61,6 +67,10 @@ def role_from_claims(claims: dict) -> str:
     for role in ROLE_ORDER:
         if role in roles:
             return role
+    if known_codes:
+        for role in roles:
+            if role in known_codes:
+                return str(role)
     raise HTTPException(403, "统一账号尚未获授知识治理权限，请联系管理员")
 
 
@@ -102,8 +112,17 @@ async def verify_access_token(token: str, *, allowed_clients: tuple[str, ...] | 
         raise HTTPException(401, "统一登录凭证无效或已过期，请重新登录") from exc
 
 
+async def _known_role_codes(session) -> set[str] | None:
+    """portal_roles 角色码集合（含自定义角色）；迁移前（表不存在）回退 None（仅系统角色）。"""
+    try:
+        rows = (await session.execute(select(PortalRole.code))).scalars().all()
+        return set(rows)
+    except Exception:  # noqa: BLE001 — 迁移前/权限异常回退系统角色口径，不阻断登录
+        await session.rollback()
+        return None
+
+
 async def resolve_oidc_user(claims: dict) -> User:
-    role = role_from_claims(claims)
     issuer, subject = get_settings().oidc_issuer.rstrip("/"), claims["sub"]
     username = claims.get("preferred_username")
     if not isinstance(subject, str) or not subject or len(subject) > 255:
@@ -114,6 +133,8 @@ async def resolve_oidc_user(claims: dict) -> User:
     if not isinstance(email, str) or len(email) > 200:
         email = None
     async with short_session() as session:
+        # 自定义角色兼容：先取已知角色码，再从签名 claims 解析角色
+        role = role_from_claims(claims, known_codes=await _known_role_codes(session))
         identity = (await session.execute(select(UserIdentity).where(
             UserIdentity.issuer == issuer, UserIdentity.subject == subject))).scalar_one_or_none()
         if identity:
@@ -163,47 +184,9 @@ async def resolve_oidc_user(claims: dict) -> User:
         return user
 
 
-async def dev_user() -> User:
-    """本地调试账号：按 DEV_AUTH_USER 取用（缺则自动建档 super_admin），绝不与身份中心交互。"""
-    username = (get_settings().dev_auth_user or "admin").strip()
-    async with short_session() as session:
-        user = (await session.execute(select(User).where(User.username == username))).scalar_one_or_none()
-        if user is None:
-            user = User(username=username, role="super_admin", is_active=True,
-                        password_hash=hash_password(secrets.token_urlsafe(32)),
-                        must_change_password=False)
-            session.add(user)
-            try:
-                await session.commit()
-            except IntegrityError:
-                await session.rollback()
-                user = (await session.execute(select(User).where(User.username == username))).scalar_one_or_none()
-        if not user or not user.is_active:
-            raise HTTPException(403, "本地调试账号不可用，请检查本地用户状态")
-        await session.refresh(user)
-        session.expunge(user)
-        return user
-
-
-async def _local_jwt_user(token: str) -> User | None:
-    """尝试按本地 JWT（HS256 + JWT_SECRET）解析用户；无效/停用返回 None。"""
-    try:
-        claims = decode_jwt(token)
-        async with short_session() as session:
-            user = await session.get(User, claims["sub"])
-    except Exception:
-        return None
-    return user if user and user.is_active else None
-
-
 async def authenticate(token: str) -> User:
     if enabled():
-        # 本地调试：显式配置 DEV_AUTH_TOKEN 后，接受 /auth/dev-login 换发的本地 JWT
-        # （生产 .env.app 不配置该开关，此分支完全不生效）。
-        if get_settings().dev_auth_token:
-            user = await _local_jwt_user(token)
-            if user is not None:
-                return user
+        # 统一认证模式：仅接受身份中心签发的 access token（本地 JWT 一律拒绝）
         return await resolve_oidc_user(await verify_access_token(token))
     try:
         claims = decode_jwt(token)

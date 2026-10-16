@@ -2,9 +2,11 @@
 
 每轮四段：
 (a) 自愈：回收卡死 running 的批处理任务（kb-api 崩溃/被 kill 后悬挂回退 pending）；
-(b) refresh：跟进上一批 PARSING 中的同步文档（查 MinerU job、完成时落地分段），
-    不依赖前端轮询；失败仅记日志；
-(c) 认领：FOR UPDATE SKIP LOCKED 取最早 N 个 pending 任务（跨源全局 FIFO）；
+(b) 认领：FOR UPDATE SKIP LOCKED 取最早 N 个 pending 任务（跨源全局 FIFO），
+    必须先于 refresh：refresh 受外部服务延迟影响可能耗时数分钟，排在前面会
+    饿死认领（新任务迟迟不流转 running，run 被看门狗收编）；
+(c) refresh：跟进 PARSING 中的同步文档（查 MinerU job、完成时落地分段），
+    不依赖前端轮询；每轮随机限量刷新，失败仅记日志；
 (d) 逐任务：锁源 → 现取节点元数据 → 下载 → content_hash 未变跳过 /
     更新预建 LibraryDocument 行并提交解析 → 回写映射 → 任务终态；
 (e) 收尾：任务所属 run 若全部任务终态 → 按既有规则置 success/partial/failed。
@@ -17,7 +19,7 @@ import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 
 from kb_common.config import get_settings
 from kb_common.models import (
@@ -51,10 +53,9 @@ def run_sync_batch_tick(job_log=None) -> tuple[int, str]:
                      synchronize_session=False)
             db.commit()
 
-            # (b) refresh：兜底收割上一批 PARSING 文档的解析状态
-            _refresh_parsing_documents(db)
-
-            # (c) 原子认领：跨源全局 FIFO，SKIP LOCKED 防多 tick 并发重复领取
+            # (b) 原子认领：跨源全局 FIFO，SKIP LOCKED 防多 tick 并发重复领取。
+            # 必须先于 refresh 执行：refresh 受外部服务延迟影响可能耗时数分钟，
+            # 排在前面会饿死认领（新任务迟迟不流转 running，run 被看门狗收编）。
             claimed = db.execute(
                 select(SyncTask)
                 .where(SyncTask.status == "pending", SyncTask.kind == "sync",
@@ -69,6 +70,9 @@ def run_sync_batch_tick(job_log=None) -> tuple[int, str]:
                 t.error = ""
                 tasks.append(t.id)
             db.commit()  # 释放行锁；running 即「已认领」标记
+
+            # (c) refresh：兜底收割 PARSING 文档的解析状态（每轮随机限量）
+            _refresh_parsing_documents(db)
     except Exception as exc:  # noqa: BLE001
         logger.exception("批处理认领失败")
         if job_log is not None:
@@ -89,7 +93,12 @@ def run_sync_batch_tick(job_log=None) -> tuple[int, str]:
     return 200, message
 
 
-# ---------- (b) 解析状态兜底 ----------
+# ---------- (c) 解析状态兜底 ----------
+# 单轮 refresh 限量：僵尸 PARSING 文档（进程崩溃遗留，job 已丢失无法推进）可能
+# 积压数百篇，全量刷新会让 tick 长时间不返回（实测 293 篇 >150s）。随机抽样限量
+# 保证每轮 tick 时长有界，僵尸文档跨轮轮到；认领已前置，不再受 refresh 拖累。
+_REFRESH_DOCS_PER_TICK = 15
+
 
 def _refresh_parsing_documents(db) -> None:
     """刷新 library 同步源关联的 PARSING 文档（MinerU job 查询 + 完成时落地分段）。"""
@@ -106,7 +115,8 @@ def _refresh_parsing_documents(db) -> None:
         except ValueError:
             continue
     rows = db.query(LibraryDocument.id, LibraryDocument.library_id).filter(
-        LibraryDocument.id.in_(uuids), LibraryDocument.status == "PARSING").all()
+        LibraryDocument.id.in_(uuids), LibraryDocument.status == "PARSING") \
+        .order_by(func.random()).limit(_REFRESH_DOCS_PER_TICK).all()
     if not rows:
         return
     try:

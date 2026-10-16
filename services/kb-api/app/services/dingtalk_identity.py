@@ -68,8 +68,13 @@ async def resolve_user(s: AsyncSession, corp_id: str, dt_userid: str,
     return user, binding
 
 
-def user_public_dict(user: User, binding: DingtalkBinding | None = None) -> dict:
-    """与 /auth/login、/users/me 同构的用户字典（前端 UserInfo）。"""
+def user_public_dict(user: User, binding: DingtalkBinding | None = None,
+                     menu_permissions: list[str] | None = None) -> dict:
+    """与 /auth/login、/users/me 同构的用户字典（前端 UserInfo）。
+
+    menu_permissions：解析后的菜单权限（None=全部菜单，列表=白名单）；
+    调用方（login / users/me）自行查询注入。
+    """
     return {
         "id": str(user.id), "username": user.username, "email": user.email or "",
         "role": user.role, "is_active": user.is_active,
@@ -77,6 +82,7 @@ def user_public_dict(user: User, binding: DingtalkBinding | None = None) -> dict
         "must_change_password": bool(user.must_change_password),
         "password_updated_at": (user.password_updated_at.isoformat()
                                 if user.password_updated_at else None),
+        "menu_permissions": menu_permissions,
         "dingtalk_binding": {
             "dt_name": binding.dt_name or "", "dt_userid": binding.dt_userid or "",
             "dt_unionid": binding.dt_unionid or "", "corp_id": binding.corp_id or "",
@@ -85,7 +91,8 @@ def user_public_dict(user: User, binding: DingtalkBinding | None = None) -> dict
     }
 
 
-def issue_token(user: User, binding: DingtalkBinding | None = None) -> dict:
+def issue_token(user: User, binding: DingtalkBinding | None = None,
+                menu_permissions: list[str] | None = None) -> dict:
     """与 /auth/login 同构的 JWT 响应；payload 携带 dtu/mcp 供按用户调钉钉与前端守卫。"""
     return {
         "access_token": create_jwt(
@@ -93,6 +100,6 @@ def issue_token(user: User, binding: DingtalkBinding | None = None) -> dict:
             dt_unionid=(binding.dt_unionid if binding else None),
             must_change_password=bool(user.must_change_password)),
         "token_type": "bearer",
-        "user": user_public_dict(user, binding),
+        "user": user_public_dict(user, binding, menu_permissions),
         "must_set_password": bool(user.must_change_password),
     }

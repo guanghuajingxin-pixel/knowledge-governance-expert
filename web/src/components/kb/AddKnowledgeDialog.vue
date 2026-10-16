@@ -423,7 +423,7 @@ async function handleClosed() {
             :show-file-list="true"
             :on-change="handleUploadChange"
             :on-remove="handleUploadRemove"
-            accept=".docx,.doc,.txt,.xlsx,.xls,.pptx,.ppt,.pdf,.png,.jpg,.wps,.md"
+            accept=".docx,.doc,.txt,.xlsx,.xls,.pptx,.ppt,.pdf,.png,.jpg,.jpeg,.webp,.bmp,.md"
             class="local-upload"
           >
             <div class="upload-icons">
@@ -434,7 +434,7 @@ async function handleClosed() {
             </div>
             <div class="upload-text">点击上传或者拖拽文件到这里</div>
             <div class="upload-formats">
-              支持格式：docx, doc, txt, xlsx, xls, pptx, ppt, pdf, png, jpg, wps, md
+              支持格式：docx, doc, txt, xlsx, xls, pptx, ppt, pdf, md, png, jpg, jpeg, webp, bmp（图片经 OCR 识别文字）
             </div>
             <div class="upload-limits">
               每个文件不超过 150MB · 可同时批量上传 20 个文件

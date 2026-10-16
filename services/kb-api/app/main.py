@@ -215,6 +215,8 @@ from app.routes import platform_keys
 app.include_router(platform_keys.router)
 from app.routes import portal_accounts
 app.include_router(portal_accounts.router)
+from app.routes import portal_roles
+app.include_router(portal_roles.router)
 app.include_router(settings_route.router)
 app.include_router(knowledge_center.router)
 app.include_router(knowledge_library.router)

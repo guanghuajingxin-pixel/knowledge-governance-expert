@@ -14,6 +14,13 @@ const appStore = useAppStore()
 const userStore = useUserStore()
 
 const userRole = computed(() => userStore.userInfo?.role)
+/** 菜单权限白名单：null/undefined = 未配置（全部可见）；列表 key 即路由 path（门户角色管理配置） */
+const menuPermissions = computed<string[] | null>(() => userStore.userInfo?.menu_permissions ?? null)
+
+function menuAllowed(path: string): boolean {
+  if (!menuPermissions.value) return true
+  return menuPermissions.value.includes(path)
+}
 
 // 菜单显示配置：后端配置的隐藏菜单路径列表（默认空 = 全部显示）
 const hiddenMenus = ref<string[]>([])
@@ -82,14 +89,19 @@ const allMenuItems = computed<MenuItem[]>(() =>
     })),
 )
 
-// 过滤角色可见的菜单项
+// 过滤角色可见 + 菜单权限白名单内的菜单项
 function filterByRole(items: MenuItem[]): MenuItem[] {
   return items.filter((item) => {
     const r = router.getRoutes().find((rr) => rr.path === item.path)
     const roles = r?.meta?.roles as string[] | undefined
-    if (roles) return !!userRole.value && roles.includes(userRole.value)
+    if (roles && !menuAllowedByRoles(roles)) return false
+    if (!menuAllowed(item.path)) return false
     return true
   })
+}
+
+function menuAllowedByRoles(roles: string[]): boolean {
+  return !!userRole.value && roles.includes(userRole.value)
 }
 
 // 功能区：feature 组（含二级分组，受菜单显示配置控制）
@@ -148,7 +160,8 @@ const configMenuItems = computed(() =>
     if (item.parent) return false // 配置区暂不支持二级分组
     const r = router.getRoutes().find((rr) => rr.path === item.path)
     const roles = r?.meta?.roles as string[] | undefined
-    if (roles) return !!userRole.value && roles.includes(userRole.value)
+    if (roles && !menuAllowedByRoles(roles)) return false
+    if (!menuAllowed(item.path)) return false
     return true
   }),
 )

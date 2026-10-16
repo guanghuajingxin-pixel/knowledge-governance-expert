@@ -20,6 +20,8 @@ _MIME_BY_EXT = {
     "png": "image/png",
     "jpg": "image/jpeg",
     "jpeg": "image/jpeg",
+    "webp": "image/webp",
+    "bmp": "image/bmp",
     "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

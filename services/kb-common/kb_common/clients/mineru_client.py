@@ -39,8 +39,9 @@ from kb_common.config import get_settings
 
 logger = logging.getLogger(__name__)
 
-# 走 MinerU 解析的二进制格式（其余扩展名视为不支持）
-BINARY_EXTS = {"pdf", "doc", "docx", "pptx", "ppt", "xlsx", "xls", "html", "htm"}
+# 走 MinerU 解析的二进制格式（其余扩展名视为不支持）；图片走 OCR 产出 markdown
+BINARY_EXTS = {"pdf", "doc", "docx", "pptx", "ppt", "xlsx", "xls", "html", "htm",
+               "png", "jpg", "jpeg", "webp", "bmp"}
 # 本地直读格式
 _LOCAL_EXTS = ("txt", "md", "csv")
 

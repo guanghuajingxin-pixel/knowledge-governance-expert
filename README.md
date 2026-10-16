@@ -62,10 +62,19 @@
 
 本地启动 sidecar：`bash scripts/start-deerflow.sh`（自动准备 Python 3.12 uv 环境）；Docker 全量模式下 `docker-compose.app.yml` 的 `deerflow` 服务自动启动（[services/deerflow/Dockerfile](services/deerflow/Dockerfile)）。
 
-- **文档解析引擎（本地 MinerU）**：二进制办公/PDF 文档（ppt/pptx/doc/docx/xls/xlsx/pdf）由独立的 **MinerU 解析服务**统一转为 Markdown，供 `dingtalk_read_doc` 与本地文档入库 worker（[worker.py](services/kb-api/app/worker.py)）复用。服务为自托管 **MinerU 3.x `mineru-api`**（[scripts/start-mineru.sh](scripts/start-mineru.sh)，独立 venv `services/mineru/.venv`，端口 **2028**，与 DeerFlow sidecar 同模式）：`bash scripts/start-mineru.sh`（首次自动 `uv` 安装 `mineru[core]`；国内默认 `MINERU_MODEL_SOURCE=modelscope`，macOS Apple Silicon 自动 MPS、无 GPU 回退 CPU）。
+- **文档解析引擎（本地 MinerU）**：二进制办公/PDF 文档（ppt/pptx/doc/docx/xls/xlsx/pdf）与图片（png/jpg/jpeg/webp/bmp，OCR 识别文字）由独立的 **MinerU 解析服务**统一转为 Markdown，供 `dingtalk_read_doc` 与本地文档入库 worker（[worker.py](services/kb-api/app/worker.py)）复用。服务为自托管 **MinerU 3.x `mineru-api`**（[scripts/start-mineru.sh](scripts/start-mineru.sh)，独立 venv `services/mineru/.venv`，端口 **2028**，与 DeerFlow sidecar 同模式）：`bash scripts/start-mineru.sh`（首次自动 `uv` 安装 `mineru[core]`；国内默认 `MINERU_MODEL_SOURCE=modelscope`，macOS Apple Silicon 自动 MPS、无 GPU 回退 CPU）。
   - **Office（pptx/docx/xlsx）走 MinerU 原生 OOXML 转换**，纯 Python 实现、秒级返回，**无需下载模型、无需 LibreOffice**；pdf/扫描件走 MinerU `pipeline`（版面/表格/OCR），首次解析时自动下载模型。
   - 调用链：kb-api [agent_internal.py](services/kb-api/app/routes/agent_internal.py) `/internal/dingtalk/content` 下载文件 → [mineru_client.py](services/kb-common/kb_common/clients/mineru_client.py) `parse()` **优先本地引擎**（`POST {MINERU_LOCAL_URL}/file_parse`，multipart `files` + `return_md=true` + `backend=pipeline`，取 `results[].md_content`，默认 `http://127.0.0.1:2028`，可用 env/`mineru_local_url` 关闭或改址）；本地不可用/返回空时**降级本地即时解析**（[agent_internal.py](services/kb-api/app/routes/agent_internal.py) `_local_parse`：python-pptx 逐页抽形状/表格/组合/备注、python-docx 段落+表格+文本框、openpyxl、pdfplumber），再降级 **MinerU 云 API**（需 `MINERU_API_KEY`）。健康检查 `GET http://127.0.0.1:2028/health`。
   - 效果：钉钉「战略报告.pptx」「经营计划 BP.docx」等可在 1–2 秒读出正文（含三大战略等关键内容），智能体据此基于**文档正文**作答而非文件名猜测。
+
+**Wiki 知识库（卡帕提 LLM Wiki 模式，`知识库 → Wiki 库`）**：区别于 RAG「每次查询从原始碎片重新推导」，Wiki 库让 LLM 把原料**编译一次、持续维护**为结构化互链知识页面——知识随原料增加不断沉淀复利。三层结构：原料层（本地上传 + 钉钉引入，复用文档库全管线：两段式暂存/MinerU 解析/钉钉自动同步）→ Wiki 层（LLM 自动生成维护的 `wiki_pages`：主题/实体/对比/概览/问答五类页面，`[[wikilink]]` 互链 + `^[来源:文档名]` 溯源标记）→ 规范层（内置在生成器 prompt）。核心链路与实现：
+
+- **自动生成**：原料解析完成（`_apply_chunks` 汇聚点）自动入队 `wiki_generation_runs`（同库合并 PENDING、每批 5 篇、按库串行）；LLM 两步——①规划（原料摘录 + 现有页面目录 → 页面计划，update 优先防膨胀、跳过人工修正页）②逐页生成（markdown + 互链 + 溯源），最后确定性重建「知识概览」索引页。生成器 [generator.py](services/kb-api/app/services/wiki/generator.py)，LLM 配置走 `llm_profiles` 默认模型 → settings/env 兜底；服务重启把 RUNNING 任务置 FAILED 可重试。
+- **检索应用**：wiki 库检索单元＝STABLE 页面的检索小节（按标题/段落切块，[library_retrieval.py](services/kb-api/app/services/library_retrieval.py) 与文档库同评分管线：词项+向量+rerank，fail-soft）；原料不直接参与该库检索，经页面溯源可达。智能体选库（agent 配置/问答选库/检索测试）与 `/internal/kb/retrieve` 通道均支持 wiki 库。
+- **人工修正保护**：页面可编辑（标记 `edited_by_human`，后续自动生成跳过）；单页可按溯源原料重新生成（清除保护标记）。
+- **Lint 健康检查**：LLM 检查矛盾/孤立页/缺失主题/疑似过期，报告只读（修复靠重新生成/人工编辑）。
+- **问答沉淀（query 闭环）**：问答页回答操作区「沉淀到 Wiki」一键把回答归档为 `qa` 页（不经 LLM，原文入库）即时参与检索。
+- **数据模型**：`wiki_pages`（库内标题唯一）+ `wiki_generation_runs`，迁移 [0061_wiki_library.py](alembic/versions/0061_wiki_library.py)；路由 [wiki_route.py](services/kb-api/app/routes/wiki_route.py)（`/api/v1/wiki/*`），前端 [WikiLibraries.vue](web/src/views/knowledge-libraries/WikiLibraries.vue)（列表）/ [WikiLibraryDetail.vue](web/src/views/knowledge-libraries/WikiLibraryDetail.vue)（页面/原料双视图 + 生成记录 + Lint）/ [WikiPageView.vue](web/src/views/knowledge-libraries/WikiPageView.vue)（页面阅读：wikilink 跳转/溯源/编辑）。
 
 **流式问答**：智能问答页支持 SSE 流式输出。DeerFlow 底座下实时显示 Lead Agent 运行进度（🦌 DeerFlow 2.0 智能体 → 📚 知识检索（第 N 次，含检索词）→ 📌 钉钉知识库检索/目录浏览 → 📖 读取钉钉文档 → ✅ 检索完成 → 🧩 子任务派发/返回 → 🙋 等待确认），回答文本通过 `answer_delta` 事件**逐字流式上屏**（不再等终帧）；回退内置工作流时显示原节点进度（🔍 分类 → ✏️ 改写 → 📚 检索 → ⚖️ 判定 → ✍️ 生成）。后端端点 `POST /api/v1/search/chat/stream`，前端 [chat/index.vue](web/src/views/chat/index.vue) 消费 SSE 事件逐条渲染步骤与增量文本。每个前端会话携带 `session_id`（重新对话时刷新）映射 DeerFlow thread。引用来源默认只展示前 5 条，超过可「展开全部」。模型下拉只显示系统配置中已配置可用的 LLM（未配置时显示占位引导）。
 
@@ -109,7 +118,7 @@ cd services/kb-common && uv sync && cd -
 cd services/kb-api && uv sync && cd -
 cd services/faq-service && uv sync && cd -
 
-# 4. 初始化数据库表 +（仅本地开发）初始化管理员
+# 4. 初始化数据库表 +（仅本地登录策略）初始化管理员
 cd services/kb-common && uv run alembic -c ../../alembic.ini upgrade head
 cd services/kb-common
 read -s KGE_BOOTSTRAP_ADMIN_PASSWORD
@@ -117,7 +126,12 @@ export KGE_BOOTSTRAP_ADMIN_PASSWORD
 uv run python ../../scripts/seed_admin.py
 unset KGE_BOOTSTRAP_ADMIN_PASSWORD
 
-# 5. 启动 4 个应用进程（各开一个终端）
+# 5. 一键启动（认证策略在启动时确定，二选一；详见下方「本地开发认证策略」）
+./scripts/start-dev.sh local      # 本地登录策略：本地账号密码登录，权限由系统自己管理
+./scripts/start-dev.sh keycloak   # Keycloak 策略：经隧道调用 10.10.166.2 身份中心统一登录（服务端默认模式）
+./scripts/start-dev.sh status     # 查看运行状态；stop / restart 同理
+
+# 手动启动（备选）：
 cd services/kb-api && uv run uvicorn app.main:app --reload --port 8000
 cd services/kb-api && uv run celery -A app.worker worker -Q ingestion --concurrency=2 -l info
 cd services/faq-service && uv run uvicorn app.main:app --reload --port 8004
@@ -126,45 +140,28 @@ bash scripts/start-mineru.sh         # 本地 MinerU 文档解析引擎:2028（�
 # 不启动 sidecar 也可问答：kb-api 健康检查失败时自动回退内置 LangGraph 工作流
 # 不启动 MinerU 也能读办公文档：自动降级 python-pptx/python-docx 等即时解析（图片型/扫描件效果弱于 MinerU）
 
-# 6. 启动前端
+# 6. 前端由 start-dev.sh 一并启动（web :3000 / portal :80）；手动方式：
 cd web && pnpm install && pnpm dev   # http://localhost:3000
+cd portal && PORTAL_API_TARGET=http://127.0.0.1:8000 pnpm dev
 ```
 
 本地开发管理员的用户名默认为 `admin`；初始化时必须通过 `KGE_BOOTSTRAP_ADMIN_PASSWORD` 显式提供强密码。生产环境使用统一身份中心创建和授权管理员，不运行本地种子脚本。
 
-### 本地统一登录（复用远端身份中心，无需本地 Keycloak）
+### 本地开发认证策略（启动时确定，二选一）
 
-`.env` 开启 `AUTH_PROVIDER=keycloak` 后，本地开发登录走远端服务器（10.10.166.2）上的 Keycloak 身份中心，本地无需运行 Keycloak 容器（`jack-identity-*` 保持停止即可）：
+认证策略没有免密旁路：要么本地账号登录，要么走远端身份中心统一登录，均由 `scripts/start-dev.sh` 在**服务启动时**注入环境变量确定（`AUTH_PROVIDER` 运行期不变，切换策略需重启）。
 
-```bash
-# 1. 建立统一登录隧道（幂等；本地 8180 → 远端 Keycloak，需能 SSH 到 10.10.166.2）
-./scripts/dev-sso-tunnel.sh          # start / stop / status
+**策略一：本地登录（`./scripts/start-dev.sh local`）**
 
-# 2. 确认仓库根 .env 已配置（首次切换时添加）：
-#    AUTH_PROVIDER=keycloak
-#    OIDC_ISSUER=http://127.0.0.1:8180/realms/jack
+`AUTH_PROVIDER=local`：账号存本地 PG `users` 表，密码登录；门户「系统管理 → 用户管理 / 角色管理」直接管理本地账号、角色与菜单权限（系统自己管理权限）。无本地账号时先运行 `scripts/seed_admin.py` 建管理员。
 
-# 3. 重启 kb-api / faq-service（settings 启动时加载），前端无需改动
-```
+**策略二：Keycloak 统一登录（`./scripts/start-dev.sh keycloak`，服务端默认模式）**
 
-原理：远端 Keycloak 的 hostname 即 `http://127.0.0.1:8180`，与隧道本地地址一致——浏览器登录回调、后端 JWKS 拉取、token issuer 校验三者天然对齐；远端 `knowledge-web` 客户端已放行 `http://localhost:3000/*` 回调。登录账号用远端身份中心的业务账号（如 `admin`，super_admin）。首次在本地库登录某账号时若报「该用户名已有本地账号」（409），需在本地 `user_identities` 表手工补绑该身份（issuer = `http://127.0.0.1:8180/realms/jack`，subject = Keycloak 用户 UUID）。
+`AUTH_PROVIDER=keycloak` + SSH 隧道调用 **10.10.166.2** 上的身份中心——本地调试也一样，不依赖本地 Keycloak 容器（`jack-identity-*` 保持停止即可）。隧道由 `scripts/dev-sso-tunnel.sh` 维护（start-dev.sh 自动拉起）。
 
-注意：门户回调仅在 `http://localhost:3200` 放行；用 `http://127.0.0.1:3200` 访问门户时 Keycloak 会拒绝回调（Invalid redirect_uri）。统一登录不可用（隧道断开等）时可使用下方调试旁路登录。
+原理：远端 Keycloak 的 hostname 即 `http://127.0.0.1:8180`，与隧道本地地址一致——浏览器登录回调、后端 JWKS 拉取、token issuer 校验三者天然对齐；远端 `knowledge-web` 客户端已放行 `http://localhost:3000/*` 回调。登录账号用远端身份中心的业务账号。首次在本地库登录某账号时若报「该用户名已有本地账号」（409），需在本地 `user_identities` 表手工补绑该身份（issuer = `http://127.0.0.1:8180/realms/jack`，subject = Keycloak 用户 UUID）。
 
-### 本地调试旁路登录（绕过统一登录，仅本地开发）
-
-无需隧道与统一登录即可调试门户与知识治理专家，且**全程免登录**：用 `localhost`（或 `127.0.0.1`）打开门户(:3200)会自动本地调试登录直接进入；从门户点「知识治理专家」打开 web(:3300) 时同样自动登录，直达业务页面。自动登录失败（如 kb-api 未启动）则停在登录页，仍可手动点「本地调试登录（绕过统一登录）」按钮。
-
-原理：前端用写死令牌 `kge-local-dev-token` 调 `POST /api/v1/auth/dev-login`，kb-api 校验 `.env` 中的 `DEV_AUTH_TOKEN` 后换发**标准 JWT**（与 `/auth/login` 同构，带过期时间），后续每个请求仍走完整鉴权；调试身份为本地库 `DEV_AUTH_USER`（缺省 `admin`，不存在则自动建档 super_admin）。
-
-```bash
-# 仓库根 .env（本地已有配置则无需改动）：
-#   DEV_AUTH_TOKEN=kge-local-dev-token   # 与前端写死值一致；生产 .env.app 严禁配置
-#   DEV_AUTH_USER=admin
-# 重启 kb-api / faq-service 后生效
-```
-
-安全边界：`DEV_AUTH_TOKEN` 默认未配置（`/auth/dev-login` 返回 404，功能完全关闭）；生产 `.env.app` 严禁配置。门户与 web 在本地地址会跳过 SSO 自动 check-sso（127.0.0.1 / 非生产端口不在 Keycloak 回调白名单，顶层重定向会被身份中心拒绝），自动调试登录仅在本地地址触发，生产域名不显示入口也不自动登录。账号管理页等依赖 Keycloak 管理接口的功能仍需隧道在线。
+注意：门户回调仅在 `http://localhost:3200` 放行；用 `http://127.0.0.1:3200` 访问门户时 Keycloak 会拒绝回调（Invalid redirect_uri）。仓库根 `.env` 的 `AUTH_PROVIDER` 仅作为兜底基线，`start-dev.sh` 启动时的环境变量优先；不再提供 `DEV_AUTH_TOKEN` 写死令牌的调试旁路登录（已移除）。
 
 ### 模式 2：Docker 全量模式（需基础设施已启动）
 
@@ -309,7 +306,7 @@ KB_API_INTERNAL_URL=http://kb-api:8000
 
 **LLM_API_KEY / MINERU_API_KEY 可选**：
 - `LLM_API_KEY` 留空 → 问答接口返回「LLM 调用失败：... 请在 设置 页配置 LLM API Key」，文档检索/溯源照常工作。
-- `MINERU_API_KEY` 配置后 -> PDF/DOCX/PPTX/XLSX/HTML 走 MinerU 云解析；留空 -> 仅 txt/md/csv 本地解析兜底，二进制格式会抛「解析 {ext} 需配置 MINERU_API_KEY」（可在「平台管理 -> 模型设置」页运行时配置，密钥落地 settings 表，GET 接口掩码 `value=""` + `is_set=true`）。
+- `MINERU_API_KEY` 配置后 -> PDF/DOCX/PPTX/XLSX/HTML/图片（png/jpg/jpeg/webp/bmp，OCR）走 MinerU 云解析；留空 -> 仅 txt/md/csv 本地解析兜底，二进制格式会抛「解析 {ext} 需配置 MINERU_API_KEY」（可在「平台管理 -> 模型设置」页运行时配置，密钥落地 settings 表，GET 接口掩码 `value=""` + `is_set=true`）。
 
 ## 冒烟测试
 
@@ -346,7 +343,7 @@ KB_API_INTERNAL_URL=http://kb-api:8000
 | 问答提示「尚未配置 LLM API Key」 | 智能问答依赖 LLM；在「系统配置 → 接入配置」填 LLM API Key 并保存，或在 `.env` 配 `LLM_API_KEY`。Agent 未配置时返回 `config_error=llm_not_configured`（不再 500），前端在对话气泡给出跳转按钮 |
 | Rerank 重排配置与切换 | 「系统配置 → 接入配置 → Rerank 重排模型」支持**多条配置 + 单选生效**：`+ 新增重排配置` 弹窗填写服务地址（含完整 `/rerank` 路径）/模型名，API Key **非必填**（内网/自建服务如 Xinference 常免鉴权，测试连通性不再强制 Key）；编辑时 Key 留空保持不变。点行首 radio 切换生效（同名「生效中」标记），生效配置自动回写 `rerank_api_url` / `rerank_api_key` / `rerank_model` 运行值；删除生效配置时自动回退到最早一条，全部删除则清空（检索跳过重排，RRF/BM25 兜底）。首次升级后旧单值配置自动迁移为「默认·旧配置迁移」并标记生效 |
 | Embedding 多模型/多环境配置 | 「系统配置 → 接入配置 → Embedding 向量模型」支持**多条配置 + 单选生效**（迁移 0034 `embedding_profiles`，与 LLM/Rerank 同模式）：`+ 新增配置` 弹窗填写名称/服务地址（OpenAI 兼容，需含 `/v1`）/模型名/API Key（非必填，内网/自建服务常免鉴权），**「拉取模型列表」**可直接从服务拉取候选模型下拉选择（也可手输）；弹窗内「测试连通性」发最小 embed 请求（编辑态 Key 留空回退已存值）；点行首 radio 切换生效，生效配置自动回写 `embedding_base_url` / `embedding_api_key` / `embedding_model` 运行值，本地 RAG 入库/检索链路无需改动；删除生效配置自动回退最早一条。首次升级后旧单值配置自动迁移为「默认·旧配置迁移」并标记生效。注意切换模型须保持向量维度与既有 ES 索引一致（1024 维），否则需重建索引 |
-| PDF/DOCX 解析失败 | 配置 `MINERU_API_KEY` 后支持 PDF/DOCX/PPTX/XLSX/HTML 云解析；留空则仅 txt/md/csv 本地解析，二进制格式抛「需配置 MINERU_API_KEY」 |
+| PDF/DOCX 解析失败 | 配置 `MINERU_API_KEY` 后支持 PDF/DOCX/PPTX/XLSX/HTML/图片（png/jpg/jpeg/webp/bmp）云解析；留空则仅 txt/md/csv 本地解析，二进制格式抛「需配置 MINERU_API_KEY」 |
 | `uv sync` 报 `kb-common` 找不到 | 在 `services/kb-common` 先 `uv sync`；Docker 构建已通过 repo-root context 解决 |
 | 端口 8000/8004 被占用 | `lsof -i :8000` 找到进程；或改 uvicorn `--port` |
 | dev-network 不存在 | 先启 dev-services compose：`docker compose ls` 找配置文件 |

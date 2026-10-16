@@ -5,13 +5,9 @@ import { useUserStore } from '@/stores/user'
 import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
 import { User, Lock, Reading } from '@element-plus/icons-vue'
 import type { LoginResponse } from '@/types/user'
-import { authConfig, authError, devSession, isLocalAddress, sso } from '@/auth/session'
-import { devLogin } from '@/api/auth'
+import { authConfig, authError, sso } from '@/auth/session'
 import { safeRedirect } from '@/utils/dingtalk-auth'
 import { ElAlert, ElButton } from 'element-plus'
-
-/** 本地调试登录令牌（写死，与 kb-api .env 的 DEV_AUTH_TOKEN 一致；仅本地开发使用） */
-const DEV_LOGIN_TOKEN = 'kge-local-dev-token'
 
 const router = useRouter()
 const route = useRoute()
@@ -19,7 +15,6 @@ const userStore = useUserStore()
 
 const formRef = ref<FormInstance>()
 const loading = ref(false)
-const devLoading = ref(false)
 const form = reactive({
   username: '',
   password: '',
@@ -32,27 +27,12 @@ const rules: FormRules = {
 
 onMounted(async () => {
   if (authConfig.value?.provider !== 'keycloak') return
-  if (isLocalAddress) {
-    // 本地地址自动本地调试登录：从门户入口进入免登录；失败留在登录页手动选择
-    await tryAutoDevLogin()
-    return
-  }
-  // Direct opens and portal "open in new window" links must start the same
-  // Keycloak flow automatically; check-sso alone only checks for a session
+  // keycloak 模式（含本地调试）：一律走统一登录（本地经 scripts/start-dev.sh keycloak
+  // 建立 166.2 身份中心隧道）；Direct opens and portal "open in new window" links must
+  // start the same Keycloak flow automatically; check-sso alone only checks for a session
   // and otherwise leaves users on a login page that requires another click.
   await handleSsoLogin()
 })
-
-async function tryAutoDevLogin() {
-  devLoading.value = true
-  try {
-    const res = await devLogin(DEV_LOGIN_TOKEN)
-    devSession.value = true
-    ElMessage.success('已本地调试登录')
-    postLogin(res)
-  } catch { /* 静默：登录页上的手动入口仍然可用 */ }
-  finally { devLoading.value = false }
-}
 
 /** 登录成功统一落地：token/userInfo 入 store 后回原目标 */
 function postLogin(res: LoginResponse) {
@@ -79,22 +59,6 @@ async function handleLogin() {
   })
 }
 
-async function handleDevLogin() {
-  if (devLoading.value) return
-  devLoading.value = true
-  try {
-    const res = await devLogin(DEV_LOGIN_TOKEN)
-    devSession.value = true
-    ElMessage.success('登录成功')
-    postLogin(res)
-  } catch (e) {
-    const err = e as { response?: { data?: { detail?: string } } }
-    ElMessage.error(err?.response?.data?.detail || '本地调试登录失败，请确认 kb-api 已配置 DEV_AUTH_TOKEN。')
-  } finally {
-    devLoading.value = false
-  }
-}
-
 function reloadPage() { window.location.reload() }
 async function handleSsoLogin() {
   try { await sso.login(safeRedirect(route.query.redirect, '/chat')) }
@@ -113,9 +77,6 @@ async function handleSsoLogin() {
       <div v-if="authConfig?.provider === 'keycloak'" class="sso-pane">
         <p class="sso-desc">使用杰克科技统一账号，与 AIGC 门户共享登录身份和权限。</p>
         <el-button type="primary" style="width: 100%" @click="handleSsoLogin">使用企业统一账号登录</el-button>
-        <el-button v-if="isLocalAddress" class="dev-login-button" :loading="devLoading" style="width: 100%" @click="handleDevLogin">
-          本地调试登录（绕过统一登录）
-        </el-button>
       </div>
       <el-button v-if="!authConfig" style="width: 100%; margin-top: 16px" @click="reloadPage">重试连接</el-button>
       <el-form
@@ -174,10 +135,6 @@ async function handleSsoLogin() {
 }
 .sso-pane {
   padding: 8px 0 4px;
-}
-.dev-login-button {
-  margin-top: 12px;
-  margin-left: 0;
 }
 .sso-desc {
   margin: 0 0 20px;

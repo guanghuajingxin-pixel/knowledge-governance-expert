@@ -309,7 +309,7 @@ export function resolveLucideIcon(name: string): Component {
 
 ### 7.4 验证要求
 
-- 任何改动后先跑最小验证:`pnpm type-check`(必),再按需 `pnpm test:run` / `pnpm build`。
+- 任何改动后先跑最小验证:`pnpm type-check` + `pnpm test:run`(均必过,完成任务后必须跑自动化测试),再按需 `pnpm build`。
 - 样式与布局改动必须在浏览器目检真实渲染(dev server),不能只看代码通过。
 - 失败先读报错修正;同一动作失败两次换路径,不静默降级交付。
 

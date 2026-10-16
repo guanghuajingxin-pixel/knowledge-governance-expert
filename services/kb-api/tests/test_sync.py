@@ -400,5 +400,84 @@ class BatchDeleteTasksTests(unittest.TestCase):
             self.assertIsNotNone(db.get(SyncTask, task.id))
 
 
+class SyncRunStartedAtTests(unittest.TestCase):
+    """回归：SyncRun.started_at 必须与看门狗同基准（应用本地时间）。
+
+    此前仅 server_default=func.now()（Docker PG 会话时区=UTC），与 runtime
+    看门狗的本地 datetime.now() 相差 8 小时：batch run 创建后首轮扫描即被判
+    stale 误杀，任务全部标记「批处理长时间未推进」失败。
+    """
+
+    def setUp(self):
+        self.sql = create_engine('sqlite://', poolclass=StaticPool,
+                                 connect_args={'check_same_thread': False})
+        for model in (SyncSource, SyncRun, SyncTask):
+            model.__table__.create(self.sql)
+        self.sessions = sessionmaker(bind=self.sql, expire_on_commit=False)
+        with self.sessions() as db:
+            db.add(SyncSource(name='t', workspace_id='w', root_node_id='r',
+                              dataset_id='1', dataset_name='t', enabled=True))
+            db.commit()
+        self.addCleanup(self.sql.dispose)
+
+    def test_started_at_uses_local_time_not_stale_on_create(self):
+        from datetime import datetime as dt, timedelta
+        with self.sessions() as db:
+            run = SyncRun(source_id=1, status='running')
+            db.add(run)
+            db.commit()
+            self.assertIsNotNone(run.started_at)
+            # 应用侧默认值与本地 now 差值应在秒级（UTC 基准时差数小时）
+            drift = abs((dt.now() - run.started_at).total_seconds())
+            self.assertLess(drift, 300)
+            # 看门狗口径（runtime.recover_interrupted_runs）：新建 run 不得判 stale
+            stale_before = dt.now() - timedelta(seconds=21600)
+            self.assertGreaterEqual(run.started_at, stale_before)
+
+
+class BatchRefreshCapTests(unittest.TestCase):
+    """回归：批处理 (b) refresh 阶段每轮限量刷新 PARSING 文档。
+
+    僵尸 PARSING 文档（进程崩溃遗留）可能积压数百篇；此前全量刷新会让
+    tick 长时间不返回（实测 293 篇 >150s），任务认领被饿死、新任务永远 pending。
+    """
+
+    def setUp(self):
+        self.sql = create_engine('sqlite://', poolclass=StaticPool,
+                                 connect_args={'check_same_thread': False})
+        for model in (SyncSource, SyncRun, SyncDocumentMapping, SyncLog, SyncFailure, SyncTask):
+            model.__table__.create(self.sql)
+        self.doc_cls = _library_document_stub()
+        self.doc_cls.__table__.create(self.sql)
+        self.sessions = sessionmaker(bind=self.sql, expire_on_commit=False)
+        with self.sessions() as db:
+            db.add(SyncSource(name='t', workspace_id='w', root_node_id='r',
+                              dataset_id='1', dataset_name='t', enabled=True))
+            db.commit()
+        self.addCleanup(self.sql.dispose)
+
+    def test_refresh_caps_parsing_docs_per_tick(self):
+        from app.services.sync import batch
+        seen = {}
+
+        async def fake_parsings(pairs):
+            seen['count'] = len(pairs)
+
+        with self.sessions() as db:
+            # 20 篇僵尸 PARSING 文档（带同步映射），超过单轮限量 15
+            for i in range(20):
+                doc = self.doc_cls(library_id=1, status='PARSING')
+                db.add(doc)
+                db.flush()
+                db.add(SyncDocumentMapping(source_id=1, node_id=f'n{i}', name=f'd{i}',
+                                           category='', status='synced',
+                                           document_id=str(doc.id)))
+            db.commit()
+            with patch.object(batch, 'LibraryDocument', self.doc_cls), \
+                 patch.object(batch, '_refresh_parsings', fake_parsings):
+                batch._refresh_parsing_documents(db)
+            self.assertEqual(seen.get('count'), batch._REFRESH_DOCS_PER_TICK)
+
+
 if __name__ == '__main__':
     unittest.main()

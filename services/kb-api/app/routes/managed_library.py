@@ -295,7 +295,9 @@ async def list_documents(library_id: int, s: AsyncSession = Depends(get_session)
     return [doc_out(doc) for doc in docs]
 
 
-_ALLOWED_UPLOAD_EXTS = {"pdf", "docx", "txt", "md", "csv", "xlsx", "pptx", "html"}
+# 图片格式走 MinerU OCR（png/jpg/jpeg/webp/bmp），产出 markdown 后正常分段索引
+_ALLOWED_UPLOAD_EXTS = {"pdf", "docx", "txt", "md", "csv", "xlsx", "pptx", "html",
+                        "png", "jpg", "jpeg", "webp", "bmp"}
 _MAX_UPLOAD_BYTES = 64 * 1024 * 1024
 
 

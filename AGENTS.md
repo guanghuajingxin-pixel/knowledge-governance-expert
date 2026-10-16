@@ -24,14 +24,21 @@ read -s KGE_BOOTSTRAP_ADMIN_PASSWORD && export KGE_BOOTSTRAP_ADMIN_PASSWORD
 uv run python ../../scripts/seed_admin.py
 unset KGE_BOOTSTRAP_ADMIN_PASSWORD
 
-# 5. Start 3 application processes (separate terminals)
+# 5. 一键启动（认证策略在启动时确定，二选一）
+./scripts/start-dev.sh local      # 本地登录策略：本地账号密码登录（AUTH_PROVIDER=local），权限由系统自己管理
+./scripts/start-dev.sh keycloak   # Keycloak 策略：经 SSH 隧道调用 10.10.166.2 身份中心统一登录（服务端默认模式）
+./scripts/start-dev.sh status     # 状态；stop / restart 同理（kb-worker 不默认启动，需要时手动起）
+
+# 5b. 手动启动（备选）
 cd services/kb-api && uv run uvicorn app.main:app --reload --port 8000
 cd services/kb-api && uv run celery -A app.worker worker -Q ingestion --concurrency=2 -l info
 cd services/faq-service && uv run uvicorn app.main:app --reload --port 8004
 
-# 6. Start frontend
-cd web && pnpm install && pnpm dev   # http://localhost:3000 or :5173
+# 6. 前端由 start-dev.sh 一并启动（web :3000 / portal :80）；手动方式：
+cd web && pnpm install && pnpm dev   # http://localhost:3000
 ```
+
+> **认证策略约定**：本地调试不再有免密自动登录通道（DEV_AUTH_TOKEN/dev-login 已移除）。两种策略均由 `scripts/start-dev.sh` 启动时注入：`local` = 本地账号登录（门户用户/角色管理直接管本地 PG 账号）；`keycloak` = 经 `scripts/dev-sso-tunnel.sh` 隧道调用 166.2 身份中心（本地调试也一样，issuer `http://127.0.0.1:8180/realms/jack` 三方一致零改造）。**服务端（10.10.166.2）默认使用 KEYCLOAK 登录**。
 
 ### Docker all-in-one mode
 
@@ -62,6 +69,21 @@ pnpm test:run     # vitest run
 # EXTERNAL_SERVICES=1 → services already running, skip launch
 # SMOKE_USERNAME / SMOKE_PASSWORD → 已注册的隔离测试账号凭据（必填）
 ```
+
+## 自动化测试要求（强制）
+
+任何代码任务完成后**必须运行对应层级的自动化测试，全绿才算交付**；测试未跑或未通过，不得宣告任务完成。
+
+| 改动范围 | 必跑命令 | 框架 |
+|---------|---------|------|
+| 前端（`web/`） | `cd web && pnpm type-check && pnpm test:run` | Vitest（+ @vue/test-utils、msw） |
+| 后端（`services/kb-api`） | `cd services/kb-api && uv run pytest tests/ -q` | pytest + pytest-asyncio（`asyncio_mode=auto`） |
+| 核心链路 / 发布前 | `./scripts/smoke_test.sh` | E2E 冒烟（需 `SMOKE_USERNAME`/`SMOKE_PASSWORD`） |
+
+- 测试文件位置：前端 `web/src/**/__tests__/*.test.ts`；后端 `services/kb-api/tests/test_*.py`。
+- **测试同步维护**：改动函数签名、路由行为或数据流时，必须同步更新受影响测试——禁止只改实现留下挂掉的测试；测试失败时先修复（实现对齐测试或测试对齐新实现），不留「已知失败」。
+- 新增功能或修复 bug 时补充对应测试用例，覆盖主路径与边界条件。
+- 首轮 vitest 报错可能是瞬时 worker 崩溃，重跑一次确认后再排查。
 
 ## Architecture
 
@@ -167,7 +189,7 @@ The tab bar (`stores/tabs.ts` + `components/layout/TabBar.vue`) maintains open p
 /admin/api-keys           → API Key management (super_admin/admin)
 ```
 
-> 账户管理已上收统一门户（Keycloak 账号中心）：系统内不提供用户管理/个人账户页面与本地用户 CRUD 接口；`AUTH_PROVIDER=local` 仅保留密码登录通道（建号走 `scripts/seed_admin.py`），`AUTH_PROVIDER=keycloak` 下用户由门户统一登录自动建档。
+> 账户与角色管理已上收统一门户（portal/）：门户「系统管理」提供用户管理 + 角色管理（双认证模式可用），后端接口为 `/api/v1/portal/accounts`（local 模式操作本地 PG `users` 表，keycloak 模式经 Keycloak Admin API）与 `/api/v1/portal/roles`。角色含 4 个系统角色 + 自定义角色（`portal_roles` 表），菜单权限可按角色或按用户覆盖（`portal_user_menu_overrides` 表，NULL=全部菜单、列表=白名单）；自定义角色仅控制菜单可见性，应用内写能力仍由系统角色的 `require_role` 决定（自定义角色用户=查看者能力）。系统内不提供用户管理/个人账户页面；`AUTH_PROVIDER=local` 的首个管理员走 `scripts/seed_admin.py`，`AUTH_PROVIDER=keycloak` 下用户由门户统一登录自动建档（自定义角色经 `oidc.role_from_claims(known_codes)` 兼容登录）。
 
 ### API Layer
 

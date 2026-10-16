@@ -14,7 +14,7 @@ import asyncio
 import json
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import datetime
 from uuid import UUID
 
 from openai import AsyncOpenAI
@@ -42,8 +42,9 @@ PAGE_TYPES = {"topic": "主题", "entity": "实体", "comparison": "对比", "ov
 _locks: dict[int, asyncio.Lock] = {}
 
 
-def _utcnow() -> datetime:
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+def _now() -> datetime:
+    """naive 本地时间：与 0060 迁移后的东 8 区时间基准一致。"""
+    return datetime.now()
 
 
 def _library_lock(library_id: int) -> asyncio.Lock:
@@ -232,13 +233,13 @@ async def _run_ingest(run_id: UUID) -> None:
             return
         lib = await s.get(KnowledgeLibrary, run.library_id)
         if lib is None or lib.library_type != "wiki":
-            run.status, run.error, run.finished_at = "FAILED", "目标库不存在或不是 Wiki 库", _utcnow()
+            run.status, run.error, run.finished_at = "FAILED", "目标库不存在或不是 Wiki 库", _now()
             await s.commit()
             return
         all_ids = list(run.document_ids or [])
         run.document_ids = all_ids[:BATCH_SIZE]
         overflow_ids = all_ids[BATCH_SIZE:]
-        run.status, run.started_at = "RUNNING", _utcnow()
+        run.status, run.started_at = "RUNNING", _now()
         if overflow_ids:
             s.add(WikiGenerationRun(library_id=run.library_id, kind="ingest",
                                     document_ids=overflow_ids, triggered_by=run.triggered_by))
@@ -390,7 +391,7 @@ async def rebuild_overview(library_id: int) -> None:
             WikiPage.page_type != "overview",
         ).order_by(WikiPage.title))).scalars().all()
         sections: list[str] = [f"# {lib.name} · 知识概览",
-                               f"> LLM 依据库内原料维护的知识索引，共 {len(pages)} 个页面。最后更新：{_utcnow():%Y-%m-%d %H:%M}"]
+                               f"> LLM 依据库内原料维护的知识索引，共 {len(pages)} 个页面。最后更新：{_now():%Y-%m-%d %H:%M}"]
         for type_key in ("topic", "entity", "comparison", "qa"):
             group = [p for p in pages if p.page_type == type_key]
             if not group:
@@ -446,7 +447,7 @@ async def _run_lint(run_id: UUID) -> None:
         run = await s.get(WikiGenerationRun, run_id, with_for_update=True)
         if run is None or run.status != "PENDING":
             return
-        run.status, run.started_at = "RUNNING", _utcnow()
+        run.status, run.started_at = "RUNNING", _now()
         await s.commit()
         library_id = run.library_id
     try:
@@ -487,7 +488,7 @@ async def _finish_lint(run_id: UUID, report: dict) -> None:
     async with SessionLocal() as s:
         run = await s.get(WikiGenerationRun, run_id)
         if run is not None:
-            run.status, run.report, run.finished_at = "COMPLETED", report, _utcnow()
+            run.status, run.report, run.finished_at = "COMPLETED", report, _now()
             await s.commit()
 
 
@@ -535,7 +536,7 @@ async def _fail_run(run_id: UUID, error: str) -> None:
     async with SessionLocal() as s:
         run = await s.get(WikiGenerationRun, run_id)
         if run is not None and run.status != "COMPLETED":
-            run.status, run.error, run.finished_at = "FAILED", error[:2000], _utcnow()
+            run.status, run.error, run.finished_at = "FAILED", error[:2000], _now()
             await s.commit()
 
 
@@ -547,7 +548,7 @@ async def _finish_run(run_id: UUID, created: int, updated: int, message: str = "
             run.status = "COMPLETED"
             run.pages_created, run.pages_updated = created, updated
             run.error = message[:2000]
-            run.finished_at = _utcnow()
+            run.finished_at = _now()
             await s.commit()
     logger.info("wiki ingest run %s done: +%d ~%d (%s)", run_id, created, updated, triggered_by)
 
@@ -559,7 +560,7 @@ async def recover_interrupted_runs() -> None:
             WikiGenerationRun.status == "RUNNING"))).scalars().all()
         for run in runs:
             run.status, run.error = "FAILED", "服务重启中断，可重试"
-            run.finished_at = _utcnow()
+            run.finished_at = _now()
         if runs:
             await s.commit()
             logger.info("wiki: %d interrupted run(s) marked FAILED on startup", len(runs))

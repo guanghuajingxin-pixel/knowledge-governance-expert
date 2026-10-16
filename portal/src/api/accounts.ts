@@ -1,4 +1,5 @@
 import { ApiError } from './chat'
+import type { MenuPermissionsResult } from './roles'
 
 export interface PortalAccount {
   id: string
@@ -8,6 +9,8 @@ export interface PortalAccount {
   enabled: boolean
   created_at: string | null
   roles: string[]
+  /** 用户级菜单权限覆盖原始值：null = 跟随角色；列表 = 自定义白名单 */
+  menu_permissions: string[] | null
 }
 
 export interface AccountListResult {
@@ -19,7 +22,8 @@ export interface AccountListResult {
 
 export interface AccountCreateInput {
   username: string
-  name: string
+  /** Keycloak 模式有姓名（firstName）；local 模式无此列可不传 */
+  name?: string
   email?: string
   role: string
   password: string
@@ -82,4 +86,9 @@ export function resetPassword(token: string, id: string, body: { password: strin
 
 export function deleteAccount(token: string, id: string): Promise<void> {
   return request<void>('DELETE', `/${id}`, token)
+}
+
+/** 更新用户级菜单权限覆盖：menu_permissions 为 null 时恢复跟随角色 */
+export function updateMenuPermissions(token: string, id: string, body: { menu_permissions: string[] | null }): Promise<MenuPermissionsResult> {
+  return request<MenuPermissionsResult>('PUT', `/${id}/menu-permissions`, token, body)
 }

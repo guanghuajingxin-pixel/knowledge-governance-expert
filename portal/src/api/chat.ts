@@ -1,7 +1,7 @@
 export interface Message { role: 'user' | 'assistant'; content: string }
 export interface Citation { document_title?: string; content?: string }
 export interface ChatResult { answer: string; citations?: Citation[]; config_error?: string }
-export interface Identity { access_token: string; user: { username: string; role?: string; must_change_password?: boolean }; must_set_password?: boolean }
+export interface Identity { access_token: string; user: { username: string; role?: string; must_change_password?: boolean; menu_permissions?: string[] | null }; must_set_password?: boolean }
 export class ApiError extends Error {
   constructor(message: string, public status = 0) { super(message); this.name = 'ApiError' }
 }

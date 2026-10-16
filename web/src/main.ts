@@ -5,7 +5,7 @@ import 'element-plus/dist/index.css'
 import zhCn from 'element-plus/es/locale/lang/zh-cn'
 import * as ElementPlusIconsVue from '@element-plus/icons-vue'
 import App from './App.vue'
-import { devSession, initializeAuth, sso, authError } from './auth/session'
+import { initializeAuth, sso, authError } from './auth/session'
 import { useUserStore } from './stores/user'
 import './styles/global.scss'
 import { setupMock } from './mocks'
@@ -23,8 +23,6 @@ async function bootstrap() {
   if (sso.isSso) {
     userStore.logout(false)
     sso.subscribe(token => {
-      // 本地调试会话优先：SSO 适配器未认证时的空 token 不得清除调试 JWT
-      if (devSession.value) return
       if (token) userStore.setToken(token)
       else userStore.logout(false)
     })
@@ -36,6 +34,10 @@ async function bootstrap() {
         authError.value = failure.response?.data?.detail || '统一账号尚未获得访问权限，请联系管理员。'
       }
     }
+  } else if (userStore.token) {
+    // local 模式：登录信息存 localStorage 缓存（含菜单权限），启动补拉一次消除
+    // 管理员改角色/菜单权限后的缓存陈旧（401 静默清态，不打断界面）
+    userStore.fetchUserInfo().catch(() => {})
   }
   const { default: router } = await import('./router')
   app.use(router)

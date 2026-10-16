@@ -1,40 +1,45 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import {
   ElButton, ElCheckbox, ElDialog, ElDropdown, ElDropdownItem, ElDropdownMenu, ElEmpty,
-  ElForm, ElFormItem, ElIcon, ElInput, ElMessage, ElMessageBox, ElOption, ElSelect,
-  ElTable, ElTableColumn, ElTag, ElTooltip, vLoading,
+  ElForm, ElFormItem, ElIcon, ElInput, ElMessage, ElMessageBox, ElOption, ElRadio, ElRadioGroup,
+  ElSelect, ElTable, ElTableColumn, ElTag, ElTooltip, ElTree, vLoading,
 } from 'element-plus'
-import type { FormInstance, FormRules } from 'element-plus'
+import type { FormInstance, FormRules, TreeInstance } from 'element-plus'
 import { Ellipsis, HelpCircle, Plus, RefreshCw } from '@lucide/vue'
-import { accessToken, identity } from '../auth/session'
+import { accessToken, authConfig, identity } from '../auth/session'
 import {
   createAccount, deleteAccount, listAccounts, resetPassword, updateAccount,
-  type PortalAccount,
+  updateMenuPermissions, type PortalAccount,
 } from '../api/accounts'
+import { listMenus, listRoles, type MenuNode, type PortalRole } from '../api/roles'
 
-const ROLE_ORDER = ['super_admin', 'admin', 'editor', 'viewer'] as const
-const ROLE_LABELS: Record<string, string> = {
-  super_admin: '超级管理员', admin: '管理员', editor: '编辑者', viewer: '查看者',
-}
-const ROLE_HELP = '知识治理角色：查看者可检索问答，编辑者可维护知识库，管理员可管理知识库与系统配置'
+const SYSTEM_ROLE_CODES = ['super_admin', 'admin', 'editor', 'viewer'] as const
+const MENU_OVERRIDE_HELP = '针对单个用户覆盖角色配置的菜单权限；「跟随角色」即取消覆盖，恢复使用角色配置'
 const PASSWORD_HINT = '至少 12 位，须包含大写字母、小写字母和数字'
 const PAGE_SIZE = 20
 
 const accounts = ref<PortalAccount[]>([])
+const roles = ref<PortalRole[]>([])
+const menuGroups = ref<Array<{ key: string; label: string; children: MenuNode[] }>>([])
+const groupKeys = computed(() => new Set(menuGroups.value.map(g => g.key)))
 const loading = ref(false)
 const searchInput = ref('')
 const search = ref('')
 const page = ref(1)
 const hasMore = ref(false)
 
+const isLocalMode = computed(() => authConfig.value?.provider === 'local')
 const isSuperAdmin = computed(() => identity.value?.user.role === 'super_admin')
-const roleOptions = computed(() => ROLE_ORDER
-  .filter(role => role !== 'super_admin' || isSuperAdmin.value)
-  .map(role => ({ value: role, label: ROLE_LABELS[role] })))
+/** 系统角色固定顺序在前，自定义角色按创建时间跟后 */
+const roleOptions = computed(() => roles.value
+  .filter(role => role.code !== 'super_admin' || isSuperAdmin.value)
+  .map(role => ({ value: role.code, label: role.name })))
+const roleLabel = (code: string) => roles.value.find(r => r.code === code)?.name || code
 
 function effectiveRole(row: PortalAccount): string {
-  for (const role of ROLE_ORDER) if (row.roles.includes(role)) return role
+  for (const code of SYSTEM_ROLE_CODES) if (row.roles.includes(code)) return code
+  for (const role of row.roles) return role
   return ''
 }
 
@@ -58,6 +63,17 @@ async function load() {
     ElMessage.error(error instanceof Error ? error.message : '加载账号列表失败。')
   } finally {
     loading.value = false
+  }
+}
+
+async function loadRoles() {
+  try {
+    const token = await accessToken()
+    const [roleItems, menus] = await Promise.all([listRoles(token), listMenus(token)])
+    roles.value = roleItems
+    menuGroups.value = menus.groups
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '加载角色与菜单配置失败。')
   }
 }
 
@@ -113,7 +129,7 @@ async function submitCreate() {
     const token = await accessToken()
     await createAccount(token, {
       username: createForm.username.trim(),
-      name: createForm.name.trim(),
+      ...(isLocalMode.value ? {} : { name: createForm.name.trim() }),
       email: createForm.email.trim() || undefined,
       role: createForm.role,
       password: createForm.password,
@@ -154,7 +170,7 @@ async function submitEdit() {
   try {
     const token = await accessToken()
     await updateAccount(token, editTarget.value.id, {
-      name: editForm.name.trim(),
+      ...(isLocalMode.value ? {} : { name: editForm.name.trim() }),
       email: editForm.email.trim(),
       role: editForm.role,
     })
@@ -202,6 +218,56 @@ async function submitReset() {
   }
 }
 
+/** ------------------------------------------------------------ 菜单权限覆盖 */
+
+const menusVisible = ref(false)
+const menusSubmitting = ref(false)
+const menusTarget = ref<PortalAccount | null>(null)
+const menusTreeRef = ref<TreeInstance>()
+const menusForm = reactive({ mode: 'follow' as 'follow' | 'custom' })
+const menusOriginalKeys = ref<string[]>([])
+
+function openMenus(row: PortalAccount) {
+  menusTarget.value = row
+  menusForm.mode = row.menu_permissions === null ? 'follow' : 'custom'
+  menusOriginalKeys.value = row.menu_permissions ?? []
+  menusVisible.value = true
+}
+
+watch(menusVisible, (open) => {
+  if (open) nextTick(() => menusTreeRef.value?.setCheckedKeys(menusOriginalKeys.value))
+  else menusTreeRef.value?.setCheckedKeys([])
+})
+
+async function submitMenus() {
+  if (!menusTarget.value) return
+  let menuPermissions: string[] | null
+  if (menusForm.mode === 'follow') {
+    menuPermissions = null
+  } else {
+    menuPermissions = (menusTreeRef.value?.getCheckedKeys() as string[] || [])
+      .filter(key => !groupKeys.value.has(key))
+    if (!menuPermissions.length) {
+      ElMessage.warning('自定义菜单权限至少勾选一个菜单')
+      return
+    }
+  }
+  menusSubmitting.value = true
+  try {
+    const token = await accessToken()
+    await updateMenuPermissions(token, menusTarget.value.id, { menu_permissions: menuPermissions })
+    ElMessage.success(menusForm.mode === 'follow' ? '已恢复跟随角色' : '菜单权限已更新')
+    menusVisible.value = false
+    void load()
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '更新菜单权限失败。')
+  } finally {
+    menusSubmitting.value = false
+  }
+}
+
+/** ------------------------------------------------------------ 停用 / 删除 */
+
 async function toggleEnabled(row: PortalAccount) {
   if (row.enabled) {
     const confirmed = await ElMessageBox.confirm(`停用后「${row.username}」将立即无法登录，确认停用？`, '停用账号', {
@@ -236,20 +302,21 @@ async function removeAccount(row: PortalAccount) {
 }
 
 async function handleMore(command: string | number | object, row: PortalAccount) {
-  if (command === 'toggle') await toggleEnabled(row)
+  if (command === 'menus') openMenus(row)
+  else if (command === 'toggle') await toggleEnabled(row)
   else if (command === 'delete') await removeAccount(row)
 }
 
-onMounted(() => { void load() })
+onMounted(() => { void load(); void loadRoles() })
 </script>
 
 <template>
-  <section class="accounts-page" aria-label="账号管理">
+  <section class="accounts-page" aria-label="用户管理">
     <div class="accounts-wrap">
       <header class="accounts-header">
         <div>
-          <h2>账号管理</h2>
-          <p>统一管理门户账号、知识治理角色与密码</p>
+          <h2>用户管理</h2>
+          <p>{{ isLocalMode ? '管理企业账号、角色分配与菜单权限' : '统一管理门户账号、角色分配与菜单权限' }}</p>
         </div>
         <div class="header-actions">
           <el-tooltip content="刷新列表">
@@ -261,8 +328,10 @@ onMounted(() => { void load() })
 
       <div class="filter-bar">
         <el-input
-          v-model="searchInput" placeholder="搜索账号 / 姓名 / 邮箱" clearable
-          style="width: 260px" aria-label="搜索账号" @keyup.enter="applySearch" @clear="applySearch"
+          v-model="searchInput"
+          :placeholder="isLocalMode ? '搜索账号 / 邮箱' : '搜索账号 / 姓名 / 邮箱'"
+          clearable style="width: 260px" aria-label="搜索账号"
+          @keyup.enter="applySearch" @clear="applySearch"
         />
         <div class="filter-actions">
           <el-button @click="applySearch">查询</el-button>
@@ -272,16 +341,19 @@ onMounted(() => { void load() })
 
       <el-table v-loading="loading" :data="accounts" border aria-label="账号列表">
         <el-table-column prop="username" label="账号" min-width="150" show-overflow-tooltip />
-        <el-table-column prop="name" label="姓名" min-width="110" show-overflow-tooltip />
+        <el-table-column v-if="!isLocalMode" prop="name" label="姓名" min-width="110" show-overflow-tooltip />
         <el-table-column label="邮箱" min-width="200" show-overflow-tooltip>
           <template #default="{ row }">
             <span v-if="row.email">{{ row.email }}</span>
             <span v-else class="muted">—</span>
           </template>
         </el-table-column>
-        <el-table-column label="角色" width="110">
+        <el-table-column label="角色" width="140">
           <template #default="{ row }">
-            <el-tag v-if="effectiveRole(row as PortalAccount)" type="info" effect="plain">{{ ROLE_LABELS[effectiveRole(row as PortalAccount)] }}</el-tag>
+            <template v-if="effectiveRole(row as PortalAccount)">
+              <el-tag type="info" effect="plain">{{ roleLabel(effectiveRole(row as PortalAccount)) }}</el-tag>
+              <el-tag v-if="(row as PortalAccount).menu_permissions !== null" class="custom-tag" size="small" effect="plain">自定义</el-tag>
+            </template>
             <span v-else class="muted">未授权</span>
           </template>
         </el-table-column>
@@ -295,16 +367,17 @@ onMounted(() => { void load() })
             <el-button link type="primary" size="small" :disabled="!canWrite(row as PortalAccount)" @click="openEdit(row as PortalAccount)">编辑</el-button>
             <el-button link type="primary" size="small" :disabled="!canWrite(row as PortalAccount)" @click="openReset(row as PortalAccount)">重置密码</el-button>
             <el-dropdown
-              v-if="!isSelf(row as PortalAccount)" trigger="click" placement="bottom-end"
-              popper-class="accounts-menu" @command="(command: string | number | object) => handleMore(command, row as PortalAccount)"
+              trigger="click" placement="bottom-end" popper-class="accounts-menu"
+              @command="(command: string | number | object) => handleMore(command, row as PortalAccount)"
             >
-              <el-button link size="small" :disabled="!canWrite(row as PortalAccount)" aria-label="更多操作">
+              <el-button link size="small" aria-label="更多操作">
                 <el-icon><Ellipsis /></el-icon>
               </el-button>
               <template #dropdown>
                 <el-dropdown-menu>
-                  <el-dropdown-item command="toggle">{{ row.enabled ? '停用账号' : '启用账号' }}</el-dropdown-item>
-                  <el-dropdown-item command="delete" divided class="danger-action">删除账号</el-dropdown-item>
+                  <el-dropdown-item command="menus">菜单权限{{ (row as PortalAccount).menu_permissions !== null ? '（自定义）' : '' }}</el-dropdown-item>
+                  <el-dropdown-item v-if="!isSelf(row as PortalAccount)" command="toggle">{{ row.enabled ? '停用账号' : '启用账号' }}</el-dropdown-item>
+                  <el-dropdown-item v-if="!isSelf(row as PortalAccount)" command="delete" divided class="danger-action">删除账号</el-dropdown-item>
                 </el-dropdown-menu>
               </template>
             </el-dropdown>
@@ -330,14 +403,13 @@ onMounted(() => { void load() })
         <el-form-item label="账号" prop="username">
           <el-input v-model="createForm.username" maxlength="100" placeholder="登录账号，如 zhangsan" />
         </el-form-item>
-        <el-form-item label="姓名" prop="name">
+        <el-form-item v-if="!isLocalMode" label="姓名" prop="name">
           <el-input v-model="createForm.name" maxlength="100" placeholder="真实姓名，便于识别" />
         </el-form-item>
         <el-form-item label="邮箱" prop="email">
           <el-input v-model="createForm.email" maxlength="200" placeholder="选填" />
         </el-form-item>
-        <el-form-item prop="role">
-          <template #label>角色<el-tooltip :content="ROLE_HELP"><el-icon class="label-help"><HelpCircle /></el-icon></el-tooltip></template>
+        <el-form-item label="角色" prop="role">
           <el-select v-model="createForm.role" style="width: 100%">
             <el-option v-for="option in roleOptions" :key="option.value" :value="option.value" :label="option.label" />
           </el-select>
@@ -358,14 +430,13 @@ onMounted(() => { void load() })
     <el-dialog v-model="editVisible" :title="`编辑账号 · ${editTarget?.username || ''}`" width="min(480px, 92vw)"
                :close-on-click-modal="false" :show-close="!editSubmitting" :close-on-press-escape="!editSubmitting">
       <el-form ref="editFormRef" :model="editForm" :rules="editRules" label-width="88px">
-        <el-form-item label="姓名" prop="name">
+        <el-form-item v-if="!isLocalMode" label="姓名" prop="name">
           <el-input v-model="editForm.name" maxlength="100" />
         </el-form-item>
         <el-form-item label="邮箱" prop="email">
           <el-input v-model="editForm.email" maxlength="200" placeholder="留空表示清除邮箱" />
         </el-form-item>
-        <el-form-item prop="role">
-          <template #label>角色<el-tooltip :content="ROLE_HELP"><el-icon class="label-help"><HelpCircle /></el-icon></el-tooltip></template>
+        <el-form-item label="角色" prop="role">
           <el-select v-model="editForm.role" style="width: 100%" :disabled="editTarget ? isSelf(editTarget) : false">
             <el-option v-for="option in roleOptions" :key="option.value" :value="option.value" :label="option.label" />
           </el-select>
@@ -392,6 +463,30 @@ onMounted(() => { void load() })
         <el-button type="primary" :loading="resetSubmitting" @click="submitReset">重置密码</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog v-model="menusVisible" :title="`菜单权限 · ${menusTarget?.username || ''}`" width="min(560px, 92vw)"
+               :close-on-click-modal="false" :show-close="!menusSubmitting" :close-on-press-escape="!menusSubmitting">
+      <el-form label-width="88px">
+        <el-form-item>
+          <template #label>权限模式<el-tooltip :content="MENU_OVERRIDE_HELP"><el-icon class="label-help"><HelpCircle /></el-icon></el-tooltip></template>
+          <div class="menu-editor">
+            <el-radio-group v-model="menusForm.mode">
+              <el-radio value="follow">跟随角色</el-radio>
+              <el-radio value="custom">自定义选择</el-radio>
+            </el-radio-group>
+            <div v-show="menusForm.mode === 'custom'" class="menu-tree">
+              <el-tree ref="menusTreeRef" :data="menuGroups" node-key="key" show-checkbox
+                       default-expand-all :props="{ label: 'label', children: 'children' }"
+                       aria-label="菜单权限选择树" />
+            </div>
+          </div>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="menusVisible = false">取消</el-button>
+        <el-button type="primary" :loading="menusSubmitting" @click="submitMenus">保存权限</el-button>
+      </template>
+    </el-dialog>
   </section>
 </template>
 
@@ -405,10 +500,13 @@ onMounted(() => { void load() })
 .filter-bar { display: flex; align-items: center; gap: 12px; }
 .filter-actions { margin-left: auto; }
 .muted { color: var(--el-text-color-placeholder); }
+.custom-tag { margin-left: 6px; }
 .pagination-row { display: flex; align-items: center; justify-content: flex-end; gap: 12px; }
 .page-info { font-size: 12px; color: var(--el-text-color-secondary); }
 .pager-buttons { display: flex; gap: 8px; }
 .label-help { margin-left: 4px; font-size: 14px; color: var(--el-text-color-secondary); cursor: help; vertical-align: -2px; }
+.menu-editor { width: 100%; display: flex; flex-direction: column; gap: 8px; }
+.menu-tree { border: 1px solid var(--el-border-color-lighter); border-radius: 6px; padding: 8px; max-height: 260px; overflow: auto; }
 </style>
 <style lang="scss">
 /* 下拉弹层挂在 body 下，需全局样式 */

@@ -1,8 +1,9 @@
-"""统一门户账号管理（仅管理员）：账号生命周期与角色分配全部经由身份中心完成。
+"""统一门户账号管理（仅管理员）：账号生命周期与角色分配 + 用户级菜单权限覆盖。
 
 护栏：
 - 不能停用 / 删除 / 改动自己的角色（防自锁与自我提权）；
-- 仅超级管理员可分配 super_admin 角色，且 admin 不可修改 super_admin 账号（防提权）。
+- 仅超级管理员可分配 super_admin 角色，且 admin 不可修改 super_admin 账号（防提权）；
+- 管理员可修改自己的菜单权限覆盖（系统管理页不受菜单权限限制，无自锁风险）。
 """
 from uuid import UUID
 
@@ -13,6 +14,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.deps import require_role
 from app.services import portal_accounts
 from app.services.audit import write_audit
+from app.services.menu_permissions import (
+    overrides_for, resolve_for_account, role_menu_override, set_role_menu_override,
+)
+from app.services.menu_registry import KNOWN_MENU_KEYS
 from kb_common.database import get_session
 
 router = APIRouter(prefix='/api/v1/portal/accounts', tags=['门户账号管理'])
@@ -26,15 +31,23 @@ def _no_cache(response):
     response.headers['Pragma'] = 'no-cache'
 
 
+async def _attach_overrides(s: AsyncSession, items: list[dict]) -> list[dict]:
+    """为账号列表补齐用户级菜单权限覆盖原始值（null = 跟随角色）。"""
+    overrides = await overrides_for(s, [row['id'] for row in items])
+    for row in items:
+        row['menu_permissions'] = overrides.get(row['id'])
+    return items
+
+
 class AccountCreate(BaseModel):
     username: str = Field(min_length=1, max_length=100)
-    name: str = Field(min_length=1, max_length=100)
+    name: str = Field(default='', max_length=100)
     email: str | None = Field(default=None, max_length=200)
     role: str = 'viewer'
     password: str = Field(min_length=1, max_length=128)
     temporary: bool = True
 
-    @field_validator('username', 'name')
+    @field_validator('username')
     @classmethod
     def nonempty(cls, value):
         if not value.strip():
@@ -71,6 +84,23 @@ class PasswordReset(BaseModel):
     temporary: bool = True
 
 
+class MenuPermissionsUpdate(BaseModel):
+    """menu_permissions：null = 删除覆盖行（恢复跟随角色）；非空列表 = 自定义白名单。"""
+    menu_permissions: list[str] | None
+
+    @field_validator('menu_permissions')
+    @classmethod
+    def validate_keys(cls, value):
+        if value is None:
+            return None
+        if not value:
+            raise ValueError('自定义菜单权限至少选择一个菜单，或选择「跟随角色」')
+        unknown = [k for k in value if k not in KNOWN_MENU_KEYS]
+        if unknown:
+            raise ValueError(f'未知的菜单标识：{unknown[0]}')
+        return value
+
+
 class AccountOut(BaseModel):
     id: str
     username: str
@@ -79,6 +109,7 @@ class AccountOut(BaseModel):
     enabled: bool
     created_at: str | None
     roles: list[str]
+    menu_permissions: list[str] | None = None
 
 
 class AccountListOut(BaseModel):
@@ -86,6 +117,11 @@ class AccountListOut(BaseModel):
     page: int
     page_size: int
     has_more: bool
+
+
+class MenuPermissionsOut(BaseModel):
+    menu_permissions: list[str] | None
+    effective: list[str] | None
 
 
 def _ensure_assignable(role: str | None, actor) -> None:
@@ -105,15 +141,17 @@ def _ensure_not_self(target: dict, actor, message: str) -> None:
 
 @router.get('', response_model=AccountListOut)
 async def list_accounts(response: Response, search: str = '', page: int = 1,
-                        page_size: int = DEFAULT_PAGE_SIZE, u=Depends(admin)):
+                        page_size: int = DEFAULT_PAGE_SIZE, u=Depends(admin),
+                        s: AsyncSession = Depends(get_session)):
     _no_cache(response)
     page = max(1, page)
     page_size = min(max(1, page_size), MAX_PAGE_SIZE)
-    # Keycloak 用户列表无总数：多取一条判断是否还有下一页
+    # 两模式均无总数语义：多取一条判断是否还有下一页
     items = await portal_accounts.list_accounts(
-        search=search.strip(), first=(page - 1) * page_size, max_results=page_size + 1)
-    return {'items': items[:page_size], 'page': page, 'page_size': page_size,
-            'has_more': len(items) > page_size}
+        s, search=search.strip(), first=(page - 1) * page_size, max_results=page_size + 1)
+    has_more = len(items) > page_size
+    items = await _attach_overrides(s, items[:page_size])
+    return {'items': items, 'page': page, 'page_size': page_size, 'has_more': has_more}
 
 
 @router.post('', response_model=AccountOut, status_code=201)
@@ -122,8 +160,9 @@ async def create_account(body: AccountCreate, request: Request, response: Respon
     _no_cache(response)
     _ensure_assignable(body.role, u)
     result = await portal_accounts.create_account(
-        username=body.username, name=body.name, email=body.email, role=body.role,
+        s, username=body.username, name=body.name, email=body.email, role=body.role,
         password=body.password, temporary=body.temporary)
+    result['menu_permissions'] = None
     await write_audit(s, actor_id=u.id, action='portal_account_create', target_type='portal_account',
                       target_id=result['id'],
                       detail={'username': result['username'], 'name': body.name,
@@ -136,12 +175,13 @@ async def create_account(body: AccountCreate, request: Request, response: Respon
 async def update_account(user_id: UUID, body: AccountUpdate, request: Request, response: Response,
                          u=Depends(admin), s: AsyncSession = Depends(get_session)):
     _no_cache(response)
-    target = await portal_accounts.get_account(user_id)
+    target = await portal_accounts.get_account(s, user_id)
     _ensure_writable(target, u)
     if (body.role is not None or body.enabled is False):
         _ensure_not_self(target, u, '不能对当前登录账号执行此操作')
     _ensure_assignable(body.role, u)
-    result = await portal_accounts.update_account(user_id, **body.model_dump(exclude_none=True))
+    result = await portal_accounts.update_account(s, user_id, **body.model_dump(exclude_none=True))
+    result['menu_permissions'] = await role_menu_override(s, str(user_id))
     await write_audit(s, actor_id=u.id, action='portal_account_update', target_type='portal_account',
                       target_id=str(user_id), detail=body.model_dump(exclude_none=True), request=request)
     return result
@@ -150,9 +190,9 @@ async def update_account(user_id: UUID, body: AccountUpdate, request: Request, r
 @router.put('/{user_id}/password', status_code=204)
 async def reset_password(user_id: UUID, body: PasswordReset, request: Request,
                          u=Depends(admin), s: AsyncSession = Depends(get_session)):
-    target = await portal_accounts.get_account(user_id)
+    target = await portal_accounts.get_account(s, user_id)
     _ensure_writable(target, u)
-    await portal_accounts.reset_password(user_id, password=body.password, temporary=body.temporary)
+    await portal_accounts.reset_password(s, user_id, password=body.password, temporary=body.temporary)
     await write_audit(s, actor_id=u.id, action='portal_account_reset_password', target_type='portal_account',
                       target_id=str(user_id), detail={'temporary': body.temporary}, request=request)
 
@@ -160,9 +200,25 @@ async def reset_password(user_id: UUID, body: PasswordReset, request: Request,
 @router.delete('/{user_id}', status_code=204)
 async def delete_account(user_id: UUID, request: Request,
                          u=Depends(admin), s: AsyncSession = Depends(get_session)):
-    target = await portal_accounts.get_account(user_id)
+    target = await portal_accounts.get_account(s, user_id)
     _ensure_writable(target, u)
     _ensure_not_self(target, u, '不能删除当前登录账号')
-    await portal_accounts.delete_account(user_id)
+    await portal_accounts.delete_account(s, user_id)
     await write_audit(s, actor_id=u.id, action='portal_account_delete', target_type='portal_account',
                       target_id=str(user_id), detail={'username': target['username']}, request=request)
+
+
+@router.put('/{user_id}/menu-permissions', response_model=MenuPermissionsOut)
+async def update_menu_permissions(user_id: UUID, body: MenuPermissionsUpdate,
+                                  request: Request, response: Response,
+                                  u=Depends(admin), s: AsyncSession = Depends(get_session)):
+    """用户级菜单权限覆盖：null 恢复跟随角色；列表为自定义白名单。"""
+    _no_cache(response)
+    target = await portal_accounts.get_account(s, user_id)
+    _ensure_writable(target, u)
+    await set_role_menu_override(s, str(user_id), body.menu_permissions)
+    effective = await resolve_for_account(s, target)
+    await write_audit(s, actor_id=u.id, action='portal_menu_override_update',
+                      target_type='portal_account', target_id=str(user_id),
+                      detail={'menu_permissions': body.menu_permissions}, request=request)
+    return {'menu_permissions': body.menu_permissions, 'effective': effective}

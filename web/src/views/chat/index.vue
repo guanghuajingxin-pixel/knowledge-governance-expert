@@ -969,6 +969,45 @@ async function submitCorrection() {
     corrSubmitting.value = false
   }
 }
+
+// ===== 问答沉淀：把有价值的回答归档为 Wiki 页面（LLM Wiki 的 query 闭环） =====
+const canArchive = computed(() => ['super_admin', 'admin', 'editor'].includes(userStore.userInfo?.role || ''))
+const archiveVisible = ref(false)
+const archiveSaving = ref(false)
+const wikiLibs = ref<WikiLibrary[]>([])
+const archiveForm = ref({ libraryId: null as number | null, title: '', question: '', content: '' })
+async function openArchive(m: ChatMsg, _index: number) {
+  if (!wikiLibs.value.length) {
+    try { wikiLibs.value = (await listWikiLibraries()).filter(l => l.enabled) } catch { /* 打开弹窗前静默 */ }
+  }
+  if (!wikiLibs.value.length) {
+    ElMessage.warning('暂无已启用的 Wiki 库，请先在「知识库 → Wiki 库」创建')
+    return
+  }
+  const question = questionOf(m)
+  archiveForm.value = {
+    libraryId: wikiLibs.value[0].id,
+    title: (question || '问答沉淀').replace(/\s+/g, ' ').slice(0, 50),
+    question: question.slice(0, 2000),
+    content: m.content,
+  }
+  archiveVisible.value = true
+}
+async function saveArchive() {
+  const f = archiveForm.value
+  if (!f.libraryId) { ElMessage.warning('请选择 Wiki 库'); return }
+  if (!f.title.trim()) { ElMessage.warning('请输入页面标题'); return }
+  archiveSaving.value = true
+  try {
+    await archiveQaToWiki(f.libraryId, { title: f.title.trim(), content: f.content, question: f.question.trim() })
+    archiveVisible.value = false
+    ElMessage.success('已沉淀为 Wiki 页面，即时参与检索')
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail || e?.message || '沉淀失败')
+  } finally {
+    archiveSaving.value = false
+  }
+}
 </script>
 
 <template>
@@ -1182,6 +1221,9 @@ async function submitCorrection() {
                       <el-tooltip content="复制答案" placement="top">
                         <el-icon class="msg-act-icon" @click="copyText(m.content)"><CopyDocument /></el-icon>
                       </el-tooltip>
+                      <el-tooltip v-if="canArchive && m.done" content="沉淀到 Wiki" placement="top">
+                        <el-icon class="msg-act-icon" @click="openArchive(m, i)"><Notebook /></el-icon>
+                      </el-tooltip>
                     </span>
                     <div v-if="m.citations && m.citations.length" class="refs">
                       <div class="refs-title">
@@ -1311,6 +1353,28 @@ async function submitCorrection() {
       <template #footer>
         <el-button @click="corrVisible = false">取消</el-button>
         <el-button type="primary" :loading="corrSubmitting" @click="submitCorrection">提交纠错</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 问答沉淀：回答归档为 Wiki 页面 -->
+    <el-dialog v-model="archiveVisible" title="沉淀到 Wiki" width="min(560px, 94vw)" :close-on-click-modal="false">
+      <el-form label-width="90px">
+        <el-form-item label="Wiki 库" required>
+          <el-select v-model="archiveForm.libraryId" placeholder="选择目标 Wiki 库" style="width: 100%">
+            <el-option v-for="l in wikiLibs" :key="l.id" :value="l.id" :label="l.name" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="页面标题" required>
+          <el-input v-model="archiveForm.title" maxlength="200" show-word-limit />
+        </el-form-item>
+        <el-form-item label="来源问题">
+          <el-input v-model="archiveForm.question" type="textarea" :rows="2" maxlength="2000" placeholder="本页沉淀自哪个问题（可编辑）" />
+        </el-form-item>
+      </el-form>
+      <div class="archive-hint">回答原文将作为「问答」页存入库中并即时参与检索；可在 Wiki 库详情页继续编辑维护。</div>
+      <template #footer>
+        <el-button @click="archiveVisible = false">取消</el-button>
+        <el-button type="primary" :loading="archiveSaving" @click="saveArchive">沉淀</el-button>
       </template>
     </el-dialog>
     </div>
@@ -1873,4 +1937,5 @@ button.mobile-only { display: none; }
 .evidence-status { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
 .evidence-warning { margin-bottom: 8px; }
 .evidence-excerpt { white-space: pre-wrap; max-height: 300px; overflow: auto; line-height: 1.7; overflow-wrap: anywhere; }
+.archive-hint { font-size: 12px; color: var(--el-text-color-secondary); margin: 4px 0 0 98px; }
 </style>

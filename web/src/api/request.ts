@@ -1,7 +1,7 @@
 import axios, { type AxiosInstance, type InternalAxiosRequestConfig } from 'axios'
 import { ElMessage } from 'element-plus'
 import { useUserStore } from '@/stores/user'
-import { devSession, sso } from '@/auth/session'
+import { sso } from '@/auth/session'
 
 const service: AxiosInstance = axios.create({
   baseURL: import.meta.env.VITE_API_BASE_URL,
@@ -12,8 +12,7 @@ const service: AxiosInstance = axios.create({
 service.interceptors.request.use(
   async (config: InternalAxiosRequestConfig) => {
     const userStore = useUserStore()
-    // 本地调试会话直接使用 /auth/dev-login 换发的 JWT，SSO 适配器未认证不得覆盖
-    if (sso.isSso && !devSession.value) userStore.setToken(await sso.getToken())
+    if (sso.isSso) userStore.setToken(await sso.getToken())
     if (userStore.token) {
       config.headers.Authorization = `Bearer ${userStore.token}`
     }
@@ -30,7 +29,7 @@ service.interceptors.response.use(
     if (error.response?.status === 401) {
       // 登录接口 401（凭证错误）：不登出/不重载，交由调用方 catch 提示或回退
       const reqUrl = error.config?.url || ''
-      if (reqUrl.includes('/auth/login') || reqUrl.includes('/auth/dev-login')) {
+      if (reqUrl.includes('/auth/login')) {
         return Promise.reject(error)
       }
       const userStore = useUserStore()
