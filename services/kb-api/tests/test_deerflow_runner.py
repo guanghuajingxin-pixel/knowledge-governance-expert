@@ -173,9 +173,12 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.final_of(events)["quality"]["verification"], "unverified")
 
     async def test_clarification_ends_with_clarification_answer(self):
-        choice = {"type": "tool_start", "name": "ask_clarification", "args": {"question": "继续探索？", "options": ["继续", "停止"]}}
+        choice = {"type": "tool_start", "name": "ask_clarification", "call_id": "c1",
+                  "args": {"question": "继续探索？", "options": ["继续", "停止"]}}
         events = await self.collect(sse(choice, END))
-        result = self.final_of(events)
-        self.assertEqual(result["answer_status"], "clarification")
-        self.assertIn("继续探索？", result["answer"])
-        self.assertEqual(result["citations"], [])
+        # 新语义：澄清暂停不发 final，下发 choice_pause 供前端渲染选择按钮续跑
+        pauses = [e for e in events if e["type"] == "choice_pause"]
+        self.assertEqual(len(pauses), 1)
+        self.assertEqual(pauses[0]["question"], "继续探索？")
+        self.assertEqual(pauses[0]["options"], ["继续", "停止"])
+        self.assertFalse(any(e["type"] == "final" for e in events))

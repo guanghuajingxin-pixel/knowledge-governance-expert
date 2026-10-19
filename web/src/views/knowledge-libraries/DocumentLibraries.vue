@@ -7,22 +7,27 @@ import { RefreshCw } from '@lucide/vue'
 import { listDocumentLibraries, saveDocumentLibrary, listLibraryDocuments,
   libraryDocumentAction, setDocumentEnabled, deleteLibraryDocument, setDocumentConfig,
   deleteDocumentLibrary, listEmbeddingModels, downloadOriginal, setLibraryDocumentTags,
-  type DocumentLibrary, type LibraryDocument } from '@/api/document-library'
+  type DocumentLibrary, type LibraryDocument, type ProcessingConfig } from '@/api/document-library'
 import IndexSettingsDialog from '@/components/library/IndexSettingsDialog.vue'
 import IndexSettingsPanel from '@/components/library/IndexSettingsPanel.vue'
 import RetrievalSettingsPanel from '@/components/library/RetrievalSettingsPanel.vue'
 import AddKnowledgeDialog from '@/components/kb/AddKnowledgeDialog.vue'
 import KgPagination from '@/components/common/KgPagination.vue'
+import HelpTip from '@/components/common/HelpTip.vue'
 import { fileIcon } from '@/utils/file-icon'
 import { settingsFromConfig, settingsToConfig, librarySettingsFromConfig, defaultSettings,
-  defaultRetrievalSettings, retrievalFromConfig, METHODS, type IndexSettings, type RetrievalSettings } from '@/components/library/index-settings'
+  defaultRetrievalSettings, retrievalFromConfig, type IndexSettings, type RetrievalSettings } from '@/components/library/index-settings'
 import { updateKnowledgeLibrary } from '@/api/knowledge-library'
+import { sourcesStatsAll } from '@/api/sync'
 import { useUserStore } from '@/stores/user'
 import { useTabsStore } from '@/stores/tabs'
 import { SOURCE_LABELS, formatDateTime, formatFileSize, formatSource } from '@/utils/format'
 const router = useRouter()
 const route = useRoute()
 const tabsStore = useTabsStore()
+// 页签路径挂载时固化：KeepAlive 缓存期间全局 route 会指向其它页面，
+// 异步回调里更新页签标题必须用本页路径，否则会把当前页签改名
+const tabPath = route.path
 const props = defineProps<{ openLibId?: number }>()
 const canPublish = computed(() => ['admin', 'super_admin'].includes(useUserStore().userInfo?.role || ''))
 const libraries = ref<DocumentLibrary[]>([])
@@ -63,7 +68,14 @@ watch(docFilters, () => { docPage.value = 1 })
 
 // ===== 批量管理：复选框常显，选中≥1个后激活「批量管理」，下拉选择批量操作（移除需二次确认） =====
 const selectedDocs = ref<LibraryDocument[]>([])
+// 文档表格 ref：row-key + reserve-selection 让轮询重拉/翻页后勾选保留，
+// 用户主动操作（训练/移除等）完成后由 clearDocSelection 主动清空
+const docsTableRef = ref()
 function onSelectionChange(rows: LibraryDocument[]) { selectedDocs.value = rows }
+function clearDocSelection() {
+  docsTableRef.value?.clearSelection()
+  selectedDocs.value = []
+}
 function batchCommand(cmd: string | number | object) {
   if (cmd === 'train') batchTrain()
   else if (cmd === 'download') batchDownload()
@@ -90,16 +102,17 @@ function removeBatchTag(t: string) { batchTags.value = batchTags.value.filter(x 
 
 // 批量操作逐个执行，单个失败不阻断其余文档
 async function batchTrain() {
-  const targets = selectedDocs.value.filter(d => d.status !== 'PARSING' && d.status !== 'PENDING')
-  if (!targets.length) { ElMessage.warning('所选文档均在解析中或待同步，无法训练'); return }
+  const targets = selectedDocs.value.filter(d => d.status !== 'PARSING' && d.status !== 'TRAINING' && d.status !== 'PENDING')
+  if (!targets.length) { ElMessage.warning('所选文档均在解析/训练中或待同步，无法训练'); return }
+  const skipped = selectedDocs.value.length - targets.length
   await run(async () => {
     let ok = 0
     for (const d of targets) {
       try { await libraryDocumentAction(selected.value!.id, d.id, 'parse'); ok++ } catch { /* 单个失败不阻断 */ }
     }
     await load()
-    const skipped = selectedDocs.value.length - targets.length
-    ElMessage.success(`已对 ${ok}/${targets.length} 个文档发起训练` + (skipped > 0 ? `，${skipped} 个解析中/待同步文档已跳过` : ''))
+    clearDocSelection() // 训练已发起：清空勾选，避免对同一批重复发起解析
+    ElMessage.success(`已对 ${ok}/${targets.length} 个文档发起训练` + (skipped > 0 ? `，${skipped} 个解析/训练中或待同步文档已跳过` : ''))
   })
 }
 async function batchDownload() {
@@ -116,12 +129,13 @@ async function batchDownload() {
 async function batchRemove() {
   if (!selectedDocs.value.length) return
   try { await ElMessageBox.confirm(`将删除所选 ${selectedDocs.value.length} 个文档及其全部分段，删除后不可恢复。是否继续？`, '批量移除', {type: 'warning'}) } catch { return }
+  const targets = selectedDocs.value.slice()
   await run(async () => {
     let ok = 0
-    for (const d of selectedDocs.value) {
+    for (const d of targets) {
       try { await deleteLibraryDocument(selected.value!.id, d.id); ok++ } catch { /* 单个失败不阻断 */ }
     }
-    selectedDocs.value = []
+    clearDocSelection() // 行已删除：清空勾选及其 reserve 残留
     await load()
     ElMessage.success(`已移除 ${ok} 个文档`)
   })
@@ -192,8 +206,22 @@ function hasMoreTags(tags: string[] | undefined) {
   return (tags?.length || 0) > 5
 }
 const editingId = ref<number>()
-// 创建/编辑表单：基础信息 + 向量模型；分段设置由共用组件 IndexSettingsPanel 自持（libSettings 为回填初值）
-const form = reactive({name: '', description: '', embedding_model: ''})
+// 创建/编辑表单：基础信息 + 向量模型 + MinerU 引擎参数；分段设置由共用组件 IndexSettingsPanel 自持（libSettings 为回填初值）
+const form = reactive({name: '', description: '', embedding_model: '',
+  // 解析引擎参数（MinerU）：默认最高质量 + 自动 OCR，与后端未配置时的兜底一致
+  tier: 'quality' as NonNullable<ProcessingConfig['tier']>,
+  ocr_mode: 'auto' as NonNullable<ProcessingConfig['ocr_mode']>})
+// 引擎参数选项（与后端 ProcessingConfig 值域一致；tier 三级语义、OCR auto/txt/ocr）
+const TIER_OPTIONS: Array<{value: NonNullable<ProcessingConfig['tier']>; label: string}> = [
+  {value: 'speed', label: '速度优先'},
+  {value: 'balanced', label: '均衡'},
+  {value: 'quality', label: '最高质量'},
+]
+const OCR_OPTIONS: Array<{value: NonNullable<ProcessingConfig['ocr_mode']>; label: string}> = [
+  {value: 'auto', label: '自动（推荐）'},
+  {value: 'txt', label: '仅提取文本'},
+  {value: 'ocr', label: '强制 OCR'},
+]
 const libSettings = ref<IndexSettings>(defaultSettings())
 const libPanel = ref<InstanceType<typeof IndexSettingsPanel>>()
 // 库级检索设置由 RetrievalSettingsPanel 自持（libRetrieval 为回填初值）
@@ -201,7 +229,7 @@ const libRetrieval = ref<RetrievalSettings>(defaultRetrievalSettings())
 const retrievalPanel = ref<InstanceType<typeof RetrievalSettingsPanel>>()
 // 知识库级解析开关：编辑保存后是否对库内全部文档重新解析（默认关闭，批量操作由用户决定）
 const reparseAll = ref(false)
-const statusLabels: Record<string, string> = {PENDING: '待同步', UPLOADED: '已上传', PARSING: '解析中', COMPLETED: '已完成', FAILED: '失败', CANCELLED: '已停止', UNKNOWN: '状态未知'}
+const statusLabels: Record<string, string> = {PENDING: '待同步', UPLOADED: '已上传', PARSING: '解析中', TRAINING: '训练中', COMPLETED: '已完成', FAILED: '失败', CANCELLED: '已停止', UNKNOWN: '状态未知'}
 async function run(task: () => Promise<void>) {
   if (busy.value) return
   busy.value = true; error.value = ''
@@ -222,14 +250,17 @@ function openLibrary(lib: DocumentLibrary) { router.push({ path: `/apply/knowled
 async function selectLibrary(lib: DocumentLibrary) {
   selected.value = lib; keyword.value = ''; resetDocFilters(); docPage.value = 1
   await load()
-  tabsStore.updateTabTitle(route.path, lib.name)
+  tabsStore.updateTabTitle(tabPath, lib.name)
 }
 const embeddingModels = ref<{id: string; name: string}[]>([])
 const modelError = ref('')
 async function openCreate(lib?: DocumentLibrary) {
   editingId.value = lib?.id; step.value = 0
   Object.assign(form, {name: lib?.name || '', description: lib?.description || '',
-    embedding_model: lib?.config?.processing?.embedding_model || ''})
+    embedding_model: lib?.config?.processing?.embedding_model || '',
+    // 解析引擎参数回填：旧库未配置时回落默认（最高质量 + 自动 OCR）
+    tier: lib?.config?.processing?.tier || 'quality',
+    ocr_mode: lib?.config?.processing?.ocr_mode || 'auto'})
   // 库级全量配置回填（旧库无 strategy 时由 processing 推导），新对象触发共用面板重新初始化
   libSettings.value = librarySettingsFromConfig(lib?.config || null)
   libRetrieval.value = retrievalFromConfig(lib?.config?.retrieval)
@@ -246,6 +277,7 @@ async function save() {
     const cfg = settingsToConfig(libPanel.value!.getSettings())
     const lib = await saveDocumentLibrary({
       ...cfg.processing, embedding_model: form.embedding_model,
+      tier: form.tier, ocr_mode: form.ocr_mode,
       name: form.name, description: form.description,
       strategy: cfg.strategy, enhancements: cfg.enhancements, type_rules: cfg.type_rules,
       retrieval: retrievalPanel.value!.getSettings(),
@@ -279,7 +311,12 @@ async function action(doc: LibraryDocument, action: 'parse' | 'stop' | 'refresh'
 }
 async function remove(doc: LibraryDocument) {
   try { await ElMessageBox.confirm(`删除「${doc.name}」及其分段？`, '删除文档', {type: 'warning'}) } catch { return }
-  await run(async () => { await deleteLibraryDocument(selected.value!.id, doc.id); await load(); ElMessage.success('文档已删除') })
+  await run(async () => {
+    await deleteLibraryDocument(selected.value!.id, doc.id)
+    await load()
+    clearDocSelection() // 行已删除：清掉 reserve-selection 残留的勾选
+    ElMessage.success('文档已删除')
+  })
 }
 function download(blob: Blob, name: string) {
   const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000)
@@ -313,7 +350,8 @@ async function saveSettings(v: IndexSettings, reparse: boolean) {
   if (!selected.value || !settingsDoc.value) return
   busy.value = true
   try {
-    const updated = await setDocumentConfig(selected.value.id, settingsDoc.value.id, settingsToConfig(v))
+    // 关闭「重新解析」开关：保存后用解析缓存按新设置重新分段（训练中），不重走 MinerU 解析
+    const updated = await setDocumentConfig(selected.value.id, settingsDoc.value.id, settingsToConfig(v), !reparse)
     Object.assign(settingsDoc.value, updated)
     settingsVisible.value = false
     if (reparse) {
@@ -321,8 +359,10 @@ async function saveSettings(v: IndexSettings, reparse: boolean) {
       const parsed = await libraryDocumentAction(selected.value.id, settingsDoc.value.id, 'parse')
       Object.assign(settingsDoc.value, parsed)
       ElMessage.success('设置已保存，正在按新设置重新分段')
+    } else if (updated.status === 'TRAINING') {
+      ElMessage.success('设置已保存，正在训练（按新设置重新分段）')
     } else {
-      ElMessage.success('文档设置已保存，重新解析后生效')
+      ElMessage.success('设置已保存，正在按新设置重新解析')
     }
   } catch (e: any) { ElMessage.error(e?.response?.data?.detail || e.message || '保存失败') }
   finally { busy.value = false }
@@ -360,34 +400,73 @@ function goRetrievalTest() {
   if (!selected.value) return
   router.push({ path: `/apply/knowledge-libraries/${selected.value.id}/retrieval-test` })
 }
-// 「添加知识」确认后的期待窗口：编目经 XXL-Job 异步执行，「待同步」占位文档
-// 几秒后才会落库；窗口内轮询无条件静默重拉列表，让新文档第一时间回显，
-// 之后由下方 PENDING/PARSING 既有轮询接管状态推进（PENDING→PARSING→COMPLETED）
+// 「添加知识」确认后的期待窗口：钉钉导入经后台「编目 + 批处理」异步执行，
+// 「待同步」占位文档几秒后才开始陆续落库。优先按同步源 run 状态自适应轮询
+// （run 到终态即停止期待），让新文档第一时间陆续回显；拿不到 sourceIds 的
+// 旧调用退回 60s 固定窗口兜底。之后由 PENDING/PARSING 既有轮询接管状态推进
 const AWAIT_ADDED_MS = 60_000
 const awaitAddedUntil = ref(0)
-function onAddSuccess() {
+const awaitingSources = ref(new Set<number>())
+let statsFailCount = 0
+function onAddSuccess(sourceIds?: number[]) {
+  if (sourceIds?.length) {
+    awaitingSources.value = new Set(sourceIds)
+    statsFailCount = 0
+  }
   awaitAddedUntil.value = Date.now() + AWAIT_ADDED_MS
   load()
 }
 
 let timer: ReturnType<typeof setTimeout> | undefined
 let disposed = false
+// 轮询容错：单轮请求失败（后端瞬时 5xx/网络抖动）不再永久停轮询——
+// 钉钉导入期间「获取一批、刷新一批」依赖轮询持续存活；连续多轮失败才放弃
+// （手动刷新仍可用）。页面切换/卸载由 disposed 兜底。
+const POLL_MAX_CONSECUTIVE_FAILURES = 5
+let pollFailureCount = 0
 async function poll() {
+  let failed = false
   try {
     if (!busy.value && selected.value) {
       const id = selected.value.id
-      for (const doc of documents.value.filter(d => d.status === 'PARSING')) {
-        const remote = await libraryDocumentAction(id, doc.id, 'refresh')
-        if (selected.value?.id === id) Object.assign(doc, remote)
+      for (const doc of documents.value.filter(d => d.status === 'PARSING' || d.status === 'TRAINING')) {
+        try {
+          const remote = await libraryDocumentAction(id, doc.id, 'refresh')
+          if (selected.value?.id === id) Object.assign(doc, remote)
+        } catch { failed = true /* 单篇刷新失败不阻断其余 */ }
+      }
+      // 期待中的同步源：run 到终态即移出期待集合（编目+批处理全部完成）。
+      // stats 单独兜错：权限不足/瞬时失败不影响主轮询，连续失败则放弃自适应
+      if (awaitingSources.value.size > 0) {
+        try {
+          const stats = await sourcesStatsAll()
+          statsFailCount = 0
+          for (const item of stats.items) {
+            if (awaitingSources.value.has(item.source_id)
+                && item.last_run && item.last_run.status !== 'running') {
+              awaitingSources.value.delete(item.source_id)
+            }
+          }
+        } catch {
+          if (++statsFailCount >= 3) awaitingSources.value.clear()
+        }
       }
       // 待同步文档由批处理任务分批推进：静默重拉列表以感知状态变化与新入列的文档；
       // 期待窗口内无条件重拉（新入列文档落库前，列表中还没有 PENDING 可感知）
-      const awaiting = Date.now() < awaitAddedUntil.value
+      const awaiting = awaitingSources.value.size > 0 || Date.now() < awaitAddedUntil.value
       if (selected.value?.id === id && (awaiting || documents.value.some(d => d.status === 'PENDING'))) {
-        documents.value = await listLibraryDocuments(id)
+        try {
+          documents.value = await listLibraryDocuments(id)
+        } catch { failed = true }
       }
     }
-  } catch { /* Stop polling after a failure; manual refresh remains available. */ return }
+  } catch { failed = true }
+  if (failed) {
+    pollFailureCount++
+    if (pollFailureCount >= POLL_MAX_CONSECUTIVE_FAILURES) return // 放弃自动轮询
+  } else {
+    pollFailureCount = 0
+  }
   if (!disposed) timer = setTimeout(poll, 5000)
 }
 onMounted(async () => {
@@ -526,9 +605,9 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(timer) })
           </el-tooltip>
         </div>
         <div class="table-fill">
-          <el-table :data="pagedDocuments" border height="100%" empty-text="暂无文档，请上传文件" @selection-change="onSelectionChange">
-          <el-table-column type="selection" width="42" />
-          <el-table-column label="文档名称" min-width="390" show-overflow-tooltip><template #default="{row}"><div class="doc-name-cell"><img class="file-ico" :src="fileIcon(row.name)" alt="" /><el-button link type="primary" :disabled="row.status === 'PARSING' || row.status === 'PENDING'" @click="goSegments(row as LibraryDocument)">{{ row.name }}</el-button></div></template></el-table-column>
+          <el-table ref="docsTableRef" :data="pagedDocuments" :row-key="(row: LibraryDocument) => row.id" border height="100%" empty-text="暂无文档，请上传文件" @selection-change="onSelectionChange">
+          <el-table-column type="selection" width="42" :reserve-selection="true" />
+          <el-table-column label="文档名称" min-width="390" show-overflow-tooltip><template #default="{row}"><div class="doc-name-cell"><img class="file-ico" :src="fileIcon(row.name)" alt="" /><el-button link type="primary" :disabled="row.status === 'PARSING' || row.status === 'TRAINING' || row.status === 'PENDING'" @click="goSegments(row as LibraryDocument)">{{ row.name }}</el-button></div></template></el-table-column>
           <el-table-column label="标签" min-width="220"><template #default="{row}">
             <div class="tag-cell">
               <template v-for="t in truncatedTags(row.tags)" :key="t"><el-tag size="small" effect="plain" type="info">{{ t }}</el-tag></template>
@@ -541,19 +620,19 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(timer) })
           <el-table-column label="更新时间" width="180"><template #default="{row}">{{ formatDateTime(row.updated_at) }}</template></el-table-column>
           <el-table-column label="训练时间" width="180"><template #default="{row}">{{ row.parsed_at ? formatDateTime(row.parsed_at) : '-' }}</template></el-table-column>
           <el-table-column label="来源" width="100"><template #default="{row}"><el-tag size="small" :type="row.source === 'dingtalk' ? 'warning' : 'info'">{{ formatSource(row.source) }}</el-tag></template></el-table-column>
-          <el-table-column label="状态" width="110"><template #default="{row}"><div class="switch-line"><el-switch :model-value="row.enabled" :disabled="busy || row.status === 'PARSING'" :aria-label="`${row.name}检索状态`" @change="toggleDoc(row as LibraryDocument)" /><span>{{ row.enabled ? '已启用' : '已禁用' }}</span></div></template></el-table-column>
+          <el-table-column label="状态" width="110"><template #default="{row}"><div class="switch-line"><el-switch :model-value="row.enabled" :disabled="busy || row.status === 'PARSING' || row.status === 'TRAINING'" :aria-label="`${row.name}检索状态`" @change="toggleDoc(row as LibraryDocument)" /><span>{{ row.enabled ? '已启用' : '已禁用' }}</span></div></template></el-table-column>
           <el-table-column label="操作" width="180" fixed="right" class-name="ops-col" label-class-name="ops-col"><template #default="{row}">
             <div class="ops">
               <el-button link type="primary" @click="openDetail(row as LibraryDocument)">详情</el-button>
-              <el-button link type="primary" :disabled="row.status === 'PARSING'" @click="openSettings(row as LibraryDocument)">设置</el-button>
+              <el-button link type="primary" :disabled="row.status === 'PARSING' || row.status === 'TRAINING'" @click="openSettings(row as LibraryDocument)">设置</el-button>
               <el-dropdown trigger="click" placement="bottom-end" @command="(cmd: string) => docCommand(cmd, row as LibraryDocument)">
                 <el-button link>更多<el-icon style="margin-left:2px"><ArrowDown /></el-icon></el-button>
                 <template #dropdown>
                   <el-dropdown-menu>
                     <el-dropdown-item v-if="row.status === 'PARSING'" command="stop" :disabled="busy">停止解析</el-dropdown-item>
-                    <el-dropdown-item v-else-if="row.status !== 'PENDING'" command="parse" :disabled="busy">重新训练</el-dropdown-item>
+                    <el-dropdown-item v-else-if="row.status !== 'PENDING' && row.status !== 'TRAINING'" command="parse" :disabled="busy">重新训练</el-dropdown-item>
                     <el-dropdown-item command="original" :disabled="busy || row.status === 'PENDING'">下载原文</el-dropdown-item>
-                    <el-dropdown-item command="remove" divided style="color:var(--el-color-danger)" :disabled="busy || row.status === 'PARSING'">删除</el-dropdown-item>
+                    <el-dropdown-item command="remove" divided style="color:var(--el-color-danger)" :disabled="busy || row.status === 'PARSING' || row.status === 'TRAINING'">删除</el-dropdown-item>
                   </el-dropdown-menu>
                 </template>
               </el-dropdown>
@@ -582,7 +661,7 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(timer) })
         </el-form>
       </div>
       <div v-show="step === 1" class="step-segment">
-        <el-alert title="分段设置作为文档解析的默认规则，不会自动覆盖已有分段；检索设置保存后立即生效。" type="info" :closable="false" />
+        <el-alert title="分段与解析引擎设置作为文档解析的默认规则，仅对新解析生效、不会自动覆盖已有分段；检索设置保存后立即生效。" type="info" :closable="false" />
         <IndexSettingsPanel ref="libPanel" scope="library" :value="libSettings" />
         <RetrievalSettingsPanel ref="retrievalPanel" :value="libRetrieval" />
         <el-form label-width="110px" class="config-form">
@@ -594,6 +673,22 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(timer) })
             </div>
           </el-form-item>
           <el-form-item label="解析引擎"><el-tag>MinerU</el-tag><span class="hint">恒做版面识别与 OCR</span></el-form-item>
+          <el-form-item label="解析质量">
+            <div class="switch-line">
+              <el-select v-model="form.tier" style="width: 180px" aria-label="解析质量档位">
+                <el-option v-for="o in TIER_OPTIONS" :key="o.value" :value="o.value" :label="o.label" />
+              </el-select>
+              <HelpTip content="速度优先=最快出结果，适合批量草稿；均衡=质量与速度折中；最高质量=解析最准确，速度较慢。修改后对后续解析生效，已有文档需重新解析" />
+            </div>
+          </el-form-item>
+          <el-form-item label="OCR 模式">
+            <div class="switch-line">
+              <el-select v-model="form.ocr_mode" style="width: 180px" aria-label="OCR 模式">
+                <el-option v-for="o in OCR_OPTIONS" :key="o.value" :value="o.value" :label="o.label" />
+              </el-select>
+              <HelpTip content="自动=电子文本优先、扫描/图片页自动走 OCR；仅提取文本=跳过 OCR（纯电子文档更快）；强制 OCR=全页按扫描件识别。修改后对后续解析生效" />
+            </div>
+          </el-form-item>
           <el-form-item label="向量模型"><el-select v-model="form.embedding_model" filterable allow-create clearable placeholder="选择向量模型，留空使用默认"><el-option v-for="m in embeddingModels" :key="m.id" :value="m.id" :label="m.name" /></el-select><span v-if="modelError" class="hint">{{ modelError }}</span><span class="hint">来自「模型配置」中生效的 Embedding 配置；已有分段时切换需重新解析</span></el-form-item>
         </el-form>
       </div>
@@ -671,7 +766,6 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(timer) })
           <div class="detail-title">索引设置</div>
           <div class="detail-grid">
             <div class="detail-item"><span class="detail-label">分段策略</span><span class="detail-value">{{ strategyLabel(detailSettings.strategy) }}</span></div>
-            <div class="detail-item"><span class="detail-label">分段方式</span><span class="detail-value">{{ METHODS.find(m => m.value === detailSettings.method)?.label || detailSettings.method }}</span></div>
             <div class="detail-item"><span class="detail-label">分段最大长度</span><span class="detail-value">{{ detailSettings.chunk_token_num }}</span></div>
             <div class="detail-item"><span class="detail-label">分段重叠度</span><span class="detail-value">{{ detailSettings.overlap }}</span></div>
             <div class="detail-item span2"><span class="detail-label">文本预处理</span><span class="detail-value">{{ [detailSettings.preprocess.replace_whitespace ? '替换连续空格/换行符/制表符' : '', detailSettings.preprocess.remove_urls_emails ? '删除URL和电子邮箱' : ''].filter(Boolean).join('；') || '未启用' }}</span></div>
@@ -680,7 +774,7 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(timer) })
       </template>
       <template #footer>
         <el-button @click="detailVisible = false">关闭</el-button>
-        <el-button type="primary" :disabled="detailDoc?.status === 'PARSING'" @click="detailVisible = false; openSettings(detailDoc!)">编辑</el-button>
+        <el-button type="primary" :disabled="detailDoc?.status === 'PARSING' || detailDoc?.status === 'TRAINING'" @click="detailVisible = false; openSettings(detailDoc!)">编辑</el-button>
       </template>
     </el-drawer>
     <AddKnowledgeDialog v-model="addKnowledgeVisible" :library-id="selected?.id" :library-name="selected?.name" @success="onAddSuccess" />

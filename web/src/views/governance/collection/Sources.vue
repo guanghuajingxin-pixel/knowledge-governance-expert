@@ -10,7 +10,6 @@ import { listWorkspaces } from '@/api/sync'
 import StatusPill from './components/StatusPill.vue'
 import SourceFormDialog from './components/SourceFormDialog.vue'
 import PreviewDialog from './components/PreviewDialog.vue'
-import { cronLabel } from './components/cron'
 
 const sources = ref<Source[]>([])
 const workspaces = ref<Workspace[]>([])
@@ -109,7 +108,7 @@ async function toggle(s: any) {
   try {
     // 启用 → 停用：二次确认；停用 → 启用：直接执行
     if (s.enabled) {
-      await ElMessageBox.confirm(`确定停用同步任务「${s.name}」吗？停用后不参与定时同步，也无法立即同步。`, '停用同步任务', {
+      await ElMessageBox.confirm(`确定停用同步任务「${s.name}」吗？停用后不再自动同步钉钉变化，也无法立即同步。`, '停用同步任务', {
         confirmButtonText: '确定停用', cancelButtonText: '取消', type: 'warning',
       })
     }
@@ -217,7 +216,7 @@ onBeforeUnmount(() => { if (polling.value !== null) { window.clearInterval(polli
   <div class="kge-fill">
     <div class="sec-header">
       <b class="sec-title">从钉钉选择目录</b>
-      <span class="sec-hint">维护钉钉知识库目录与目标知识库的映射，每个目录可独立配置定时同步</span>
+      <span class="sec-hint">维护钉钉知识库目录与目标知识库的映射，钉钉内容变化时自动同步，也可手动立即同步</span>
       <el-button type="primary" style="margin-left:auto" @click="openAdd">+ 新增同步任务</el-button>
     </div>
 
@@ -235,11 +234,6 @@ onBeforeUnmount(() => { if (polling.value !== null) { window.clearInterval(polli
       <el-table-column label="目标文档库" min-width="120">
         <template #default="{ row }">
           <span style="font-size:12px">{{ row.dataset_name || row.start_dir || '—' }}</span>
-        </template>
-      </el-table-column>
-      <el-table-column label="定时任务" width="150">
-        <template #default="{ row }">
-          <span style="font-size:12px">{{ cronLabel(row.cron) }}</span>
         </template>
       </el-table-column>
       <el-table-column label="状态" width="70">

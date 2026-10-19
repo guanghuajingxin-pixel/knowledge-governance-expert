@@ -67,15 +67,37 @@ async def refresh_bot() -> None:
     _task = asyncio.create_task(_run_forever(cfg), name="dingtalk-bot-stream")
 
 
+async def stop_stream_task(task: asyncio.Task | None, *, timeout: float = 3.0) -> bool:
+    """停掉 dingtalk Stream 后台任务，返回是否确认退出。
+
+    dingtalk_stream SDK 的 start() 会把 CancelledError 当普通网络异常捕获
+    （log 后 sleep 重连，内部 while True 永不返回），单次 task.cancel() 杀不死
+    任务——曾因此把 uvicorn 热重载的 lifespan shutdown 永久挂住：旧 server 进程
+    变孤儿不退出，其连接池占满 PG max_connections，全站接口 500。对策：
+      1. 第一刀 cancel：大概率被 SDK 吞掉，任务落到重连 sleep 上；
+      2. 让出一个调度回合后补第二刀：CancelledError 落在重连 sleep 上，
+         从 SDK 的 while True 里逃出，任务真正结束；
+      3. 有界等待兜底：仍未退出（SDK 行为变化等）则超时放弃，绝不让
+         shutdown 无限等待；调用方按返回值记告警即可。
+    """
+    if task is None or task.done():
+        return True
+    task.cancel()
+    await asyncio.sleep(0)  # 让第一刀被 SDK 吞掉、任务走到重连 sleep
+    if not task.done():
+        task.cancel()       # 第二刀落在重连 sleep 上，逃出 SDK 的 while True
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout)
+    except BaseException:  # noqa: BLE001 — 取消/超时/任务自身异常都视为已尽力
+        pass
+    return task.done()
+
+
 async def stop_bot() -> None:
     global _task
-    if _task and not _task.done():
-        _task.cancel()
-        try:
-            await _task
-        except BaseException:  # noqa: BLE001 - 取消路径吞所有异常
-            pass
-    _task = None
+    task, _task = _task, None
+    if not await stop_stream_task(task):
+        logger.warning("钉钉机器人 Stream 任务未确认退出（SDK 吞取消），已放弃等待；进程退出时随之消亡")
     _state.update(running=False, connected=False)
 
 

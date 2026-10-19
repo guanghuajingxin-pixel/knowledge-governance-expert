@@ -21,11 +21,12 @@ const emit = defineEmits<{
   (e: 'confirm', v: IndexSettings, reparse: boolean): void
 }>()
 
-// 解析开关：确定后是否立即按新设置重新解析该文档（默认开启，用户可关闭）
-const reparse = ref(true)
+// 解析开关：确定后是否按新设置重走文档解析（默认关闭——仅用解析缓存重新分段；
+// 需要重新识别文档版面时用户手动打开）
+const reparse = ref(false)
 const panel = ref<InstanceType<typeof IndexSettingsPanel>>()
 
-watch(() => props.modelValue, v => { if (v) reparse.value = true })
+watch(() => props.modelValue, v => { if (v) reparse.value = false })
 
 function confirm() {
   if (!panel.value?.validate()) return
@@ -40,8 +41,8 @@ function confirm() {
       <IndexSettingsPanel ref="panel" :scope="scope" :value="value" />
       <div class="reparse-row">
         <el-switch v-model="reparse" aria-label="保存后重新解析" />
-        <span class="reparse-text">{{ reparse ? '保存后重新解析该文档' : '保存后暂不重新解析' }}</span>
-        <el-tooltip content="重新解析将清除已有分段及人工修改，并按新设置重新分段" placement="top">
+        <span class="reparse-text">{{ reparse ? '保存后重新解析该文档' : '保存后仅重新分段（不重新解析）' }}</span>
+        <el-tooltip content="开启=重走文档解析（版面重新识别）后按新设置分段；关闭=直接用已有解析结果按新设置重新分段，速度更快。两种方式都会清除已有分段及人工修改" placement="top">
           <el-icon class="tip-icon"><QuestionFilled /></el-icon>
         </el-tooltip>
       </div>

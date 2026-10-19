@@ -33,7 +33,7 @@ const routes: RouteRecordRaw[] = [
         path: 'deap-agent',
         name: 'DeapAgent',
         component: () => import('@/views/deap-agent/index.vue'),
-        meta: { title: 'DEAP智能问答', icon: 'Monitor', group: 'feature' },
+        meta: { title: 'DEAP智能问答', icon: 'BotMessageSquare', group: 'feature' },
       },
       {
         path: 'hiagent',
@@ -54,14 +54,14 @@ const routes: RouteRecordRaw[] = [
         path: 'collection',
         name: 'Collection',
         redirect: '/knowledge-sources',
-        meta: { title: '知识采集', icon: 'Download', group: 'feature' },
+        meta: { title: '知识采集', icon: 'Import', group: 'feature' },
       },
       {
         // 知识应用：拆分为二级页（脱敏策略/知识库），父级仅作分组，重定向到首个子页
         path: 'apply',
         name: 'Apply',
         redirect: '/apply/masking',
-        meta: { title: '知识应用', icon: 'Plug', group: 'feature' },
+        meta: { title: '知识应用', icon: 'Blocks', group: 'feature' },
       },
       {
         // 脱敏策略：检索返回脱敏策略控制台（策略编排/敏感词典/豁免/审计/沙箱），仅管理员可管
@@ -162,7 +162,7 @@ const routes: RouteRecordRaw[] = [
         path: 'govern',
         name: 'Govern',
         redirect: '/govern/gaps',
-        meta: { title: '知识治理', icon: 'Stamp', group: 'feature' },
+        meta: { title: '知识治理', icon: 'ShieldCheck', group: 'feature' },
       },
       {
         // 知识缺口：原「知识治理」页下沉为子页（知识缺口 + 治理标准页签）
@@ -177,6 +177,13 @@ const routes: RouteRecordRaw[] = [
         name: 'GovernReview',
         component: () => import('@/views/governance/process.vue'),
         meta: { title: '入库审核', icon: 'BadgeCheck', group: 'feature', parent: '/govern', menuOrder: 2 },
+      },
+      {
+        // 解析引擎：双页签（自定义解析 + MinerU WebUI iframe），挂到知识采集分组下
+        path: 'process/engine',
+        name: 'ProcessEngine',
+        component: () => import('@/views/governance/ProcessEngine.vue'),
+        meta: { title: '解析引擎', icon: 'Gauge', group: 'feature', parent: '/collection', menuOrder: 4 },
       },
       {
         // 知识源管理：原「知识中心」子菜单，挂到知识采集分组下
@@ -210,7 +217,7 @@ const routes: RouteRecordRaw[] = [
         path: 'agent-config',
         name: 'AgentConfig',
         component: () => import('@/views/agent/config.vue'),
-        meta: { title: '智能体配置', icon: 'WandSparkles', roles: ['super_admin', 'admin'], group: 'config' },
+        meta: { title: '智能体配置', icon: 'Bot', roles: ['super_admin', 'admin'], group: 'config' },
       },
 
       // ===== 平台管理 =====

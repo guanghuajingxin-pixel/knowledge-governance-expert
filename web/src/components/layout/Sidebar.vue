@@ -268,11 +268,6 @@ function handleUserCommand(command: string | number | object) {
                   :title="child.title"
                   @click="navigate(child.path)"
                 >
-                  <span class="menu-icon menu-icon--child">
-                    <el-icon :size="14">
-                      <component :is="resolveLucideIcon(child.icon)" />
-                    </el-icon>
-                  </span>
                   <span class="menu-title">{{ child.title }}</span>
                 </div>
               </div>
@@ -475,7 +470,8 @@ function handleUserCommand(command: string | number | object) {
 }
 
 .menu-item--child {
-  padding-left: 36px;
+  /* 无图标：文字与父级标题左对齐（12 + 32 图标 + 10 间距 = 54px），层级靠缩进表达 */
+  padding-left: 54px;
   padding-top: 8px;
   padding-bottom: 8px;
 }
@@ -491,12 +487,6 @@ function handleUserCommand(command: string | number | object) {
   background: #f0f0f0;
   color: #666;
   transition: background 0.15s ease, color 0.15s ease, transform 0.15s ease;
-}
-
-.menu-icon--child {
-  width: 24px;
-  height: 24px;
-  border-radius: 6px;
 }
 
 .menu-item:hover .menu-icon {

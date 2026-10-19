@@ -1,12 +1,13 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { UploadFilled, Document, Notebook, Connection } from '@element-plus/icons-vue'
-import type { UploadProps, UploadUserFile } from 'element-plus'
-import { uploadDocument } from '@/api/document'
+import { X, LoaderCircle, FileText } from '@lucide/vue'
+import type { UploadProps, UploadUserFile, UploadFile } from 'element-plus'
+import { uploadDocument, listDocuments } from '@/api/document'
 import {
   importDingTalk, stageLibraryDocument, discardStagedDocuments, commitStagedDocuments,
-  type StagedFile,
+  listLibraryDocuments, type StagedFile,
 } from '@/api/document-library'
 import { createSource } from '@/api/sync'
 import DingTalkDocTreeDialog from './DingTalkDocTreeDialog.vue'
@@ -37,7 +38,7 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{
   (e: 'update:modelValue', val: boolean): void
-  (e: 'success'): void
+  (e: 'success', sourceIds?: number[]): void
 }>()
 
 const activeSource = ref<DataSource>('dingtalk')
@@ -59,6 +60,32 @@ const uploadingCount = ref(0)
 const uploading = computed(() => uploadingCount.value > 0)
 // 已暂存待确认的文件：el-upload uid → 暂存信息（文档库路径两段式上传）
 const stagedItems = ref(new Map<number, StagedFile>())
+
+// 当前知识库已有文档名（用于本地上传重名提示）：打开弹窗时拉取
+const existingNames = ref(new Set<string>())
+
+async function loadExistingNames() {
+  existingNames.value = new Set()
+  try {
+    if (props.libraryId != null) {
+      const docs = await listLibraryDocuments(props.libraryId)
+      existingNames.value = new Set(docs.map((d) => d.name))
+    } else if (props.kbId) {
+      const res = await listDocuments({ kb_id: props.kbId, page: 1, size: 1000 })
+      existingNames.value = new Set(res.items.flatMap((d) => [d.filename, d.original_filename]))
+    }
+  } catch {
+    // 拉取失败不阻断上传，仅缺少重复标记
+  }
+}
+
+watch(() => props.modelValue, (open) => {
+  if (open) void loadExistingNames()
+}, { immediate: true })
+
+function isDuplicate(name: string): boolean {
+  return existingNames.value.has(name)
+}
 
 const selectedCount = computed(() => {
   if (activeSource.value === 'dingtalk') {
@@ -91,9 +118,12 @@ function onKbSelected(sel: KbSelection) {
   kbSelection.value = sel
   docSelection.value = null
   // 选择钉钉知识库后立即创建同步源；后端会把首次编目任务放入同步队列。
-  // 选择器先关闭自身，主弹窗在请求成功后关闭，避免用户还要二次点击「确定」。
+  // 选择器先关闭自身，主弹窗在「首批数据落库」后关闭，避免用户还要二次点击「确定」。
   if (importMode.value === 'sync') {
-    void submitKnowledgeSync(sel)
+    void (async () => {
+      const beforeIds = props.libraryId != null ? await snapshotDocIds(props.libraryId) : null
+      await submitKnowledgeSync(sel, beforeIds)
+    })()
   }
 }
 
@@ -106,6 +136,7 @@ const handleUploadChange: UploadProps['onChange'] = async (file) => {
     try {
       await uploadDocument(file.raw as File, props.kbId, props.directoryId || undefined)
       ElMessage.success(`${file.name} 上传成功，正在后台处理`)
+      existingNames.value.add(file.name) // 即选即传：新文档已入库，同会话内再次上传同名文件时标重复
       emit('success')
     } catch {
       ElMessage.error(`${file.name} 上传失败`)
@@ -141,8 +172,9 @@ const handleUploadChange: UploadProps['onChange'] = async (file) => {
   }
 }
 
-/** 移除待确认文件：同步丢弃其 MinIO 暂存对象 */
-const handleUploadRemove: UploadProps['onRemove'] = (file) => {
+/** 移除待确认文件：同步丢弃其 MinIO 暂存对象（el-upload onRemove 与自定义移除按钮共用） */
+function discardStagedFile(file: UploadFile) {
+  if (file.uid == null) return
   const staged = stagedItems.value.get(file.uid)
   stagedItems.value.delete(file.uid)
   if (staged && props.libraryId != null) {
@@ -150,7 +182,75 @@ const handleUploadRemove: UploadProps['onRemove'] = (file) => {
   }
 }
 
+/** 自定义文件列表的移除按钮：与 el-upload onRemove 同语义 */
+function removeFile(file: UploadFile) {
+  fileList.value = fileList.value.filter((f) => f.uid !== file.uid)
+  discardStagedFile(file)
+}
+
 const confirming = ref(false)
+// 等待首批编目数据落库：弹窗保持打开，直到知识列表出现第一批新条目
+const waitingFirstBatch = ref(false)
+// 轮询间隔与兜底超时：后端流式编目逐目录落库，首批通常秒级出现、弹窗即关；
+// 超时仅兜后端异常（超时也关闭，进度在「知识采集 → 同步队列」继续可见）
+const FIRST_BATCH_POLL_MS = 2_000
+const FIRST_BATCH_TIMEOUT_MS = 180_000
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/** 提交前抓一次文档 ID 快照，用于判断编目占位文档何时出现（失败容忍）。 */
+async function snapshotDocIds(libId: number): Promise<Set<string> | null> {
+  try {
+    const docs = await listLibraryDocuments(libId)
+    return new Set(docs.map((d) => d.id))
+  } catch {
+    return null
+  }
+}
+
+/** 等待编目首批占位文档持久化（知识列表出现新条目）。
+ * 编目在后台持续推进不受影响，这里只控制弹窗关闭时机：
+ * ok=首批已出现；timeout=超时兜底；cancelled=用户已关闭弹窗，放弃等待。 */
+async function waitForFirstBatch(
+  libId: number, beforeIds: Set<string> | null,
+): Promise<'ok' | 'timeout' | 'cancelled'> {
+  const deadline = Date.now() + FIRST_BATCH_TIMEOUT_MS
+  while (Date.now() < deadline) {
+    if (!props.modelValue) return 'cancelled'
+    await sleep(FIRST_BATCH_POLL_MS)
+    if (!props.modelValue) return 'cancelled'
+    try {
+      const docs = await listLibraryDocuments(libId)
+      // 快照不可用时退化为「存在待同步的钉钉文档」判定
+      const appeared = beforeIds
+        ? docs.some((d) => !beforeIds.has(d.id))
+        : docs.some((d) => d.source === 'dingtalk' && d.status === 'PENDING')
+      if (appeared) return 'ok'
+    } catch { /* 瞬时失败继续等待 */ }
+  }
+  return 'timeout'
+}
+
+/** 钉钉导入收尾：等首批数据落库后再 emit success 并关闭弹窗。 */
+async function finishWithFirstBatch(
+  libId: number, sourceIds: number[], beforeIds: Set<string> | null,
+): Promise<void> {
+  waitingFirstBatch.value = true
+  let outcome: 'ok' | 'timeout' | 'cancelled'
+  try {
+    outcome = await waitForFirstBatch(libId, beforeIds)
+  } finally {
+    waitingFirstBatch.value = false
+  }
+  if (outcome === 'cancelled') return // 弹窗已被用户关闭，静默退出
+  if (outcome === 'timeout') {
+    ElMessage.info('首批知识仍在准备中，进度可在「知识采集 → 同步队列」查看')
+  }
+  emit('success', sourceIds)
+  closeDialog()
+}
 
 async function handleConfirm() {
   if (activeSource.value === 'local') {
@@ -201,9 +301,12 @@ async function handleConfirm() {
 }
 
 /** 单次导入：创建一次性同步源，任务经 XXL-Job 进同步队列分批下载解析；
- *  全部完成后源自动停用（内容不随钉钉源文件更新）。 */
+ *  全部完成后源自动停用（内容不随钉钉源文件更新）。
+ *  弹窗等首批占位文档落库后再关闭（编目在后台持续推进）。 */
 async function handleOnceImport() {
   const libId = props.libraryId!
+  const beforeIds = await snapshotDocIds(libId)
+  const sourceIds: number[] = []
   if (docSelection.value) {
     const sel = docSelection.value
     const res = await importDingTalk(libId, {
@@ -211,16 +314,18 @@ async function handleOnceImport() {
       workspace_id: sel.workspaceId, root_node_id: sel.rootNodeId,
       workspace_name: sel.workspaceName, import_mode: 'once',
     })
+    sourceIds.push(res.source_id)
     ElMessage.success(res.message || '导入任务已提交同步队列，进度可在「知识采集 → 同步队列」查看')
   } else if (kbSelection.value) {
     const errors: string[] = []
     let submitted = 0
     for (const ws of kbSelection.value.workspaces) {
       try {
-        await importDingTalk(libId, {
+        const res = await importDingTalk(libId, {
           workspace_id: ws.id, root_node_id: ws.root_node_id,
           workspace_name: ws.name, import_mode: 'once',
         })
+        sourceIds.push(res.source_id)
         submitted++
       } catch (e: any) {
         errors.push(`${ws.name}：${e?.response?.data?.detail || e?.message || '提交失败'}`)
@@ -232,60 +337,62 @@ async function handleOnceImport() {
       ElMessage.warning(`已提交 ${submitted} 个导入任务，${errors.length} 个未提交：${errors[0]}`)
     } else {
       ElMessage.error(`导入任务未能进入队列：${errors[0] || '请重试'}`)
+      return // 一个都没提交成功：不进入等待，弹窗留给用户重试
     }
   }
-  emit('success')
-  closeDialog()
+  await finishWithFirstBatch(libId, sourceIds, beforeIds)
 }
 
-/** 自动同步：创建 library 同步源并立即触发一次同步 */
+/** 自动同步：创建 library 同步源并立即触发一次同步。
+ *  弹窗等首批占位文档落库后再关闭（编目在后台持续推进）。 */
 async function handleSyncImport() {
   const libId = props.libraryId!
   const libName = props.libraryName || `文档库 ${libId}`
+  const beforeIds = await snapshotDocIds(libId)
   if (docSelection.value) {
     const sel = docSelection.value
-    await createSource({
+    const source = await createSource({
       name: `钉钉文档 · ${sel.workspaceName}`,
       workspace_id: sel.workspaceId,
       root_node_id: sel.rootNodeId,
       dataset_name: libName,
       dataset_id: String(libId),
       delete_policy: 'keep',
-      cron: '*/5 * * * *',
       enabled: true,
       node_whitelist: sel.nodes.map((n) => n.node_id),
     })
     // 后端创建源时已直跑首次编目：任务进同步队列、文档以「待同步」进列表，由批处理分批同步
     ElMessage.success(`已创建自动同步任务（${sel.nodes.length} 篇文档，分批同步中，可在同步队列查看进度）`)
+    await finishWithFirstBatch(libId, [source.id], beforeIds)
   } else if (kbSelection.value) {
-    await submitKnowledgeSync(kbSelection.value)
+    await submitKnowledgeSync(kbSelection.value, beforeIds)
     return
   }
-  emit('success')
   closeDialog()
 }
 
-async function submitKnowledgeSync(selection: KbSelection) {
+async function submitKnowledgeSync(selection: KbSelection, beforeIds: Set<string> | null = null) {
   if (props.libraryId == null || confirming.value) return
   confirming.value = true
   const libName = props.libraryName || `文档库 ${props.libraryId}`
   let created = 0
+  const sourceIds: number[] = []
   const errors: string[] = []
   try {
     for (const ws of selection.workspaces) {
       try {
-        await createSource({
+        const source = await createSource({
           name: `钉钉知识库 · ${ws.name}`,
           workspace_id: ws.id,
           root_node_id: ws.root_node_id,
           dataset_name: libName,
           dataset_id: String(props.libraryId),
           delete_policy: 'keep',
-          cron: '*/5 * * * *',
           enabled: true,
           node_whitelist: [],
         })
         // 创建 library 同步源时后端立即编目，逐文档任务进入同步队列。
+        sourceIds.push(source.id)
         created++
       } catch (e: any) {
         errors.push(`${ws.name}：${e?.response?.data?.detail || e?.message || '创建失败'}`)
@@ -293,13 +400,12 @@ async function submitKnowledgeSync(selection: KbSelection) {
     }
 
     if (created > 0) {
-      emit('success')
-      closeDialog()
       if (errors.length) {
         ElMessage.warning(`已提交 ${created} 个同步任务，${errors.length} 个未提交：${errors[0]}`)
       } else {
         ElMessage.success(`已提交 ${created} 个同步任务，进度可在同步队列查看`)
       }
+      await finishWithFirstBatch(props.libraryId, sourceIds, beforeIds)
     } else {
       ElMessage.error(`同步任务未能进入队列：${errors[0] || '请重试'}`)
     }
@@ -422,7 +528,7 @@ async function handleClosed() {
             :auto-upload="false"
             :show-file-list="true"
             :on-change="handleUploadChange"
-            :on-remove="handleUploadRemove"
+            :on-remove="discardStagedFile"
             accept=".docx,.doc,.txt,.xlsx,.xls,.pptx,.ppt,.pdf,.png,.jpg,.jpeg,.webp,.bmp,.md"
             class="local-upload"
           >
@@ -439,15 +545,31 @@ async function handleClosed() {
             <div class="upload-limits">
               每个文件不超过 150MB · 可同时批量上传 20 个文件
             </div>
+            <template #file="{ file }">
+              <div class="upload-file-item">
+                <el-icon class="upload-file-icon"><FileText /></el-icon>
+                <span class="upload-file-name" :title="file.name">{{ file.name }}</span>
+                <el-icon v-if="file.status === 'uploading'" class="upload-file-loading is-loading"><LoaderCircle /></el-icon>
+                <span v-if="isDuplicate(file.name)" class="upload-file-dup">重复</span>
+                <el-icon
+                  class="upload-file-close"
+                  role="button"
+                  aria-label="移除"
+                  @click="removeFile(file)"
+                >
+                  <X />
+                </el-icon>
+              </div>
+            </template>
           </el-upload>
         </template>
       </section>
     </div>
 
     <template #footer>
-      <el-button @click="closeDialog">取消</el-button>
+      <el-button :disabled="uploading" @click="closeDialog">取消</el-button>
       <el-button type="primary" :disabled="!canConfirm" :loading="uploading || confirming" @click="handleConfirm">
-        确定
+        {{ waitingFirstBatch ? '正在获取知识列表…' : '确定' }}
       </el-button>
     </template>
 
@@ -709,5 +831,71 @@ async function handleClosed() {
 .upload-limits {
   font-size: 12px;
   color: #c0c4cc;
+}
+
+/* 自定义文件列表项：文件名占满剩余宽度，重复标记与关闭按钮靠右 */
+.local-upload :deep(.el-upload-list__item) {
+  padding: 0;
+  border: none;
+  height: auto;
+  line-height: normal;
+  background: transparent;
+}
+
+.upload-file-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 4px;
+  font-size: 14px;
+  color: #606266;
+  transition: background 0.15s;
+}
+
+.upload-file-item:hover {
+  background: #f5f7fa;
+}
+
+.upload-file-icon {
+  font-size: 16px;
+  color: #909399;
+  flex-shrink: 0;
+}
+
+.upload-file-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.upload-file-loading {
+  font-size: 14px;
+  color: var(--el-color-primary);
+  flex-shrink: 0;
+}
+
+/* 重复标记：红色，位于关闭按钮之前 */
+.upload-file-dup {
+  flex-shrink: 0;
+  background: var(--el-color-danger);
+  color: #fff;
+  font-size: 12px;
+  line-height: 1;
+  padding: 3px 6px;
+  border-radius: 3px;
+}
+
+.upload-file-close {
+  font-size: 16px;
+  color: #909399;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.upload-file-close:hover {
+  color: var(--el-color-danger);
 }
 </style>

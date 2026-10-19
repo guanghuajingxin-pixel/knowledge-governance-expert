@@ -111,6 +111,7 @@ async function loadWorkspaces(force = false) {
 
 function changeWorkspace() {
   selectedNodes.value = []
+  folderFiles.value.clear()
 }
 
 // 懒加载树节点
@@ -118,37 +119,86 @@ async function loadNode(node: any, resolve: (data: TreeNode[]) => void) {
   // 根级：从知识库根节点开始
   const parentId: string = node.level === 0 ? workspaceRootId.value : node.data.node_id
   if (!parentId) { resolve([]); return }
+  try {
+    const items = await fetchNodes(parentId)
+    resolve(items.map((n) => ({
+      node_id: n.node_id,
+      name: n.name,
+      is_folder: n.is_folder,
+      leaf: !n.has_children,
+      extension: n.extension,
+      size: n.size,
+      url: n.url,
+    })))
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail || e?.message || '获取子节点失败')
+    resolve([])
+  }
+}
 
+// 懒加载树节点（带 5 分钟缓存，目录递归收集与树渲染共用）
+async function fetchNodes(parentId: string): Promise<DingTalkNode[]> {
   const cached = nodesCache.get(parentId)
-  let items: DingTalkNode[]
   if (cached && Date.now() - cached.ts < CACHE_TTL) {
-    items = cached.items
-  } else {
-    try {
-      const res = await fetchDingTalkNodes(parentId)
-      items = res.items || []
-      nodesCache.set(parentId, { ts: Date.now(), items })
-    } catch (e: any) {
-      ElMessage.error(e?.response?.data?.detail || e?.message || '获取子节点失败')
-      items = []
+    return cached.items
+  }
+  const res = await fetchDingTalkNodes(parentId)
+  const items = res.items || []
+  nodesCache.set(parentId, { ts: Date.now(), items })
+  return items
+}
+
+// 目录勾选结果缓存：node_id → 目录下全部文件节点（懒加载子树未渲染，
+// 勾选父目录无法从树上直接取到深层文件，需递归收集）
+const folderFiles = ref(new Map<string, TreeNode[]>())
+const expanding = ref(false)
+// 递归深度保护（与后端 sync_max_depth=10 对齐）
+const MAX_COLLECT_DEPTH = 10
+
+/** 递归收集目录下全部文件节点（跳过子目录本身）。 */
+async function collectFiles(parentId: string, out: TreeNode[], depth = 0): Promise<void> {
+  if (depth > MAX_COLLECT_DEPTH) return
+  const items = await fetchNodes(parentId)
+  for (const n of items) {
+    if (n.is_folder) {
+      await collectFiles(n.node_id, out, depth + 1)
+    } else {
+      out.push({
+        node_id: n.node_id, name: n.name, is_folder: false,
+        leaf: true, extension: n.extension, size: n.size, url: n.url,
+      })
     }
   }
-  resolve(items.map((n) => ({
-    node_id: n.node_id,
-    name: n.name,
-    is_folder: n.is_folder,
-    leaf: !n.has_children,
-    extension: n.extension,
-    size: n.size,
-    url: n.url,
-  })))
 }
 
 // el-tree 的 show-checkbox + check 事件
-function handleCheck() {
-  // 只保留文件类型（非文件夹）的选中
-  const checked = treeRef.value?.getCheckedNodes(false, false) as TreeNode[] || []
-  selectedNodes.value = checked.filter((n) => !n.is_folder)
+async function handleCheck() {
+  const checked = (treeRef.value?.getCheckedNodes(false, false) || []) as TreeNode[]
+  const files = checked.filter((n) => !n.is_folder)
+  const folders = checked.filter((n) => n.is_folder)
+  // 勾选目录 = 快捷全选其下全部文档（含未渲染的懒加载子树）：
+  // 递归展开收集后并入已选，让「确定」按钮随目录选择激活
+  if (folders.length) {
+    expanding.value = true
+    try {
+      for (const f of folders) {
+        let collected = folderFiles.value.get(f.node_id)
+        if (!collected) {
+          collected = []
+          await collectFiles(f.node_id, collected)
+          folderFiles.value.set(f.node_id, collected)
+        }
+        files.push(...collected)
+      }
+    } catch {
+      ElMessage.error('展开所选目录失败，请重试')
+    } finally {
+      expanding.value = false
+    }
+  }
+  // 目录文件与手动勾选可能重叠：按 node_id 去重；取消目录勾选后其文件随之移出
+  const seen = new Set<string>()
+  selectedNodes.value = files.filter((n) => !seen.has(n.node_id) && seen.add(n.node_id))
 }
 
 // 过滤搜索（高亮 + 展开匹配节点）
@@ -181,6 +231,7 @@ function handleConfirm() {
 
 function handleClosed() {
   selectedNodes.value = []
+  folderFiles.value.clear()
   searchKeyword.value = ''
 }
 
@@ -269,18 +320,20 @@ onMounted(loadWorkspaces)
 
       <!-- 已选统计 -->
       <div class="selected-bar">
+        <span v-if="expanding">正在展开所选目录…</span>
         <span>已选 {{ selectedNodes.length }} 个文档</span>
       </div>
     </div>
 
     <template #footer>
-      <el-button @click="emit('update:modelValue', false)">取消</el-button>
+      <el-button :disabled="expanding" @click="emit('update:modelValue', false)">取消</el-button>
       <el-button
         type="primary"
+        :loading="expanding"
         :disabled="!selectedNodes.length"
         @click="handleConfirm"
       >
-        确认
+        {{ expanding ? '正在展开目录…' : '确认' }}
       </el-button>
     </template>
   </el-dialog>

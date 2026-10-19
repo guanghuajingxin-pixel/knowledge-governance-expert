@@ -240,10 +240,8 @@ class RetireImportOnceTests(unittest.TestCase):
         from app.services.sync import batch
         with self.sessions() as db:
             src = self._once_source(db)
-            with patch('app.services.sync.scheduler.stop_source_job') as stop:
-                batch.retire_import_once(db, src.id)
+            batch.retire_import_once(db, src.id)
             self.assertFalse(src.enabled)
-            stop.assert_called_once_with(99)
 
     def test_retire_keeps_source_when_tasks_pending(self):
         from app.services.sync import batch
@@ -256,19 +254,15 @@ class RetireImportOnceTests(unittest.TestCase):
                             node_id='n', name='n', dataset_id='1', dataset_name='t',
                             status='pending'))
             db.commit()
-            with patch('app.services.sync.scheduler.stop_source_job') as stop:
-                batch.retire_import_once(db, src.id)
+            batch.retire_import_once(db, src.id)
             self.assertTrue(src.enabled)
-            stop.assert_not_called()
 
     def test_retire_ignores_periodic_source(self):
         from app.services.sync import batch
         with self.sessions() as db:
             src = self._once_source(db, import_once=False)
-            with patch('app.services.sync.scheduler.stop_source_job') as stop:
-                batch.retire_import_once(db, src.id)
+            batch.retire_import_once(db, src.id)
             self.assertTrue(src.enabled)
-            stop.assert_not_called()
 
     def test_finalize_retires_once_source_on_success_but_not_partial(self):
         from app.services.sync import batch
@@ -282,11 +276,10 @@ class RetireImportOnceTests(unittest.TestCase):
                             node_id='n', name='n', dataset_id='1', dataset_name='t',
                             status='success'))
             db.commit()
-            with patch('app.services.sync.scheduler.stop_source_job'):
-                batch._finalize_run_if_done(db, run.id)
+            batch._finalize_run_if_done(db, run.id)
             self.assertEqual(run.status, 'success')
             self.assertFalse(src.enabled)
-        # 存在失败 → 保持启用，等 cron 增量重试
+        # 存在失败 → 保持启用，等自动/手动同步重试
         with self.sessions() as db:
             src = self._once_source(db)
             run = SyncRun(source_id=src.id, status='running', total=2, failed_count=1)
@@ -297,11 +290,9 @@ class RetireImportOnceTests(unittest.TestCase):
                                 node_id=f'n{i}', name=f'n{i}', dataset_id='1', dataset_name='t',
                                 status=st))
             db.commit()
-            with patch('app.services.sync.scheduler.stop_source_job') as stop:
-                batch._finalize_run_if_done(db, run.id)
+            batch._finalize_run_if_done(db, run.id)
             self.assertEqual(run.status, 'partial')
             self.assertTrue(src.enabled)
-            stop.assert_not_called()
 
 
 class BatchDeleteTasksTests(unittest.TestCase):
@@ -365,9 +356,9 @@ class BatchDeleteTasksTests(unittest.TestCase):
             self.assertEqual(res['removed'], 1)
             self.assertEqual(res['excluded'], 1)
             self.assertIsNone(db.get(SyncTask, task.id))
-            self.assertFalse(mapping.enabled)              # 排除自动同步，防 cron 重建
+            self.assertFalse(mapping.enabled)              # 排除自动同步，防再次编目重建
             self.assertIsNone(db.get(self.doc_cls, _uuid.UUID(doc_id)))
-            # run 已无未完成任务 → 立即收尾，不留 running 卡住 cron 编目
+            # run 已无未完成任务 → 立即收尾，不留 running 卡住后续编目
             run = db.get(SyncRun, run_id)
             self.assertEqual(run.status, 'success')
 
@@ -398,6 +389,118 @@ class BatchDeleteTasksTests(unittest.TestCase):
             self.assertEqual(res['removed'], 0)
             self.assertEqual(res['skipped'], 1)
             self.assertIsNotNone(db.get(SyncTask, task.id))
+
+
+class BatchDeleteAllTasksTests(unittest.TestCase):
+    """删除所有：按页签+筛选范围命中删除（含未翻到的页），处理中的除外。"""
+
+    def setUp(self):
+        self.sql = create_engine('sqlite://', poolclass=StaticPool, connect_args={'check_same_thread': False})
+        for model in (SyncSource, SyncRun, SyncDocumentMapping, SyncLog, SyncFailure, SyncTask, Setting):
+            model.__table__.create(self.sql)
+        self.doc_cls = _library_document_stub()
+        self.doc_cls.__table__.create(self.sql)
+        self.sessions = sessionmaker(bind=self.sql, expire_on_commit=False)
+
+    def tearDown(self):
+        self.sql.dispose()
+
+    def _source(self, db):
+        src = SyncSource(name='s', workspace_id='w', root_node_id='r',
+                         dataset_id='1', dataset_name='t', enabled=True)
+        db.add(src)
+        db.commit()
+        return src
+
+    def _task(self, db, src, node_id, status, mapping_status='pending', doc_status='PENDING'):
+        run = db.query(SyncRun).filter_by(source_id=src.id, status='running').first()
+        if run is None:
+            run = SyncRun(source_id=src.id, status='running')
+            db.add(run)
+            db.commit()
+        doc_id = None
+        if doc_status is not None:
+            doc = self.doc_cls(library_id=1, status=doc_status)
+            db.add(doc)
+            db.commit()
+            doc_id = str(doc.id)
+        if mapping_status is not None:
+            db.add(SyncDocumentMapping(source_id=src.id, node_id=node_id, name='doc',
+                                       category='', status=mapping_status, document_id=doc_id))
+        task = SyncTask(run_id=run.id, source_id=src.id, kind='sync', action='create',
+                        node_id=node_id, name='doc', dataset_id='1', dataset_name='t',
+                        status=status)
+        db.add(task)
+        db.commit()
+        return task
+
+    def _delete_all(self, db, **overrides):
+        from app.routes.sync_route import batch_delete_all_tasks
+        params = dict(tab='done', status='', source_id=None, ext='', duration='',
+                      keyword='', start_from='', start_to='')
+        params.update(overrides)
+        with patch('app.routes.sync_route.LibraryDocument', self.doc_cls):
+            return batch_delete_all_tasks(db=db, **params)
+
+    def test_delete_all_removes_scope_and_excludes_mapping(self):
+        with self.sessions() as db:
+            src = self._source(db)
+            failed = self._task(db, src, 'n1', 'failed')
+            ok = self._task(db, src, 'n2', 'success', mapping_status='synced', doc_status='COMPLETED')
+            res = self._delete_all(db)
+            self.assertEqual(res['removed'], 2)
+            self.assertGreaterEqual(res['excluded'], 1)
+            self.assertIsNone(db.get(SyncTask, failed.id))
+            self.assertIsNone(db.get(SyncTask, ok.id))
+
+    def test_delete_all_keeps_running_tasks(self):
+        with self.sessions() as db:
+            src = self._source(db)
+            running = self._task(db, src, 'n1', 'running', mapping_status=None, doc_status=None)
+            self._task(db, src, 'n2', 'failed')
+            res = self._delete_all(db)
+            self.assertEqual(res['removed'], 1)
+            self.assertIsNotNone(db.get(SyncTask, running.id))
+
+    def test_delete_all_respects_status_filter(self):
+        with self.sessions() as db:
+            src = self._source(db)
+            self._task(db, src, 'n1', 'failed')
+            ok = self._task(db, src, 'n2', 'success', mapping_status='synced', doc_status='COMPLETED')
+            res = self._delete_all(db, status='failed')
+            self.assertEqual(res['removed'], 1)
+            self.assertIsNotNone(db.get(SyncTask, ok.id))
+
+    def test_delete_all_empty_scope(self):
+        with self.sessions() as db:
+            self._source(db)
+            res = self._delete_all(db, status='failed')
+            self.assertEqual(res['removed'], 0)
+            self.assertIn('没有可清理', res['message'])
+
+    def test_delete_all_chunked_bulk_across_blocks(self):
+        """万级删除路径回归：任务数超过分块大小（_BULK_CHUNK）时跨多块集合式删除。
+
+        此前逐行 ORM 删除在单请求单事务里产生上万条 DELETE 往返 → 生产 500。
+        重写为分块 bulk UPDATE/DELETE 后，跨块结果必须与单块一致。
+        """
+        with self.sessions() as db:
+            src = self._source(db)
+            total = 120
+            for i in range(total):
+                self._task(db, src, f'n{i}', 'failed')
+            with patch('app.routes.sync_route._BULK_CHUNK', 50):
+                res = self._delete_all(db)
+            self.assertEqual(res['removed'], total)
+            self.assertEqual(res['excluded'], total)
+            self.assertEqual(db.query(SyncTask).count(), 0)
+            # 预建占位文档一并清理、映射全部置为不参与同步
+            self.assertEqual(db.query(self.doc_cls).count(), 0)
+            self.assertEqual(db.query(SyncDocumentMapping)
+                             .filter_by(enabled=True).count(), 0)
+            # run 已无未完成任务 → 立即收尾
+            run = db.query(SyncRun).filter_by(source_id=src.id).first()
+            self.assertEqual(run.status, 'success')
 
 
 class SyncRunStartedAtTests(unittest.TestCase):
@@ -477,6 +580,169 @@ class BatchRefreshCapTests(unittest.TestCase):
                  patch.object(batch, '_refresh_parsings', fake_parsings):
                 batch._refresh_parsing_documents(db)
             self.assertEqual(seen.get('count'), batch._REFRESH_DOCS_PER_TICK)
+
+
+class SyncQueueConsistencyTests(unittest.TestCase):
+    """回归：同步队列（SyncTask）与知识列表（LibraryDocument）进度一致性。
+
+    - 文档状态可被知识列表页 5s 前端轮询直接推进到终态（该路径不回写任务），
+      (c') 孤儿收尾扫描按「文档终态 + 任务 running」兜底收尾；
+    - 历史 bug：_refresh_parsings 曾在 AsyncSession 上调同步 _settle_tasks_for_document
+      （s.query）→ 每次文档完成都抛 AttributeError，连文档状态 commit 一起回滚，
+      任务永远收不了尾，队列纹丝不动。
+    """
+
+    def setUp(self):
+        self.sql = create_engine('sqlite://', poolclass=StaticPool,
+                                 connect_args={'check_same_thread': False})
+        for model in (SyncSource, SyncRun, SyncDocumentMapping, SyncLog, SyncFailure, SyncTask):
+            model.__table__.create(self.sql)
+        # 本地文档替身：比 _library_document_stub 多 message 列（收尾失败信息要读它）
+        import uuid as _uuid
+        from sqlalchemy import Column, Integer, String, Text
+        from sqlalchemy.dialects.postgresql import UUID
+        from sqlalchemy.orm import declarative_base
+
+        class _Doc(declarative_base()):
+            __tablename__ = 'library_documents'
+            id = Column(UUID(as_uuid=True), primary_key=True, default=_uuid.uuid4)
+            library_id = Column(Integer)
+            status = Column(String(20), default='PENDING')
+            message = Column(Text, default='')
+
+        self.doc_cls = _Doc
+        self.doc_cls.__table__.create(self.sql)
+        self.sessions = sessionmaker(bind=self.sql, expire_on_commit=False)
+        with self.sessions() as db:
+            db.add(SyncSource(name='t', workspace_id='w', root_node_id='r',
+                              dataset_id='1', dataset_name='t', enabled=True))
+            db.commit()
+        self.addCleanup(self.sql.dispose)
+
+    def _mk_run(self, db, total=1):
+        run = SyncRun(source_id=1, trigger='manual', status='running', total=total)
+        db.add(run)
+        db.flush()
+        return run
+
+    def test_orphan_scan_settles_terminal_docs_only(self):
+        """孤儿收尾：只动「文档终态 + 任务 running」的组合，幂等且不误伤在途任务。"""
+        from app.services.sync import batch
+        with self.sessions() as db:
+            run = self._mk_run(db, total=4)
+            # A：文档 COMPLETED（前端轮询先行推进）、任务 running → 收尾 success
+            doc_a = self.doc_cls(library_id=1, status='COMPLETED')
+            db.add(doc_a); db.flush()
+            db.add(SyncTask(run_id=run.id, source_id=1, name='a', action='create',
+                            status='running', library_document_id=str(doc_a.id)))
+            # B：文档 FAILED、任务 running → 收尾 failed
+            doc_b = self.doc_cls(library_id=1, status='FAILED')
+            db.add(doc_b); db.flush()
+            db.add(SyncTask(run_id=run.id, source_id=1, name='b', action='update',
+                            status='running', library_document_id=str(doc_b.id)))
+            # C：文档 PENDING（批处理在途）、任务 running → 不动
+            doc_c = self.doc_cls(library_id=1, status='PENDING')
+            db.add(doc_c); db.flush()
+            db.add(SyncTask(run_id=run.id, source_id=1, name='c', action='create',
+                            status='running', library_document_id=str(doc_c.id)))
+            # D：文档 COMPLETED 但任务已 success → 幂等，不重复计数
+            doc_d = self.doc_cls(library_id=1, status='COMPLETED')
+            db.add(doc_d); db.flush()
+            db.add(SyncTask(run_id=run.id, source_id=1, name='d', action='create',
+                            status='success', library_document_id=str(doc_d.id)))
+            db.commit()
+
+        with patch.object(batch, 'LibraryDocument', self.doc_cls), \
+             patch.object(batch, 'SyncSessionLocal', self.sessions):
+            settled = batch._settle_orphaned_running_tasks()
+        self.assertEqual(settled, 2)
+
+        with self.sessions() as db:
+            tasks = {t.name: t for t in db.query(SyncTask).all()}
+            self.assertEqual(tasks['a'].status, 'success')
+            self.assertIsNotNone(tasks['a'].finished_at)
+            self.assertEqual(tasks['b'].status, 'failed')
+            self.assertIn('解析失败', tasks['b'].error)
+            self.assertEqual(tasks['c'].status, 'running')  # 在途不动
+            run = db.query(SyncRun).one()
+            self.assertEqual(run.created_count, 1)   # a：create + COMPLETED
+            self.assertEqual(run.updated_count, 0)   # b 是 failed 收尾，不记 updated
+            self.assertEqual(run.failed_count, 1)    # b：FAILED → failed
+            self.assertEqual(run.status, 'running')  # c 未终态，run 继续跑
+
+    def test_refresh_parsing_documents_settles_terminal_sync_side(self):
+        """tick refresh：文档到终态后在同步侧收尾任务（不再经 AsyncSession）。"""
+        from app.services.sync import batch
+        with self.sessions() as db:
+            run = self._mk_run(db, total=1)
+            doc = self.doc_cls(library_id=1, status='PARSING')
+            db.add(doc); db.flush()
+            db.add(SyncDocumentMapping(source_id=1, node_id='n1', name='x',
+                                       category='', status='synced',
+                                       document_id=str(doc.id)))
+            db.add(SyncTask(run_id=run.id, source_id=1, name='x', action='create',
+                            status='running', library_document_id=str(doc.id)))
+            db.commit()
+
+        async def fake_parsings(pairs):
+            # 模拟 refresh 把文档推进到 COMPLETED（真实路径在异步会话提交）
+            with self.sessions() as sdb:
+                for doc_id, _ in pairs:
+                    sdb.query(self.doc_cls).filter_by(id=doc_id).update({'status': 'COMPLETED'})
+                sdb.commit()
+            return {doc_id for doc_id, _ in pairs}
+
+        with patch.object(batch, 'LibraryDocument', self.doc_cls), \
+             patch.object(batch, 'SyncSessionLocal', self.sessions), \
+             patch.object(batch, '_refresh_parsings', fake_parsings):
+            with self.sessions() as db:
+                batch._refresh_parsing_documents(db)
+
+        with self.sessions() as db:
+            task = db.query(SyncTask).one()
+            self.assertEqual(task.status, 'success')
+            self.assertIsNotNone(task.finished_at)
+            run = db.query(SyncRun).one()
+            self.assertEqual(run.created_count, 1)
+            self.assertEqual(run.status, 'success')
+
+    def test_refresh_parsings_no_async_settle_regression(self):
+        """历史 bug 回归：_refresh_parsings 内不得再触碰同步 ORM（AsyncSession
+        无 .query，曾抛 AttributeError 且吞掉文档状态 commit）。"""
+        import asyncio
+        import uuid as _uuid
+        from types import SimpleNamespace
+        from app.services.sync import batch
+        from app.routes import managed_library
+        from kb_common.models import LibraryDocument as RealDoc
+
+        doc = SimpleNamespace(id=_uuid.uuid4(), status='PARSING')
+        committed = []
+
+        class _FakeAsyncSession:
+            async def __aenter__(self):
+                return self
+            async def __aexit__(self, *exc):
+                return False
+            async def get(self, cls, pk):
+                return doc if cls is RealDoc else SimpleNamespace(id=1)
+            async def commit(self):
+                committed.append(True)
+            # 故意不实现 .query：历史 bug 正是在这里抛 AttributeError
+
+        async def fake_refresh_state(adapter, s, lib, d):
+            d.status = 'COMPLETED'
+
+        def fake_fresh_session():
+            return _FakeAsyncSession()
+
+        with patch('kb_common.database.fresh_session', fake_fresh_session), \
+             patch.object(managed_library, 'engine', lambda: None), \
+             patch.object(managed_library, 'refresh_state', fake_refresh_state):
+            terminal = asyncio.run(batch._refresh_parsings({(doc.id, 1)}))
+
+        self.assertEqual(terminal, {doc.id})
+        self.assertTrue(committed)  # 文档状态 commit 不再被 settle 异常吞掉
 
 
 if __name__ == '__main__':

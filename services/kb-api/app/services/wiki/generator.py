@@ -21,10 +21,21 @@ from openai import AsyncOpenAI
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from kb_common.database import SessionLocal
+from kb_common.database import SessionLocal, fresh_session
 from kb_common.models import KnowledgeLibrary, LibraryDocument, WikiGenerationRun, WikiPage
 
 logger = logging.getLogger(__name__)
+
+# uvicorn 主事件循环（lifespan 时注入）。后台线程临时 loop 里产生的完成钩子
+# 必须把后续任务交回主 loop，否则 create_task 的协程随临时 loop 关闭被丢弃，
+# 且全局 SessionLocal 连接池绑主 loop、跨 loop 复用会污染连接池（连接永久
+# 泄漏为 PG idle in transaction，直至 QueuePool 耗尽、全站接口随机 500）。
+_main_loop: asyncio.AbstractEventLoop | None = None
+
+
+def set_main_loop(loop: asyncio.AbstractEventLoop) -> None:
+    global _main_loop
+    _main_loop = loop
 
 # 每批消化原料上限（控 LLM 上下文与成本）；超出部分拆后续批
 BATCH_SIZE = 5
@@ -64,12 +75,33 @@ async def resolve_llm(s: AsyncSession) -> dict:
     return await resolve_llm_config(s)
 
 
+class LLMError(ValueError):
+    """LLM 调用失败（message 为面向用户的中文提示）；路由层按 ValueError 转 422。"""
+
+
+def friendly_llm_error(e: Exception) -> str:
+    """LLM API 原始报错 → 可行动的中文提示（402 余额不足最常见，先给出处理路径）。"""
+    raw = str(e)
+    low = raw.lower()
+    if "402" in raw or "insufficient balance" in low:
+        return ("LLM 账户余额不足（Error 402），请为当前模型服务充值，"
+                "或在「模型配置」中切换可用的 LLM 后重试")
+    if "401" in raw or "authentication" in low or "invalid api key" in low:
+        return "LLM API Key 无效或已过期（Error 401），请在「模型配置」中检查密钥后重试"
+    if "429" in raw or "rate limit" in low:
+        return "LLM 请求过于频繁或配额耗尽（Error 429），请稍后重试"
+    return raw
+
+
 async def _chat(llm: dict, system: str, user: str) -> str:
     client = AsyncOpenAI(base_url=llm["base_url"], api_key=llm.get("api_key") or "empty",
                          timeout=_LLM_TIMEOUT, max_retries=1)
-    resp = await client.chat.completions.create(
-        model=llm["model"], temperature=0.2,
-        messages=[{"role": "system", "content": system}, {"role": "user", "content": user}])
+    try:
+        resp = await client.chat.completions.create(
+            model=llm["model"], temperature=0.2,
+            messages=[{"role": "system", "content": system}, {"role": "user", "content": user}])
+    except Exception as e:  # noqa: BLE001 — 统一翻译为用户可理解的失败原因
+        raise LLMError(friendly_llm_error(e)) from e
     return (resp.choices[0].message.content or "").strip()
 
 
@@ -130,7 +162,7 @@ async def enqueue_generation(library_id: int, document_ids: list[str],
     document_ids = [d for d in dict.fromkeys(str(d) for d in document_ids if d)]
     if not document_ids:
         return None
-    async with SessionLocal() as s:
+    async with fresh_session() as s:
         run = (await s.execute(select(WikiGenerationRun).where(
             WikiGenerationRun.library_id == library_id,
             WikiGenerationRun.kind == "ingest",
@@ -147,15 +179,17 @@ async def enqueue_generation(library_id: int, document_ids: list[str],
     return run_id
 
 
-async def auto_trigger_for_document(doc) -> None:
+async def auto_trigger_for_document(s: AsyncSession, doc) -> None:
     """解析完成钩子（_apply_chunks 末尾调用）：wiki 库且自动生成开启时入队。
 
-    独立会话即时提交 run 行，避免依赖调用方事务的提交时序。
+    lib 类型检查复用调用方会话：本钩子可能运行在批处理线程的临时事件循环
+    （_refresh_parsings → asyncio.run）里，自行开全局 SessionLocal 会话会跨
+    loop 复用绑主 loop 的连接池，污染并泄漏连接。入队（enqueue_generation）
+    仍走独立会话即时提交 run 行，不依赖调用方事务的提交时序。
     """
-    async with SessionLocal() as s:
-        lib = await s.get(KnowledgeLibrary, doc.library_id)
-        if lib is None or lib.library_type != "wiki" or not wiki_auto_generate(lib):
-            return
+    lib = await s.get(KnowledgeLibrary, doc.library_id)
+    if lib is None or lib.library_type != "wiki" or not wiki_auto_generate(lib):
+        return
     await enqueue_generation(doc.library_id, [str(doc.id)], triggered_by="auto")
 
 
@@ -179,7 +213,17 @@ def _spawn(run_id: UUID) -> None:
                 except Exception:
                     pass
 
-    asyncio.create_task(_worker())
+    try:
+        current = asyncio.get_running_loop()
+    except RuntimeError:
+        current = None
+    if _main_loop is None or current is _main_loop:
+        # 主 loop 上直接建任务；无主 loop 引用（如单测）退回当前 loop
+        asyncio.create_task(_worker())
+    else:
+        # 批处理线程临时 loop：create_task 会随 asyncio.run 返回被丢弃，
+        # 必须把 worker 交回主 loop 执行
+        asyncio.run_coroutine_threadsafe(_worker(), _main_loop)
 
 
 # ---------------------------------------------------------------- 生成主流程

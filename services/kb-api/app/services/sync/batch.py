@@ -1,14 +1,20 @@
 """library 同步批处理：XXL-Job 全局作业每轮消费一批待处理任务（默认 30s × 5 篇）。
 
 每轮四段：
-(a) 自愈：回收卡死 running 的批处理任务（kb-api 崩溃/被 kill 后悬挂回退 pending）；
+(a) 自愈：回收卡死 running 的批处理任务（kb-api 崩溃/被 kill 后悬挂回退 pending；
+    关联文档仍在 PARSING 解析中的不回收，等 (c) 收尾）；
 (b) 认领：FOR UPDATE SKIP LOCKED 取最早 N 个 pending 任务（跨源全局 FIFO），
     必须先于 refresh：refresh 受外部服务延迟影响可能耗时数分钟，排在前面会
     饿死认领（新任务迟迟不流转 running，run 被看门狗收编）；
 (c) refresh：跟进 PARSING 中的同步文档（查 MinerU job、完成时落地分段），
-    不依赖前端轮询；每轮随机限量刷新，失败仅记日志；
+    不依赖前端轮询；每轮随机限量刷新，失败仅记日志；文档到终态时同步收尾
+    其关联任务（success/failed）——同步队列覆盖「下载→解析→可检索」全周期；
+    文档状态也可能被知识列表页 5s 前端轮询直接推进到终态（该路径不回写任务），
+    由 (c') 孤儿收尾兜底：每轮扫描「文档已终态、任务仍 running」直接收尾，
+    否则任务卡 running 直到 30min 回收窗口重跑下载；
 (d) 逐任务：锁源 → 现取节点元数据 → 下载 → content_hash 未变跳过 /
-    更新预建 LibraryDocument 行并提交解析 → 回写映射 → 任务终态；
+    更新预建 LibraryDocument 行并提交解析 → 回写映射；任务保持 running
+    直到解析结束（txt/md/csv 直读秒完成的立即终态）；
 (e) 收尾：任务所属 run 若全部任务终态 → 按既有规则置 success/partial/failed。
 """
 from __future__ import annotations
@@ -42,15 +48,27 @@ def run_sync_batch_tick(job_log=None) -> tuple[int, str]:
     tasks: list[int] = []
     try:
         with SyncSessionLocal() as db:
-            # (a) 自愈：认领后进程中断的 running 任务回退 pending（下轮重新处理）
+            # (a) 自愈：认领后进程中断的 running 任务回退 pending（下轮重新处理）。
+            # 任务生命周期已覆盖解析：文档仍在 PARSING 的 running 任务不回收——
+            # 解析大文件常超 30 分钟，回退会导致重复下载/上传。
             reclaim_before = datetime.now() - timedelta(seconds=s.sync_batch_running_reclaim_seconds)
-            db.query(SyncTask).filter(
+            stale = db.query(SyncTask).filter(
                 SyncTask.status == "running",
                 SyncTask.library_document_id.isnot(None),
                 SyncTask.started_at.isnot(None),
                 SyncTask.started_at < reclaim_before,
-            ).update({"status": "pending", "error": ""},
-                     synchronize_session=False)
+            ).all()
+            for t in stale:
+                doc_row = None
+                try:
+                    doc_row = db.query(LibraryDocument).filter_by(
+                        id=uuid.UUID(t.library_document_id)).first()
+                except ValueError:
+                    doc_row = None
+                if doc_row is not None and doc_row.status == "PARSING":
+                    continue  # 解析中：等 refresh 段收尾，不回收重跑
+                t.status = "pending"
+                t.error = ""
             db.commit()
 
             # (b) 原子认领：跨源全局 FIFO，SKIP LOCKED 防多 tick 并发重复领取。
@@ -73,6 +91,11 @@ def run_sync_batch_tick(job_log=None) -> tuple[int, str]:
 
             # (c) refresh：兜底收割 PARSING 文档的解析状态（每轮随机限量）
             _refresh_parsing_documents(db)
+            # (c') 孤儿任务收尾：文档状态可被知识列表页 5s 前端轮询直接推进到
+            # 终态（该路径不回写任务），refresh 段只查 PARSING 文档会漏掉它们。
+            # 每轮全量兜底「文档已终态、任务仍 running」的组合直接收尾，
+            # 保证同步队列与知识列表口径一致（滞后 ≤ 一个 tick 30s）。
+            _settle_orphaned_running_tasks()
     except Exception as exc:  # noqa: BLE001
         logger.exception("批处理认领失败")
         if job_log is not None:
@@ -101,7 +124,11 @@ _REFRESH_DOCS_PER_TICK = 15
 
 
 def _refresh_parsing_documents(db) -> None:
-    """刷新 library 同步源关联的 PARSING 文档（MinerU job 查询 + 完成时落地分段）。"""
+    """刷新 library 同步源关联的 PARSING 文档（MinerU job 查询 + 完成时落地分段）。
+
+    文档到终态 → 在同步侧收尾其 running 任务（任务生命周期覆盖解析）；
+    被前端轮询先行推进到终态的文档由 _settle_orphaned_running_tasks 兜底。
+    """
     doc_id_strs = [row[0] for row in db.execute(
         select(SyncDocumentMapping.document_id).distinct()
         .where(SyncDocumentMapping.document_id.isnot(None))
@@ -119,18 +146,38 @@ def _refresh_parsing_documents(db) -> None:
         .order_by(func.random()).limit(_REFRESH_DOCS_PER_TICK).all()
     if not rows:
         return
+    terminal: set = set()
     try:
-        asyncio.run(_refresh_parsings(set(rows)))
+        terminal = asyncio.run(_refresh_parsings(set(rows))) or set()
     except Exception as exc:  # noqa: BLE001
         logger.warning("批处理刷新解析状态失败: %s", exc)
+    if not terminal:
+        return
+    # 解析刚到终态的文档：收尾其关联 running 任务。注意必须用同步会话——
+    # _settle_tasks_for_document 是同步 ORM（s.query），此前在 _refresh_parsings
+    # 的 AsyncSession 上直接调用，每次文档完成都抛 AttributeError 且连文档
+    # 状态 commit 一起回滚，任务永远收不了尾。
+    with SyncSessionLocal() as sdb:
+        for doc_id in terminal:
+            doc = sdb.query(LibraryDocument).filter_by(id=doc_id).first()
+            if doc is not None:
+                _settle_tasks_for_document(sdb, doc)
+        sdb.commit()
 
 
-async def _refresh_parsings(pairs: set) -> None:
+async def _refresh_parsings(pairs: set) -> set:
+    """刷新 PARSING 文档的解析状态；返回本轮到终态的文档 ID 集合。
+
+    任务收尾在同步侧进行（调用方 _refresh_parsing_documents）——历史 bug：
+    本函数曾直接在 AsyncSession 上调同步 _settle_tasks_for_document，
+    AttributeError 导致收尾路径全断，详见调用方注释。
+    """
     from kb_common.database import fresh_session
 
     from app.routes.managed_library import engine as get_engine
     from app.routes.managed_library import refresh_state
     adapter = get_engine()
+    terminal: set = set()
     # 独立短命引擎：执行器线程的临时事件循环不能复用绑定主 loop 的全局连接池
     async with fresh_session() as s:
         for doc_id, library_id in pairs:
@@ -140,9 +187,71 @@ async def _refresh_parsings(pairs: set) -> None:
                 if lib is None or doc is None:
                     continue
                 await refresh_state(adapter, s, lib, doc)
+                if doc.status in ("COMPLETED", "FAILED", "CANCELLED"):
+                    terminal.add(doc_id)
                 await s.commit()
             except Exception as exc:  # noqa: BLE001
                 logger.warning("刷新文档 %s 解析状态失败: %s", doc_id, exc)
+    return terminal
+
+
+def _settle_tasks_for_document(s, doc) -> None:
+    """文档解析终态 → 回写其关联 running 同步任务（成功/失败/取消）。
+
+    任务 running 期间（解析中）不 bump 计数，在这里按最终结果补记，
+    保证 run 的 created/updated/failed 计数与任务终态一致。
+    """
+    from datetime import datetime
+
+    tasks = s.query(SyncTask).filter(
+        SyncTask.library_document_id == str(doc.id),
+        SyncTask.status == "running",
+    ).all()
+    for t in tasks:
+        if doc.status == "COMPLETED":
+            t.status, t.error = "success", ""
+            t.finished_at = datetime.now()
+            _bump_run(s, t.run_id, "updated" if t.action == "update" else "created")
+        else:
+            t.status = "failed"
+            t.error = f"解析{'失败' if doc.status == 'FAILED' else '已取消'}: {doc.message or ''}"[:2000]
+            t.finished_at = datetime.now()
+            _bump_run(s, t.run_id, "failed")
+        _finalize_run_if_done(s, t.run_id)
+
+
+def _settle_orphaned_running_tasks() -> int:
+    """收尾被外部路径先行推进到终态的文档的 running 任务，返回收尾文档数。
+
+    知识列表页每 5s 对 PARSING 文档调 POST /documents/{id}/refresh，文档可直接
+    被推进到 COMPLETED/FAILED —— 该路径不回写 SyncTask；而 (c) refresh 段只查
+    status=="PARSING" 的文档，被前端先推进的文档永远轮不到收尾，任务会卡
+    running 直到 30min 回收窗口回退 pending 重跑下载。这里每轮兜底扫描
+    「文档已终态、任务仍 running」的组合，按文档终态直接收尾（幂等：只动
+    running 任务；与 _process_locked 的终态回写语义一致）。
+    """
+    with SyncSessionLocal() as db:
+        id_strs = {row[0] for row in db.query(SyncTask.library_document_id).filter(
+            SyncTask.status == "running",
+            SyncTask.library_document_id.isnot(None),
+        ).distinct().all()}
+        uuids = []
+        for v in id_strs:
+            try:
+                uuids.append(uuid.UUID(v))
+            except ValueError:
+                continue
+        if not uuids:
+            return 0
+        docs = db.query(LibraryDocument).filter(
+            LibraryDocument.id.in_(uuids),
+            LibraryDocument.status.in_(("COMPLETED", "FAILED", "CANCELLED")),
+        ).all()
+        for doc in docs:
+            _settle_tasks_for_document(db, doc)
+        if docs:
+            db.commit()
+        return len(docs)
 
 
 # ---------- (d) 逐任务处理 ----------
@@ -217,9 +326,23 @@ def _process_locked(db, task: SyncTask, source: SyncSource) -> tuple[str, str]:
         # 增量跳过：上一轮已同步且内容未变化（与 engine _process_node 同口径）
         if (mapping is not None and mapping.status == "synced"
                 and mapping.content_hash == content_hash):
+            # 内容未变不重新上传；任务终态同样跟随文档解析状态——
+            # 文档仍在 PARSING（上一轮提交的解析未收尾）时保持 running，
+            # 由 tick refresh 段在解析结束时收尾，避免口径断裂
             if task is not None:
-                task.status = "success"
-                task.finished_at = datetime.now()
+                doc_row = None
+                if mapping.document_id:
+                    try:
+                        doc_row = db.query(LibraryDocument).filter_by(
+                            id=uuid.UUID(mapping.document_id)).first()
+                    except ValueError:
+                        doc_row = None
+                if doc_row is not None and doc_row.status == "PARSING":
+                    task.status = "running"
+                    task.finished_at = None
+                else:
+                    task.status = "success"
+                    task.finished_at = datetime.now()
                 task.error = ""
             mapping.name = name
             mapping.meta_hash = _meta_hash(node)
@@ -253,9 +376,27 @@ def _process_locked(db, task: SyncTask, source: SyncSource) -> tuple[str, str]:
         mapping.error = ""
         mapping.last_synced_at = datetime.now()
 
-        task.status = "success"
-        task.finished_at = datetime.now()
+        # 任务终态跟随文档解析：同步（下载/上传）完成即 mapping=synced，但任务
+        # 保持 running 直到解析结束——PARSING 由 tick refresh 段收尾，txt/md/csv
+        # 本地直读已 COMPLETED 的立即 success。同步队列由此覆盖完整生命周期
+        # （下载 → 解析 → 可检索），与知识列表状态口径一致。
+        doc_row = None
+        try:
+            doc_row = db.query(LibraryDocument).filter_by(
+                id=uuid.UUID(doc_id)).first()
+        except ValueError:
+            doc_row = None
+        if doc_row is not None and doc_row.status == "PARSING":
+            task.status = "running"
+            task.finished_at = None
+        else:
+            task.status = "success"
+            task.finished_at = datetime.now()
         task.error = ""
+        if doc_row is not None and doc_row.status == "FAILED":
+            task.status = "failed"
+            task.finished_at = datetime.now()
+            task.error = f"解析失败: {doc_row.message or ''}"[:2000]
         try:
             task.file_size = local_file.stat().st_size
         except OSError:
@@ -263,7 +404,8 @@ def _process_locked(db, task: SyncTask, source: SyncSource) -> tuple[str, str]:
         task.file_ext = local_file.suffix.lower().lstrip(".") or task.file_ext
         db.query(SyncFailure).filter_by(source_id=source.id, node_id=node_id).delete()
         db.commit()
-        _bump_run(db, task.run_id, "updated" if was_update else "created")
+        if task.status != "running":
+            _bump_run(db, task.run_id, "updated" if was_update else "created")
         _finalize_run_if_done(db, task.run_id)
         return ("updated" if was_update else "created"), ""
     except Exception as exc:  # noqa: BLE001
@@ -376,10 +518,10 @@ def _finalize_run_if_done(db, run_id: int | None) -> None:
 
 
 def retire_import_once(db, source_id: int | None) -> None:
-    """单次导入源收编：源已无未消费任务时停用源与 XXL-Job 作业（幂等，best effort）。
+    """单次导入源收编：源已无未消费任务时停用源（幂等，best effort）。
 
-    仅在 import_once 且该源队列已清空时生效；作业停用失败仅记录日志
-    （disabled 源在下次 reload_sync_jobs 对齐时同样会被停）。
+    仅在 import_once 且该源队列已清空时生效。定时编目已取消，
+    不再存在需要停用的 cron 作业。
     """
     if not source_id:
         return
@@ -394,5 +536,3 @@ def retire_import_once(db, source_id: int | None) -> None:
     source.enabled = False
     db.commit()
     logger.info("单次导入源 %s 已完成，自动停用", source_id)
-    from .scheduler import stop_source_job
-    stop_source_job(source.xxl_job_id)

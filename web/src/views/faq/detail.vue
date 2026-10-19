@@ -16,6 +16,9 @@ import { formatDateTime } from '@/utils/format'
 const route = useRoute()
 const router = useRouter()
 const tabsStore = useTabsStore()
+// 页签路径挂载时固化：KeepAlive 缓存期间全局 route 会指向其它页面，
+// 异步回调里更新页签标题必须用本页路径，否则会把当前页签改名
+const tabPath = route.path
 const kbId = route.params.id as string
 
 const kb = ref<FaqKb | null>(null)
@@ -39,7 +42,7 @@ async function fetchKb() {
   const kbs = await listFaqKbs()
   kb.value = kbs.find(k => k.id === kbId) || null
   // 页签标题显示问答库名称（与文档库详情页签同构）
-  if (kb.value) tabsStore.updateTabTitle(route.path, kb.value.name)
+  if (kb.value) tabsStore.updateTabTitle(tabPath, kb.value.name)
 }
 
 async function fetchEntries() {

@@ -1,4 +1,5 @@
-// 钉钉知识库 → 本地文档库 定时增量同步：类型定义
+// 钉钉知识库 → 本地文档库 事件驱动自动同步：类型定义
+// 触发方式仅两种：auto（钉钉知识库变更事件）/ manual（上传文档、手动立即同步）
 
 export interface Workspace {
   workspaceId: string
@@ -33,7 +34,6 @@ export interface Source {
   /** 目标文档库 ID（本地 document-library ID 字符串化） */
   dataset_id: string | null
   delete_policy: 'keep' | 'sync'
-  cron: string
   enabled: boolean
   created_at: string
   updated_at: string
@@ -47,7 +47,6 @@ export interface SourcePayload {
   start_dir?: string
   dataset_name: string
   delete_policy: 'keep' | 'sync'
-  cron: string
   enabled: boolean
   /** 节点白名单：限定只同步这些钉钉文档节点；空数组=同步整棵目录树 */
   node_whitelist?: string[]
@@ -56,10 +55,13 @@ export interface SourcePayload {
 /** 同步身份来源：owner 自己的钉钉绑定 / 全局服务账号兜底 / 空串=历史数据无记录 */
 export type OperatorSource = 'owner_binding' | 'global_fallback' | ''
 
+/** 触发方式：manual=手动（上传/立即同步）；auto=自动（钉钉变更事件）；schedule=历史定时数据，展示为自动 */
+export type SyncTrigger = 'manual' | 'auto' | 'schedule'
+
 export interface Run {
   id: number
   source_id: number
-  trigger: 'manual' | 'schedule'
+  trigger: SyncTrigger
   status: 'running' | 'success' | 'partial' | 'failed'
   started_at: string
   finished_at: string | null
@@ -127,7 +129,7 @@ export interface SyncTask {
   dataset_name: string
   status: 'pending' | 'running' | 'success' | 'failed'
   error: string
-  trigger: 'manual' | 'schedule'
+  trigger: SyncTrigger
   operator: string
   retry_count: number
   started_at: string | null

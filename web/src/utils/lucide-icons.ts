@@ -6,16 +6,16 @@
  * 约定见 docs/frontend-dev-spec.md §2.4。
  */
 import {
-  BadgeCheck, ChartLine, ChevronDown, CircleHelp, Clock, Cpu, Download, EyeOff,
-  FolderOpen, Gauge, KeyRound, Library, ListTodo, MessageCircle, MessagesSquare, Monitor,
-  Pencil, Plug, Search, Settings, Stamp, User, Users, WandSparkles, Workflow,
+  Blocks, Bot, BadgeCheck, BotMessageSquare, ChartLine, ChevronDown, CircleHelp, Clock, Cpu, EyeOff,
+  FolderOpen, Gauge, Import, KeyRound, Library, ListTodo, MessageCircle, MessagesSquare,
+  Pencil, Plug, Search, Settings, ShieldCheck, User, Users, Workflow,
 } from '@lucide/vue'
 import type { Component } from 'vue'
 
 export const lucideIconMap: Record<string, Component> = {
-  BadgeCheck, ChartLine, ChevronDown, CircleHelp, Clock, Cpu, Download, EyeOff,
-  FolderOpen, Gauge, KeyRound, Library, ListTodo, MessageCircle, MessagesSquare, Monitor,
-  Pencil, Plug, Search, Settings, Stamp, User, Users, WandSparkles, Workflow,
+  Blocks, Bot, BadgeCheck, BotMessageSquare, ChartLine, ChevronDown, CircleHelp, Clock, Cpu, EyeOff,
+  FolderOpen, Gauge, Import, KeyRound, Library, ListTodo, MessageCircle, MessagesSquare,
+  Pencil, Plug, Search, Settings, ShieldCheck, User, Users, Workflow,
 }
 
 /** 字符串 → lucide 组件;未登记 key 兜底 CircleHelp,保证配置异常时不白屏 */

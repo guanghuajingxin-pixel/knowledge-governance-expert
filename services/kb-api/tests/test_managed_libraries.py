@@ -119,6 +119,130 @@ class MinerULocalTests(unittest.TestCase):
         for piece in pieces:
             self.assertLessEqual(est_tokens(piece['content']), 20 + 8)  # 单句不硬拆
 
+    def test_custom_literal_delimiter_splits_on_marker(self):
+        """自定义字面分隔符（'###'）：按 ### 边界切段，标题引领分段开头，
+        短段不跨边界合并（Dify fixed_separator 语义）。"""
+        text = ('前言内容。\n### 节A标题\n节A第一段。节A第二段。\n'
+                '### 节B标题\n节B内容。')
+        pieces = chunk_markdown(text, {'chunk_method': 'naive', 'chunk_token_num': 500,
+                                       'delimiter': '\x1f###'})
+        self.assertEqual([p['content'] for p in pieces],
+                         ['前言内容。', '### 节A标题\n节A第一段。节A第二段。',
+                          '### 节B标题\n节B内容。'])
+
+    def test_custom_literal_hash_not_split_per_char(self):
+        """字面 '###' 不是字符集：正文中的单个 '#' 不触发切分。"""
+        text = '正文包含 C# 与 F# 语言。还有标题记号 #号 内容。'
+        pieces = chunk_markdown(text, {'chunk_method': 'naive', 'chunk_token_num': 500,
+                                       'delimiter': '\x1f###'})
+        self.assertEqual(len(pieces), 1)  # 无 '###' 出现：整篇一段
+
+    def test_custom_literal_overlong_segment_respects_limit(self):
+        """超长 ### 节按分段最大长度细分（长度配置生效），标题留在首段。"""
+        body = '。'.join(f'这一节的内容句子编号{i}讲得比较详细' for i in range(60)) + '。'
+        text = f'### 节A标题\n{body}'
+        pieces = chunk_markdown(text, {'chunk_method': 'naive', 'chunk_token_num': 50,
+                                       'delimiter': '\x1f###'})
+        self.assertGreater(len(pieces), 1)
+        self.assertTrue(pieces[0]['content'].startswith('### 节A标题'))
+        for piece in pieces[1:]:
+            self.assertLessEqual(est_tokens(piece['content']), 50 + 12)  # 句子单元不硬拆容忍度
+
+    def test_custom_literal_overlap_carries_tail(self):
+        """overlap 在超长节细分时生效：相邻细分分段携带尾部重叠（句读聚合语义）。"""
+        body = '。'.join(f'第{i}句重叠验证的内容文字' for i in range(40)) + '。'
+        text = f'### 节\n{body}'
+        base = {'chunk_method': 'naive', 'chunk_token_num': 40, 'delimiter': '。！？；\x1f###'}
+        plain = chunk_markdown(text, {**base, 'overlap': 0})
+        overlapped = chunk_markdown(text, {**base, 'overlap': 15})
+        self.assertGreater(len(plain), 2)
+        self.assertGreater(len(overlapped), 2)
+        # 无重叠：细分分段之间内容不重复；有重叠：后一分段以重复的尾部句子开头
+        self.assertNotIn(plain[2]['content'][:8], plain[1]['content'])
+        self.assertIn(overlapped[2]['content'][:8], overlapped[1]['content'])
+        # 纯重叠尾不单独成块（修复后：末块不再是孤立的 '### 节'）
+        self.assertNotEqual(overlapped[-1]['content'], overlapped[0]['content'])
+
+    def test_custom_literal_mixed_with_preset_charset(self):
+        """混合配置：预设句读 + 自定义 ###——结构边界切段，段内句读聚合。"""
+        body = '。'.join(f'段内句子{i}' for i in range(30)) + '。'
+        text = f'### 节A\n{body}\n### 节B\n短内容。'
+        pieces = chunk_markdown(text, {'chunk_method': 'naive', 'chunk_token_num': 30,
+                                       'delimiter': '。！？；\x1f###'})
+        self.assertGreater(len(pieces), 2)  # 节A 超长细分为多段
+        self.assertTrue(pieces[0]['content'].startswith('### 节A'))
+        for piece in pieces[:-1]:
+            self.assertNotIn('### 节B', piece['content'])
+        self.assertEqual(pieces[-1]['content'], '### 节B\n短内容。')  # 节B 原样保留
+
+    def test_custom_literal_table_atomic_and_forces_break(self):
+        """表格原子性在结构切分下保持：整表不切断、表格后强制分段。"""
+        table = '\n'.join(['| 列A | 列B |', '| --- | --- |'] + [f'| 值{i} | 数据{i} |' for i in range(20)])
+        text = f'### 节A\n表格前的说明。\n\n{table}\n\n表格后的文字。\n### 节B\n结束。'
+        pieces = chunk_markdown(text, {'chunk_method': 'naive', 'chunk_token_num': 500,
+                                       'delimiter': '\x1f###'})
+        table_chunks = [p for p in pieces if '| 列A | 列B |' in p['content']]
+        self.assertEqual(len(table_chunks), 1)  # 整表落在一个分段
+        self.assertIn('| 值19 | 数据19 |', table_chunks[0]['content'])
+        self.assertIn('表格后的文字。', pieces[1]['content'])  # 表格后正文同分段
+
+    def test_custom_literal_four_hash_priority(self):
+        """多字面分隔符长串优先：'####' 先于 '###' 匹配（配置了两项时）。"""
+        text = '前言。\n#### 四级标题\n内容甲。\n### 三级标题\n内容乙。'
+        pieces = chunk_markdown(text, {'chunk_method': 'naive', 'chunk_token_num': 500,
+                                       'delimiter': '\x1f###\x1f####'})
+        self.assertEqual([p['content'] for p in pieces],
+                         ['前言。', '#### 四级标题\n内容甲。', '### 三级标题\n内容乙。'])
+
+    def test_legacy_delimiter_paragraph_level_promoted(self):
+        """旧格式 '\\n\\n' 子串提升为段落级结构分隔符：段原样保留不跨边界合并。"""
+        text = '第一段内容甲。\n\n第二段内容乙。\n\n第三段内容丙。'
+        pieces = chunk_markdown(text, {'chunk_method': 'naive', 'chunk_token_num': 500,
+                                       'delimiter': '\n\n'})
+        self.assertEqual([p['content'] for p in pieces],
+                         ['第一段内容甲。', '第二段内容乙。', '第三段内容丙。'])
+
+    def test_newline_delimiter_splits_per_line(self):
+        """换行 '\\n' 行级结构分隔符：每个换行处分段（不跨行合并），超长行按句读细分。"""
+        text = '第一行内容。\n第二行内容。\n第三行内容。'
+        pieces = chunk_markdown(text, {'chunk_method': 'naive', 'chunk_token_num': 500,
+                                       'delimiter': '\n'})
+        self.assertEqual([p['content'] for p in pieces],
+                         ['第一行内容。', '第二行内容。', '第三行内容。'])
+        # 超长行：行内句读聚合到限长（换行边界不被跨行合并穿透）
+        long_line = '。'.join(f'第{i}句内容较长' for i in range(20)) + '。'
+        text2 = f'短行\n{long_line}\n短行'
+        pieces2 = chunk_markdown(text2, {'chunk_method': 'naive', 'chunk_token_num': 30,
+                                         'overlap': 0, 'delimiter': '\n。'})
+        self.assertEqual(pieces2[0]['content'], '短行')
+        self.assertGreater(len(pieces2), 3)  # 超长行细分为多段
+        for piece in pieces2[1:-1]:
+            self.assertNotIn('\n', piece['content'])  # 细分不跨行
+        self.assertEqual(pieces2[-1]['content'], '短行')
+        # 段落级与行级混存时 '\n\n' 吸收 '\n'（段内不再按行拆）
+        from app.services.knowledge_engines.local_chunker import _parse_delimiters
+        self.assertEqual(_parse_delimiters('\n\n。\n'), ('。', ['\n\n']))
+
+    def test_parent_literal_delimiter_structural_blocks(self):
+        """父子分段父块：自定义字面分隔符按结构切分（父块=### 节）。"""
+        text = '### 节A\n父块内容甲。\n### 节B\n父块内容乙。'
+        pieces = chunk_markdown(text, {'chunk_method': 'naive', 'chunk_token_num': 500,
+                                       'delimiter': '\x1f###', 'enable_children': True,
+                                       'children_delimiter': '\n', 'children_chunk_token_num': 500})
+        self.assertEqual([p['content'] for p in pieces],
+                         ['### 节A\n父块内容甲。', '### 节B\n父块内容乙。'])
+        self.assertEqual(pieces[0]['children'], ['### 节A', '父块内容甲。'])
+
+    def test_children_literal_delimiter_splits_parent(self):
+        """子块：自定义字面子分隔符按字面切分（'###' 不是字符集）。"""
+        text = '父块开头。\n### 子节一\n子内容。\n### 子节二\n子内容二。'
+        pieces = chunk_markdown(text, {'chunk_method': 'naive', 'chunk_token_num': 500,
+                                       'delimiter': '\n\n', 'enable_children': True,
+                                       'children_delimiter': '\x1f###', 'children_chunk_token_num': 500})
+        self.assertEqual(len(pieces), 1)  # 全文无 '\n\n'：单父块
+        self.assertEqual(pieces[0]['children'],
+                         ['父块开头。', '### 子节一\n子内容。', '### 子节二\n子内容二。'])
+
     def test_children_materialized(self):
         text = '第一行内容\n第二行内容\n第三行内容'
         pieces = chunk_markdown(text, {'chunk_method': 'naive', 'chunk_token_num': 500,
@@ -151,8 +275,8 @@ class MinerULocalTests(unittest.TestCase):
         self.assertGreater(len(long_children), 1)  # 超长行递归细分 + 句子滚动合并
         for child in long_children:
             self.assertLessEqual(est_tokens(child), 20 + 8)  # 单句不硬拆容忍度
-        # 滚动合并：相邻短句聚合到限长（分隔符在单元间回接）而非逐句成块
-        self.assertEqual(long_children[0], '第0句内容。第1句内容。第2句内容')
+        # 滚动合并：相邻短句聚合到限长（句读完整保留在句尾）而非逐句成块
+        self.assertEqual(long_children[0], '第0句内容。第1句内容。第2句内容。')
 
     def test_parent_mode_fulltext(self):
         """全文父块：整篇作为单个父块，子块对全文按子分隔符切分（独立于父块长度）。"""
@@ -757,6 +881,164 @@ class StagingFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(result['documents']), 1)
         doc = session.add.call_args[0][0]
         self.assertEqual(doc.status, 'FAILED')
+
+
+class _SessionCM:
+    """SessionLocal 替身：async with 依次取出预置 session（dunder 协议须在类型上）。"""
+    def __init__(self, sessions):
+        self.sessions = list(sessions)
+
+    async def __aenter__(self):
+        return self.sessions.pop(0) if self.sessions else AsyncMock()
+
+    async def __aexit__(self, *args):
+        return False
+
+
+class RechunkTrainingTests(unittest.IsolatedAsyncioTestCase):
+    """文档设置保存后重新分段（TRAINING 训练中）：解析缓存重建分段，
+    不重走 MinerU 解析；缓存缺失回退完整解析。"""
+
+    def _doc(self, status="COMPLETED"):
+        return SimpleNamespace(id=uuid.uuid4(), library_id=1, name="a.docx", size=10,
+                               status=status, progress=1.0, message="", chunk_count=3,
+                               enabled=True, source="local", source_url=None,
+                               source_workspace_name=None, updated_by=None, expire_at=None,
+                               parsed_at=None, tags=[], created_at=None, updated_at=None,
+                               storage_path="x/a.docx", engine_config={}, engine_job_id=None,
+                               engine_document_id=None)
+
+    def _body(self, rechunk=False):
+        return routes.DocumentConfigIn(processing=routes.ProcessingConfig(), strategy="custom",
+                                       enhancements={}, type_rules={}, rechunk=rechunk)
+
+    def _session(self):
+        return SimpleNamespace(commit=AsyncMock(), refresh=AsyncMock(),
+                               execute=AsyncMock())
+
+    async def test_rechunk_with_cache_sets_training_and_schedules_task(self):
+        """有解析缓存：置 TRAINING、清空分段计数、后台任务排队（不走 MinerU）。"""
+        from fastapi import BackgroundTasks
+        doc = self._doc()
+        bg, session = BackgroundTasks(), self._session()
+        with patch.object(routes, "bound_document", AsyncMock(return_value=(object(), doc))), \
+             patch.object(routes, "_read_parsed_markdown", AsyncMock(return_value="# 缓存")), \
+             patch.object(routes, "_do_parse", AsyncMock()) as do_parse:
+            out = await routes.configure_document(1, doc.id, self._body(rechunk=True), bg, session)
+        self.assertEqual(doc.status, "TRAINING")
+        self.assertEqual(doc.progress, 0)
+        self.assertEqual(doc.message, "正在按新设置重新分段")
+        self.assertEqual(out["status"], "TRAINING")
+        self.assertEqual(len(bg.tasks), 1)  # 后台重分段任务已排队
+        do_parse.assert_not_awaited()  # 有缓存不重走 MinerU
+        session.commit.assert_awaited()  # TRAINING 状态已提交（任务在响应后执行）
+
+    async def test_rechunk_without_cache_falls_back_to_parse(self):
+        """无解析缓存（历史文档）：回退完整解析（_do_parse，状态 PARSING）。"""
+        from fastapi import BackgroundTasks
+        doc = self._doc()
+        bg, session = BackgroundTasks(), self._session()
+        with patch.object(routes, "bound_document", AsyncMock(return_value=(object(), doc))), \
+             patch.object(routes, "_read_parsed_markdown", AsyncMock(return_value="")), \
+             patch.object(routes, "_do_parse", AsyncMock()) as do_parse:
+            await routes.configure_document(1, doc.id, self._body(rechunk=True), bg, session)
+        do_parse.assert_awaited_once()
+        self.assertEqual(len(bg.tasks), 0)
+
+    async def test_rechunk_rejected_while_parsing_or_training(self):
+        """解析中/训练中不能修改文档设置。"""
+        from fastapi import BackgroundTasks
+        for status in ("PARSING", "TRAINING"):
+            doc = self._doc(status=status)
+            with patch.object(routes, "bound_document", AsyncMock(return_value=(object(), doc))):
+                with self.assertRaises(HTTPException) as raised:
+                    await routes.configure_document(1, doc.id, self._body(rechunk=True),
+                                                    BackgroundTasks(), self._session())
+                self.assertEqual(raised.exception.status_code, 409)
+
+    async def test_rechunk_pending_document_rejected(self):
+        """待同步文档无解析产物，rechunk 直接 409。"""
+        from fastapi import BackgroundTasks
+        doc = self._doc(status="PENDING")
+        with patch.object(routes, "bound_document", AsyncMock(return_value=(object(), doc))):
+            with self.assertRaises(HTTPException) as raised:
+                await routes.configure_document(1, doc.id, self._body(rechunk=True),
+                                                BackgroundTasks(), self._session())
+            self.assertEqual(raised.exception.status_code, 409)
+
+    async def test_plain_config_save_keeps_status(self):
+        """rechunk=false：纯保存配置（现状回归），状态不变、无后台任务。"""
+        from fastapi import BackgroundTasks
+        doc = self._doc()
+        bg, session = BackgroundTasks(), self._session()
+        with patch.object(routes, "bound_document", AsyncMock(return_value=(object(), doc))), \
+             patch.object(routes, "_read_parsed_markdown", AsyncMock()) as read_cache:
+            out = await routes.configure_document(1, doc.id, self._body(rechunk=False), bg, session)
+        self.assertEqual(out["status"], "COMPLETED")
+        self.assertEqual(len(bg.tasks), 0)
+        read_cache.assert_not_awaited()
+
+    async def test_refresh_training_keeps_state(self):
+        """TRAINING 期间 refresh 不查 MinerU job（early return），状态保持。"""
+        doc = self._doc(status="TRAINING")
+        await routes.refresh_state(Mock(), None, None, doc)
+        self.assertEqual(doc.status, "TRAINING")
+
+    async def test_refresh_training_timeout_marks_failed(self):
+        """TRAINING 超时兜底：updated_at 超过窗口（进程重启遗留）终结为 FAILED。"""
+        from datetime import datetime, timedelta
+        doc = self._doc(status="TRAINING")
+        doc.updated_at = datetime.now() - timedelta(seconds=routes._TRAINING_TIMEOUT_SECONDS + 1)
+        await routes.refresh_state(Mock(), None, None, doc)
+        self.assertEqual(doc.status, "FAILED")
+        self.assertIn("重新分段", doc.message)
+
+    async def test_parse_rejected_while_training(self):
+        """训练中不能发起重新训练。"""
+        doc = self._doc(status="TRAINING")
+        with patch.object(routes, "bound_document", AsyncMock(return_value=(object(), doc))):
+            with self.assertRaises(HTTPException) as raised:
+                await routes.parse(1, doc.id, None)
+            self.assertEqual(raised.exception.status_code, 409)
+
+    async def test_rechunk_task_applies_chunks_with_latest_config(self):
+        """后台任务：读缓存 → 按最新生效配置 _apply_chunks → 提交。"""
+        doc = self._doc(status="TRAINING")
+        lib = SimpleNamespace(id=1, engine_config={})
+        fake_session = SimpleNamespace(
+            execute=AsyncMock(side_effect=[
+                SimpleNamespace(scalar_one=lambda: lib),
+                SimpleNamespace(scalar_one=lambda: doc),
+            ]),
+            commit=AsyncMock())
+        cm = _SessionCM([fake_session])
+        with patch("kb_common.database.SessionLocal", lambda: cm), \
+             patch.object(routes, "_read_parsed_markdown", AsyncMock(return_value="# 缓存正文")), \
+             patch.object(routes, "_read_chunk_images", AsyncMock(return_value={})), \
+             patch.object(routes, "_apply_chunks", AsyncMock()) as apply_chunks:
+            await routes._rechunk_task(1, doc.id)
+        apply_chunks.assert_awaited_once()
+        self.assertEqual(apply_chunks.await_args.args[2], "# 缓存正文")  # markdown 输入
+        fake_session.commit.assert_awaited()
+
+    async def test_rechunk_task_failure_marks_failed(self):
+        """后台任务异常兜底：置 FAILED 并记录原因，不卡在训练中。"""
+        doc = self._doc(status="TRAINING")
+        lib = SimpleNamespace(id=1, engine_config={})
+        fake_session = SimpleNamespace(
+            execute=AsyncMock(side_effect=[
+                SimpleNamespace(scalar_one=lambda: lib),
+                SimpleNamespace(scalar_one=lambda: doc),
+            ]),
+            commit=AsyncMock())
+        rescue_session = SimpleNamespace(get=AsyncMock(return_value=doc), commit=AsyncMock())
+        cm = _SessionCM([fake_session, rescue_session])
+        with patch("kb_common.database.SessionLocal", lambda: cm), \
+             patch.object(routes, "_read_parsed_markdown", AsyncMock(return_value="# 缓存正文")), \
+             patch.object(routes, "_apply_chunks", AsyncMock(side_effect=RuntimeError("boom"))):
+            await routes._rechunk_task(1, doc.id)
+        self.assertEqual(doc.status, "FAILED")
+        self.assertIn("重新分段失败", doc.message)
 
 
 if __name__ == '__main__': unittest.main()

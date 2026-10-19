@@ -3,6 +3,9 @@ export interface ProcessingConfig {
   chunk_method: string; layout_recognize: string; chunk_token_num: number; delimiter: string; embedding_model: string; enable_children: boolean; children_delimiter: string; auto_keywords: number; auto_questions: number;
   overlap: number; replace_whitespace: boolean; remove_urls_emails: boolean
   parent_mode: 'paragraph' | 'fulltext'; children_chunk_token_num: number
+  /** MinerU 解析引擎参数（仅库级配置，下次解析生效；旧库无值回退 quality/auto） */
+  tier?: 'speed' | 'balanced' | 'quality'
+  ocr_mode?: 'auto' | 'txt' | 'ocr'
 }
 export interface DocumentLibrary {
   id: number; name: string; description: string; enabled: boolean; document_count: number; creator?: string; config: DocumentIndexConfig; created_at: string
@@ -15,7 +18,7 @@ export interface LibraryDocument {
   config?: DocumentIndexConfig
 }
 export interface Enhancements { include_filename: boolean; auto_summary: boolean; auto_questions: boolean; image_caption: boolean }
-export interface TypeRule { strategy: 'auto' | 'custom' | 'parent_child'; method: string; chunk_token_num: number; delimiter: string; children_delimiter: string }
+export interface TypeRule { strategy: 'auto' | 'custom' | 'parent_child'; chunk_token_num: number; delimiter: string; children_delimiter: string }
 /** 库级检索设置（知识库设置-检索设置，存于 engine_config.retrieval） */
 export interface RetrievalConfig {
   mode: 'hybrid' | 'vector' | 'fulltext'
@@ -71,8 +74,9 @@ export const libraryDocumentAction = (id: number, doc: string, action: 'parse' |
   request.post<unknown, LibraryDocument>(`${root}/${id}/documents/${doc}/${action}`, {}, {timeout: 180000})
 export const setDocumentEnabled = (id: number, doc: string, enabled: boolean) =>
   request.post<unknown, LibraryDocument>(`${root}/${id}/documents/${doc}/enabled`, {enabled})
-export const setDocumentConfig = (id: number, doc: string, config: DocumentIndexConfig) =>
-  request.put<unknown, LibraryDocument>(`${root}/${id}/documents/${doc}/config`, config)
+/** 文档级索引设置保存：rechunk=保存后按新设置重新分段（训练中，用解析缓存重建；后端缓存缺失回退完整解析） */
+export const setDocumentConfig = (id: number, doc: string, config: DocumentIndexConfig, rechunk = false) =>
+  request.put<unknown, LibraryDocument>(`${root}/${id}/documents/${doc}/config`, {...config, rechunk})
 export const getLibraryChunks = (id: number, doc: string, page = 1, keywords = '') =>
   request.get<unknown, {chunks: LibraryChunk[]; total: number}>(`${root}/${id}/documents/${doc}/chunks`, {params: {page, size: 20, keywords}})
 export const saveLibraryChunk = (id: number, doc: string, data: LibraryChunkInput, chunk?: string) => chunk

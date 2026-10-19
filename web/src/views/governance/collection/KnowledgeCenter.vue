@@ -4,10 +4,10 @@
 // 钉钉来源固化了在线文档链接与知识库名称（迁移 0051 后入库写入，存量由映射反查兜底），
 // 知识标题可点击跳转钉钉知识库，来源系统展示「钉钉+知识库名称」。
 import { onMounted, ref } from 'vue'
-import { ElMessage } from 'element-plus'
-import { Search } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { ArrowDown, Search } from '@element-plus/icons-vue'
 import KgPagination from '@/components/common/KgPagination.vue'
-import { fetchSourceDocuments, fetchSourceDocumentTags, updateSourceDocument } from '@/api/knowledge-center'
+import { batchDeleteAllSourceDocuments, batchDeleteSourceDocuments, fetchSourceDocuments, fetchSourceDocumentTags, updateSourceDocument } from '@/api/knowledge-center'
 import { downloadOriginal } from '@/api/document-library'
 import type { SourceDoc } from '@/types/knowledge-center'
 import { fileIcon } from '@/utils/file-icon'
@@ -160,6 +160,99 @@ async function saveEdit() {
   }
 }
 
+// ===== 批量管理（后端同步清空 MinIO 原件与解析产物，不可恢复）=====
+const selection = ref<SourceDoc[]>([])
+const batchDeleting = ref(false)
+
+function onSelectionChange(rows: SourceDoc[]) {
+  selection.value = rows
+}
+
+// 解析/训练中的文档后端拒绝删除（需先停止或等待完成），直接禁止勾选
+function selectable(row: SourceDoc): boolean {
+  return row.status !== 'PARSING' && row.status !== 'TRAINING'
+}
+
+async function deleteSelected() {
+  if (!selection.value.length) return
+  try {
+    await ElMessageBox.confirm(
+      `将删除选中的 ${selection.value.length} 项知识，并清空其在 MinIO 中的原件与解析产物，删除后不可恢复。是否继续？`,
+      '删除选中', { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+  batchDeleting.value = true
+  const removedCount = selection.value.length
+  try {
+    const res = await batchDeleteSourceDocuments(selection.value.map((d) => d.id))
+    ElMessage.success(`已删除 ${res.deleted} 项知识`)
+    selection.value = []
+    // 整页删空时回退一页，避免停在空页
+    if (removedCount >= items.value.length && page.value > 1) page.value -= 1
+    load()
+    loadTags()  // 标签可能随删除变化，刷新筛选选项
+  } catch { /* 拦截器已提示 */ } finally {
+    batchDeleting.value = false
+  }
+}
+
+/** 分批大小：每批删除后刷新列表，让用户看到数量逐步减少 */
+const DELETE_BATCH_SIZE = 50
+/** 删除全部进行中的实时进度（已删/剩余） */
+const deleteProgress = ref<{ deleted: number; remaining: number } | null>(null)
+
+/** 删除全部：当前筛选命中的全部知识（含未翻到的页）分批删除，解析中的除外（与同步队列删除所有同语义） */
+async function deleteAll() {
+  if (!total.value) return
+  try {
+    await ElMessageBox.confirm(
+      `将删除当前筛选范围内的全部 ${total.value} 项知识（含未翻到的页），并清空其在 MinIO 中的原件与解析产物，删除后不可恢复；解析/训练中的知识不受影响。删除将分批执行，列表数量会逐步减少。是否继续？`,
+      '删除全部', { type: 'warning', confirmButtonText: '全部删除', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+  batchDeleting.value = true
+  page.value = 1
+  deleteProgress.value = { deleted: 0, remaining: total.value }
+  // 筛选范围开始时快照，删除过程中不受筛选变动影响
+  const scope = {
+    search: keyword.value.trim() || undefined,
+    source: sourceFilter.value || undefined,
+    tag: tagFilter.value || undefined,
+  }
+  let deletedSum = 0
+  let excluded = 0
+  try {
+    // 分批删除：每批删一小部分并刷新列表（数量可见递减）；deleted=0 即范围内无可删（剩余均为解析中）
+    for (;;) {
+      const res = await batchDeleteAllSourceDocuments({ ...scope, limit: DELETE_BATCH_SIZE })
+      deletedSum += res.deleted
+      excluded = res.excluded
+      if (!res.deleted) break
+      await load()
+      deleteProgress.value = { deleted: deletedSum, remaining: total.value }
+    }
+    await load()
+    loadTags()  // 标签可能随删除变化，刷新筛选选项
+    selection.value = []
+    ElMessage.success(excluded > 0
+      ? `已删除 ${deletedSum} 项知识，${excluded} 项解析/训练中的未删除`
+      : `已删除 ${deletedSum} 项知识`)
+  } catch { /* 拦截器已提示；已完成批次不回滚 */ } finally {
+    batchDeleting.value = false
+    deleteProgress.value = null
+  }
+}
+
+/** 批量管理下拉分发 */
+function onBatchCommand(cmd: string | number | object) {
+  if (cmd === 'delete-selected') deleteSelected()
+  else if (cmd === 'delete-all') deleteAll()
+}
+
 onMounted(() => {
   load()
   loadTags()
@@ -191,9 +284,34 @@ onMounted(() => {
         </el-form-item>
       </el-form>
 
+      <!-- 批量管理：删除选中/删除全部收进同一下拉（删除会同步清空 MinIO 存储文件，不可恢复） -->
+      <div class="batch-bar">
+        <el-dropdown popper-class="kc-batch-dropdown" @command="onBatchCommand">
+          <el-button :loading="batchDeleting">
+            批量管理<el-icon class="el-icon--right"><ArrowDown /></el-icon>
+          </el-button>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item command="delete-selected" :disabled="batchDeleting || !selection.length" class="danger-item">
+                删除选中
+              </el-dropdown-item>
+              <el-dropdown-item command="delete-all" :disabled="batchDeleting || !total" class="danger-item">
+                删除全部
+              </el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
+        <span v-if="deleteProgress" class="batch-hint">
+          正在删除：已删除 {{ deleteProgress.deleted }} 项，剩余 {{ deleteProgress.remaining }} 项…
+        </span>
+        <span v-else-if="selection.length" class="batch-hint">已选 {{ selection.length }} 项知识（解析中的不可删除）</span>
+      </div>
+
       <!-- 文档表（border 开启表头列宽拖拽；撑满剩余高度，表体内部滚动） -->
       <div class="table-fill">
-      <el-table :data="items" v-loading="loading" size="small" border row-key="id" height="100%">
+      <el-table :data="items" v-loading="loading" size="small" border row-key="id" height="100%"
+                @selection-change="onSelectionChange">
+        <el-table-column type="selection" width="42" :selectable="selectable" />
         <el-table-column label="知识标题" min-width="280" show-overflow-tooltip>
           <template #default="{ row }">
             <div class="doc-name">
@@ -319,6 +437,19 @@ onMounted(() => {
   margin-left: auto;
 }
 
+.batch-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+  flex-shrink: 0;
+}
+
+.batch-hint {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+
 .doc-name {
   display: flex;
   align-items: center;
@@ -383,5 +514,12 @@ onMounted(() => {
 .empty-hint {
   font-size: 12px;
   color: var(--el-text-color-secondary);
+}
+</style>
+
+<style>
+/* 批量管理下拉菜单（popper teleport 到 body，须用非 scoped 样式） */
+.kc-batch-dropdown .danger-item {
+  color: var(--el-color-danger);
 }
 </style>

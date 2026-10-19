@@ -50,6 +50,38 @@ def test_walk_collects_folders_and_document_children():
         client.close()
 
 
+def test_walk_tree_iter_yields_before_subtree_finishes():
+    """流式遍历：首个目录列举完成即产出文件节点，不等子目录遍历结束。
+
+    「添加知识」整库导入首批秒级可见的基础：子目录列举被阻塞时，
+    根目录的文件节点已可被消费（编目据此边遍历边落库）。
+    """
+    import threading
+
+    client = DingTalkClient('key', 'secret', 'operator')
+    subtree_gate = threading.Event()
+    tree = {
+        'root': [{'nodeId': 'doc', 'name': '正文.adoc', 'category': 'ALIDOC'},
+                 {'nodeId': 'folder', 'name': '子目录', 'category': 'OTHER', 'hasChildren': True}],
+    }
+
+    def list_nodes(node_id, **kw):
+        if node_id == 'folder':
+            subtree_gate.wait(timeout=5)
+            return []
+        return tree[node_id]
+
+    try:
+        with patch.object(client, 'list_nodes', side_effect=list_nodes):
+            gen = client.walk_tree_iter('root')
+            assert [n['nodeId'] for n in next(gen)] == ['doc']  # 子目录仍阻塞时已产出
+            subtree_gate.set()
+            assert list(gen) == []  # 子目录无文件：无更多产出，遍历正常收尾
+    finally:
+        subtree_gate.set()
+        client.close()
+
+
 def test_source_metadata_preserves_original_format():
     assert online_type({'category': 'ALIDOC', 'name': '原文.pdf'}) == ''
     assert online_type({'category': 'ALIDOC', 'name': '在线表格', 'extension': '.AXLS'}) == 'axls'
@@ -86,8 +118,7 @@ def test_changing_target_clears_old_ids_but_keeps_document_switches(setup_engine
                                    document_id='old-document', enabled=False, status='synced'))
         db.commit()
         f.backend.resolve_dataset.return_value = {'id': 'new-dataset', 'name': '新目标'}
-        with patch.object(sync_route, 'make_library_backend', return_value=f.backend), \
-             patch.object(sync_route, 'reload_sync_jobs'):
+        with patch.object(sync_route, 'make_library_backend', return_value=f.backend):
             sync_route.update_source(source.id, SyncSourceUpdate(dataset_id='new-dataset', dataset_name='新目标'), db)
         mapping = db.query(SyncDocumentMapping).one()
         assert mapping.document_id is None

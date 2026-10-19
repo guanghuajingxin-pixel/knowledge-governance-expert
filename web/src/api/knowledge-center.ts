@@ -135,3 +135,21 @@ export function fetchSourceDocumentTags() {
 export function updateSourceDocument(id: string, payload: { tags: string[]; expire_at: string | null }) {
   return request.put<unknown, SourceDoc>(`/knowledge-center/source-documents/${id}`, payload)
 }
+
+/** 批量删除知识中心文档：后端同时清空 MinIO 原件与解析产物，返回删除数与清理的存储对象数 */
+export function batchDeleteSourceDocuments(ids: string[]) {
+  return request.post<unknown, { ok: boolean; deleted: number; storage_objects: number }>(
+    '/knowledge-center/source-documents/batch-delete', { ids })
+}
+
+/** 删除当前筛选命中的全部知识文档（含未翻到的页），解析中的除外；
+ *  limit 为单批最多删除条数（分批删除），缺省一次删完。大批量清理 MinIO 可能较慢，放宽超时。 */
+export function batchDeleteAllSourceDocuments(params: {
+  search?: string
+  source?: string
+  tag?: string
+  limit?: number
+}) {
+  return request.post<unknown, { ok: boolean; deleted: number; excluded: number; storage_objects: number; message: string }>(
+    '/knowledge-center/source-documents/batch-delete-all', undefined, { params, timeout: 300000 })
+}

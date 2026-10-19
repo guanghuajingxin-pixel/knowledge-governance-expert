@@ -92,7 +92,7 @@ async def del_doc(doc_id: uuid.UUID, u=Depends(require_role("super_admin", "admi
     if d:
         from datetime import datetime as _dt
         d.is_deleted = True
-        d.deleted_at = _dt.utcnow()
+        d.deleted_at = _dt.now()  # 东八区统一口径（与 DB Asia/Shanghai 一致）
         await s.commit()
     return {"ok": True}
 

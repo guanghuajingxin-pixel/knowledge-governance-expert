@@ -226,6 +226,9 @@ class RouteTests(unittest.TestCase):
         self.assertEqual([g['key'] for g in groups], ['portal', 'web'])
         web = groups[1]
         self.assertIn({'key': '/chat', 'label': '智能问答'}, web['children'])
+        collection = next(c for c in web['children'] if c['key'] == '/collection')
+        self.assertIn({'key': '/process/engine', 'label': '解析引擎'}, collection['children'])
+        self.assertFalse(any(c['key'] == '/process' for c in web['children']))
 
     def test_list_roles_wiring(self):
         with patch.object(service, 'list_roles', new_callable=AsyncMock,

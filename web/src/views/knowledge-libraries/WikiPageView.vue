@@ -17,6 +17,9 @@ const props = defineProps<{ libId: number; pageId: string }>()
 const route = useRoute()
 const router = useRouter()
 const tabsStore = useTabsStore()
+// 页签路径挂载时固化：KeepAlive 缓存期间全局 route 会指向其它页面，
+// 异步回调里更新页签标题必须用本页路径，否则会把当前页签改名
+const tabPath = route.path
 const canEdit = computed(() => ['super_admin', 'admin', 'editor'].includes(useUserStore().userInfo?.role || ''))
 
 const PAGE_TYPE_LABELS: Record<string, string> = { overview: '概览', topic: '主题', entity: '实体', comparison: '对比', qa: '问答' }
@@ -32,7 +35,7 @@ async function load() {
     const [p, all] = await Promise.all([getWikiPage(props.libId, props.pageId), listWikiPages(props.libId)])
     page.value = p
     siblings.value = all
-    tabsStore.updateTabTitle(route.path, p.title)
+    tabsStore.updateTabTitle(tabPath, p.title)
   } catch (e: any) {
     error.value = e?.response?.data?.detail || e.message || '加载失败'
   } finally { loading.value = false }
@@ -97,7 +100,7 @@ async function saveEdit() {
   try {
     page.value = await editWikiPage(props.libId, props.pageId, { ...editForm.value })
     editVisible.value = false
-    tabsStore.updateTabTitle(route.path, page.value.title)
+    tabsStore.updateTabTitle(tabPath, page.value.title)
     ElMessage.success('已保存并标记人工修正（后续自动生成将跳过本页）')
   } catch (e: any) {
     ElMessage.error(e?.response?.data?.detail || '保存失败')

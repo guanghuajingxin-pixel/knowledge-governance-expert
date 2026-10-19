@@ -135,6 +135,12 @@ class XxlJobAdminClient:
                                     headers=self._headers(), timeout=15)
             except requests.RequestException as exc:
                 raise XxlJobAdminError(f"XXL-Job admin 请求失败 {path}: {exc}") from exc
+            # HTTP 状态必须先校验：404 等错误体也是 JSON（Spring 默认错误结构、无 code
+            # 字段），不查状态码会被当成「成功载荷」——曾导致 remove_job 在只支持
+            # /jobinfo/remove 的 2.x admin 上用 3.x 路径 /jobinfo/delete「假成功」，
+            # 孤儿作业永远删不掉、清理循环无限重试（90 次/秒打挂 admin Tomcat）。
+            if resp.status_code not in (200, 302):
+                raise XxlJobAdminError(f"XXL-Job admin {path} HTTP {resp.status_code}")
             ctype = resp.headers.get("Content-Type", "")
             if "application/json" not in ctype:
                 # 未登录时 admin 返回登录页 HTML

@@ -56,7 +56,11 @@ class MinerUEngine:
             raise EngineError("未配置 MinerU 解析服务地址（STRUCTURED_KIT_BASE_URL）")
 
     def _client(self):
-        return httpx.AsyncClient(timeout=httpx.Timeout(connect=5.0, read=120.0, write=300.0, pool=10.0))
+        # trust_env=False：本地引擎不出网。httpx trust_env 会读 macOS 系统代理
+        # 且忽略系统 bypass 列表（只认 no_proxy 环境变量）——开着系统代理时
+        # 127.0.0.1 的请求会被代理转发，代理连不上本地端口即回 502。
+        return httpx.AsyncClient(trust_env=False,
+                                 timeout=httpx.Timeout(connect=5.0, read=120.0, write=300.0, pool=10.0))
 
     async def upload(self, name: str, content: bytes) -> str:
         """三步上传，返回可提交解析的 file_id。"""
@@ -90,11 +94,17 @@ class MinerUEngine:
                 raise EngineError("MinerU 完成上传后未取到 file id")
             return file_id
 
-    async def create_job(self, file_id: str) -> str:
+    async def create_job(self, file_id: str, tier: str = "quality", ocr_mode: str = "auto") -> str:
+        """提交解析任务：tier 为语义档位（speed/balanced/quality，经 resolve_tier 映射
+        本地 kit 原值 flash/standard/advanced），ocr_mode 同引擎契约（auto/txt/ocr）。
+        默认最高质量 + 自动 OCR（知识库未配置时由调用方兜底同一默认）。"""
+        from app.routes.mineru_contract import resolve_tier
+        _, raw_tier = resolve_tier(tier or "quality", "local")
         async with self._client() as c:
             r = await c.post(f"{self.base_url}/v1/parse/jobs", json={
                 "files": [{"source": {"type": "file_id", "file_id": file_id}}],
-                "tier": "standard",
+                "tier": raw_tier,
+                "ocr_mode": ocr_mode or "auto",
                 # markdown 独立产物的图片是 base64 内联（撑爆存储且会被清洗剔除）；
                 # zip 产物含 images/ 独立图片文件 + 相对引用 markdown，分段渲染图片依赖它
                 "output_formats": ["markdown", "zip"],
@@ -191,11 +201,14 @@ class MinerUCloudEngine:
         done = await _saas(mineru_saas.saas_complete_upload(upload_id))
         return ((done or {}).get("file") or {}).get("id") or upload_id
 
-    async def create_job(self, file_id: str) -> str:
+    async def create_job(self, file_id: str, tier: str = "quality", ocr_mode: str = "auto") -> str:
+        """提交云解析任务：tier 为语义档位（saas_create_job 经 resolve_tier 映射云端
+        原值 pipeline/vlm），ocr_mode 同引擎契约。默认最高质量 + 自动 OCR。"""
         from app.routes import mineru_saas
         brief = await _saas(mineru_saas.saas_create_job({
             "files": [{"source": {"type": "file_id", "file_id": file_id}}],
-            "tier": "balanced",
+            "tier": tier or "quality",
+            "ocr_mode": ocr_mode or "auto",
             "output_formats": ["markdown", "zip"],
         }))
         job_id = (brief or {}).get("job_id")

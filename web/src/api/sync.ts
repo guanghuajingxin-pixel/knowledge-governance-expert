@@ -1,4 +1,4 @@
-// 钉钉知识库 → 本地文档库 定时增量同步：API 封装（前缀 /api/v1/sync）
+// 钉钉知识库 → 本地文档库 事件驱动同步：API 封装（前缀 /api/v1/sync）
 import request from './request'
 import type {
   Failure, Log, PreviewItem, Run, RunDetail, Source, SourcePayload, SourceStats,
@@ -75,6 +75,10 @@ export const retryFailure = (id: number) => request.post(`${BASE}/failures/${id}
 export const retryAllFailures = () => request.post(`${BASE}/failures/retry-all`)
 
 // ---------- 同步队列：逐文档任务 ----------
+/** 页签计数（全局口径）：轻量轮询用，与列表解耦，保证统计实时 */
+export const fetchTaskStats = () =>
+  request.get<unknown, { pending: number; running: number; done: number }>(`${BASE}/tasks/stats`)
+
 export const listTasks = (params: TaskQuery) =>
   request.get<unknown, TaskListResponse>(`${BASE}/tasks`, { params })
 
@@ -86,3 +90,8 @@ export const batchRetryTasks = (ids: number[]) =>
 export const batchDeleteTasks = (ids: number[]) =>
   request.post<unknown, { ok: boolean; removed: number; excluded: number; skipped: number; message: string }>(
     `${BASE}/tasks/batch-delete`, { ids }, { timeout: 120000 })
+
+/** 删除当前范围（页签+筛选）命中的全部任务，处理中的除外。大批量可能较慢，放宽超时。 */
+export const batchDeleteAllTasks = (params: Partial<TaskQuery>) =>
+  request.post<unknown, { ok: boolean; removed: number; excluded: number; message: string }>(
+    `${BASE}/tasks/batch-delete-all`, undefined, { params, timeout: 300000 })

@@ -3,6 +3,10 @@
 与 batch.py（XXL-Job 批处理消费）配对，替代 library 模式下的全量直跑：
 - 创建同步源 / 手动同步 / cron 周期 → run_catalog：任务立即进同步队列、
   文档立即以「待同步」（PENDING）状态进文档列表（一次编目、分批消费）；
+- 指定文档（node_whitelist 非空）→ 逐节点 get_node 取元数据，免整树遍历，
+  编目秒级完成、选中文档立即可见；
+- 占位行流式落库：整树模式逐目录 commit（walk_tree_iter 边遍历边产出），
+  大列表再按 _CATALOG_FLUSH_EVERY 篇分批，整库导入时首批秒级进列表；
 - 增量编目：mapping 已 synced 且节点元数据指纹（meta_hash）未变 → 不重建任务；
   新增/变更节点 → 预建 LibraryDocument(PENDING) + SyncTask(pending) + mapping(pending)；
 - 编辑静默期（sync_edit_quiet_minutes）：变更节点的修改时间静默不足窗口 → 视为
@@ -21,6 +25,7 @@ from kb_common.models import (
     LibraryDocument, SyncDocumentMapping, SyncLog, SyncRun, SyncSource, SyncTask,
 )
 
+from .dingtalk_sync_client import DingTalkError
 from .engine import _edit_quiet_elapsed, _meta_hash, _parse_whitelist
 from .runtime import WORKER_LOCK, source_lock
 from .source_files import node_extension, skip_reason
@@ -28,6 +33,10 @@ from .sync_database import SyncSessionLocal
 from .sync_settings import make_dingtalk_client, make_library_backend
 
 logger = logging.getLogger(__name__)
+
+# 预建占位行的分批落库大小：整库导入时「待同步」文档几条几条陆续进列表，
+# 不必等编目循环全部跑完才一次性出现（前端 5s 轮询即可感知）。
+_CATALOG_FLUSH_EVERY = 20
 
 
 def _log(db, run_id: int | None, level: str, message: str) -> None:
@@ -59,7 +68,7 @@ def run_catalog(source_id: int, trigger: str = "manual", operator: str = "") -> 
 
             run = SyncRun(source_id=source_id, trigger=trigger, status="running",
                           message="编目中：遍历钉钉知识库目录树",
-                          operator=operator or ("系统" if trigger == "schedule" else ""))
+                          operator=operator or ("系统" if trigger in ("schedule", "auto") else ""))
             db.add(run)
             db.commit()
             run_id = run.id
@@ -72,13 +81,6 @@ def run_catalog(source_id: int, trigger: str = "manual", operator: str = "") -> 
             library_id = backend.library_id
             try:
                 s = get_settings()
-                nodes = dt.walk_tree(source.root_node_id, s.sync_max_depth,
-                                     s.sync_max_results_per_page, use_cache=False)
-                whitelist = _parse_whitelist(getattr(source, "node_whitelist", "") or "")
-                if whitelist:
-                    nodes = [n for n in nodes if n.get("nodeId") in whitelist]
-                    _log(db, run_id, "INFO",
-                         f"节点白名单生效：仅同步 {len(nodes)} 个指定文档")
                 # 知识库名称映射（workspaceId → 名称，60s 缓存）：固化到文档行，
                 # 供知识中心展示「钉钉+知识库名称」与跳转链接，避免列表多跳 join
                 try:
@@ -87,69 +89,42 @@ def run_catalog(source_id: int, trigger: str = "manual", operator: str = "") -> 
                 except Exception:  # noqa: BLE001 — 名称解析失败不阻断同步
                     ws_names = {}
                 dataset_name = source.dataset_name or f"文档库-{library_id}"
-                remote = {n["nodeId"]: n for n in nodes if n.get("nodeId")}
                 mappings = {m.node_id: m for m in
                             db.query(SyncDocumentMapping).filter_by(source_id=source.id).all()}
 
-                # ① 删除：钉钉侧已不存在且策略为 sync（照旧立即执行，不进批处理）
-                deleted = 0
-                for node_id, mapping in list(mappings.items()):
-                    if node_id in remote:
-                        continue
-                    if source.delete_policy == "sync":
-                        task = SyncTask(
-                            run_id=run_id, source_id=source.id, kind="sync", action="delete",
-                            node_id=node_id, name=(mapping.name or node_id)[:500],
-                            file_ext=Path(mapping.name or "").suffix.lower().lstrip("."),
-                            dataset_id=str(library_id), dataset_name=dataset_name,
-                            status="running", started_at=datetime.now(),
-                            trigger=run.trigger, operator=run.operator)
-                        db.add(task)
-                        db.commit()
-                        try:
-                            if mapping.document_id:
-                                backend.delete_document(str(library_id), mapping.document_id)
-                            db.delete(mapping)
-                            deleted += 1
-                            task.status = "success"
-                            task.finished_at = datetime.now()
-                            _log(db, run_id, "INFO", f"删除已同步文档: {mapping.name}")
-                        except Exception as exc:  # noqa: BLE001
-                            task.status = "failed"
-                            task.finished_at = datetime.now()
-                            task.error = f"删除失败: {exc}"[:2000]
-                            _log(db, run_id, "ERROR", f"删除失败 [{mapping.name}]: {exc}")
-                        db.commit()
-                    else:
-                        _log(db, run_id, "INFO",
-                             f"钉钉侧已删除但策略为 keep，保留文档: {mapping.name}")
-
-                # ② 预建：任务进同步队列、文档进列表（PENDING 占位），一次 commit 落库
+                # ② 预建：任务进同步队列、文档进列表（PENDING 占位）。
+                # 流式编目：整树模式边遍历边落库（每个目录列举完成即 commit 一批），
+                # 前端陆续看到新条目、首批秒级出现，无需等全树遍历完；大列表仍按
+                # _CATALOG_FLUSH_EVERY 篇分批 commit。
                 queued = skipped = quiet = 0
-                for node in nodes:
+                _flushed = 0
+
+                def _prebuild(node: dict) -> None:
+                    """处理单个节点：增量/静默判定 → 预建 mapping+占位文档+同步任务。"""
+                    nonlocal queued, skipped, quiet, _flushed
                     node_id = node.get("nodeId", "")
                     name = node.get("name", node_id) or node_id
                     if not node_id or skip_reason(node, s, "library"):
                         skipped += 1
-                        continue
+                        return
                     mapping = mappings.get(node_id)
                     if mapping is not None and not mapping.enabled:
                         skipped += 1
-                        continue
+                        return
                     # 增量：已同步且节点元数据指纹未变 → 不重建任务。
                     # 无时间戳节点 meta_hash 为空串，由批处理下载后按 content_hash 判定跳过。
                     if (mapping is not None and mapping.status == "synced"
                             and mapping.meta_hash
                             and _meta_hash(node) == mapping.meta_hash):
                         skipped += 1
-                        continue
+                        return
                     # 编辑静默期：节点修改时间距本轮编目不足静默窗口 → 疑似编辑中，
-                    # 本轮不建任务（避免同步中间状态/反复解析），修改时间静默超时后
-                    # 由下一轮 cron 接管；手动同步是明确指令，不受静默期约束。
+                    # 本轮不建任务（避免同步中间状态/反复解析），静默超时后由事件
+                    # 兜底补跑或手动同步接管；手动同步是明确指令，不受静默期约束。
                     if (trigger != "manual"
                             and not _edit_quiet_elapsed(node, s.sync_edit_quiet_minutes)):
                         quiet += 1
-                        continue
+                        return
                     # action 判定依据 mapping 上轮状态（编目会提前写 document_id，
                     # 不能沿用直跑模式「有 document_id 即 update」的口径）
                     was_synced = mapping is not None and mapping.status == "synced"
@@ -198,7 +173,100 @@ def run_catalog(source_id: int, trigger: str = "manual", operator: str = "") -> 
                         status="pending", trigger=run.trigger, operator=run.operator,
                         library_document_id=mapping.document_id))
                     queued += 1
+                    _flushed += 1
+                    if _flushed >= _CATALOG_FLUSH_EVERY:
+                        db.commit()
+                        _flushed = 0
+
+                # 现存节点集合：流式遍历中陆续收集，遍历完成后供删除阶段比对
+                seen: set[str] = set()
+                whitelist = _parse_whitelist(getattr(source, "node_whitelist", "") or "")
+                if whitelist:
+                    # 指定文档模式：逐节点取元数据，免整树遍历——「添加知识」选几篇
+                    # 查几篇，编目秒级完成、占位文档立即可见（walk_tree 需分页遍历
+                    # 整个知识库目录树，大库耗时数十秒至数分钟）。节点获取失败
+                    # （已删除/无权限）与整树遍历白名单过滤后不可见同口径：跳过。
+                    nodes = []
+                    for node_id in sorted(whitelist):
+                        try:
+                            resp = dt.get_node(node_id)
+                        except DingTalkError as exc:
+                            _log(db, run_id, "WARNING",
+                                 f"获取节点失败，本轮跳过: {node_id} · {exc}")
+                            continue
+                        node = resp.get("node") or resp
+                        if not node.get("name"):
+                            _log(db, run_id, "WARNING",
+                                 f"节点元数据缺失，本轮跳过: {node_id}")
+                            continue
+                        nodes.append({**node, "nodeId": node_id, "relative_dir": "",
+                                      "workspaceId": node.get("workspaceId") or source.workspace_id})
+                        seen.add(node_id)
+                    _log(db, run_id, "INFO",
+                         f"指定文档模式：{len(nodes)} 个节点待同步（白名单 {len(whitelist)} 个）")
+                    for node in nodes:
+                        _prebuild(node)
+                else:
+                    # 整树流式遍历：每个目录列举完成即处理并落库一批，
+                    # 「添加知识」弹窗等首批占位出现即关闭，遍历在后台持续推进
+                    for chunk in dt.walk_tree_iter(source.root_node_id, s.sync_max_depth,
+                                                   s.sync_max_results_per_page):
+                        for node in chunk:
+                            node_id = node.get("nodeId", "")
+                            if node_id:
+                                seen.add(node_id)
+                            _prebuild(node)
+                        if _flushed:
+                            db.commit()
+                            _flushed = 0
                 db.commit()
+
+                # ① 删除（置于预建后）：流式遍历需遍历完成才知道钉钉侧现存集合（seen），
+                # 钉钉侧已不存在且策略为 sync 的照旧立即删除（不进批处理）
+                deleted = 0
+                for node_id, mapping in list(mappings.items()):
+                    if node_id in seen:
+                        continue
+                    if source.delete_policy == "sync":
+                        task = SyncTask(
+                            run_id=run_id, source_id=source.id, kind="sync", action="delete",
+                            node_id=node_id, name=(mapping.name or node_id)[:500],
+                            file_ext=Path(mapping.name or "").suffix.lower().lstrip("."),
+                            dataset_id=str(library_id), dataset_name=dataset_name,
+                            status="running", started_at=datetime.now(),
+                            trigger=run.trigger, operator=run.operator)
+                        db.add(task)
+                        db.commit()
+                        try:
+                            if mapping.document_id:
+                                backend.delete_document(str(library_id), mapping.document_id)
+                            db.delete(mapping)
+                            deleted += 1
+                            task.status = "success"
+                            task.finished_at = datetime.now()
+                            _log(db, run_id, "INFO", f"删除已同步文档: {mapping.name}")
+                        except Exception as exc:  # noqa: BLE001
+                            task.status = "failed"
+                            task.finished_at = datetime.now()
+                            task.error = f"删除失败: {exc}"[:2000]
+                            _log(db, run_id, "ERROR", f"删除失败 [{mapping.name}]: {exc}")
+                        db.commit()
+                    else:
+                        _log(db, run_id, "INFO",
+                             f"钉钉侧已删除但策略为 keep，保留文档: {mapping.name}")
+
+                # 静默期兜底（自动触发）：本轮有节点因编辑中静默跳过——最后一条
+                # 变更事件可能已消费完，没有下一个 cron 会再来，注册静默窗口后的
+                # 单次补跑，否则「编辑完的最后一笔」可能永远不同步
+                if quiet and trigger == "auto":
+                    try:
+                        from . import event_listener
+                        event_listener.schedule_recheck(
+                            source_id, s.sync_edit_quiet_minutes * 60 + 60)
+                        _log(db, run_id, "INFO",
+                             f"{quiet} 篇编辑中静默等待，已预约 {s.sync_edit_quiet_minutes + 1} 分钟后自动补查")
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("注册静默期补跑失败（可手动同步兜底）: %s", exc)
 
                 run.total = queued + deleted
                 run.deleted_count = deleted

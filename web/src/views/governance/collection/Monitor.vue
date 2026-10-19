@@ -166,7 +166,7 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(pollTimer) })
       </el-table-column>
       <el-table-column label="触发" width="80">
         <template #default="{ row }">
-          <el-tag size="small" :type="row.trigger === 'manual' ? 'warning' : 'info'">{{ row.trigger === 'manual' ? '手动' : '定时' }}</el-tag>
+          <el-tag size="small" :type="row.trigger === 'manual' ? 'warning' : 'info'">{{ row.trigger === 'manual' ? '手动' : '自动' }}</el-tag>
         </template>
       </el-table-column>
       <el-table-column label="同步源" min-width="120">

@@ -190,10 +190,14 @@ async def authenticate(token: str) -> User:
         return await resolve_oidc_user(await verify_access_token(token))
     try:
         claims = decode_jwt(token)
-        async with short_session() as session:
-            user = await session.get(User, claims["sub"])
-        if not user or not user.is_active:
-            raise ValueError("Inactive user")
-        return user
     except Exception as exc:
+        # 只有 token 本身无效/过期才是 401
         raise HTTPException(401, "无效凭证") from exc
+    # 注意：DB 查询异常必须原样上抛（FastAPI → 500），不能吞成 401——
+    # 否则数据库抖动/热重载窗口期会把合法登录误判为凭证失效，
+    # 前端收到 401 强制登出跳回登录页，表现为「登录成功后闪退」。
+    async with short_session() as session:
+        user = await session.get(User, claims["sub"])
+    if not user or not user.is_active:
+        raise HTTPException(401, "无效凭证")
+    return user

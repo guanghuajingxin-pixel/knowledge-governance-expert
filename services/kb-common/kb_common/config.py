@@ -108,6 +108,10 @@ class Settings(BaseSettings):
     # 编辑静默期（分钟）：节点修改时间静默超过该窗口才建同步任务（近似「编辑结束后再同步」），
     # 避免编辑过程中每轮 cron 反复同步中间状态；0=禁用（变更即同步）。手动同步不受限。
     sync_edit_quiet_minutes: int = Field(default=10, ge=0)
+    # 知识库变更事件监听（自动同步触发器）：订阅的钉钉事件类型（逗号分隔，空=代码默认列表；
+    # 官方事件名以钉钉开发者后台「事件与回调」实际提供为准）与事件去抖合并窗口（秒）
+    dingtalk_sync_event_topics: str = ""
+    dingtalk_sync_debounce_seconds: int = Field(default=30, ge=5)
 
     # 定时同步调度：XXL-Job 调度中心（替代内置 APScheduler）。
     # enabled=true 时 admin 不可达启动即报错（fail fast）；显式置 false 则定时同步整体关闭。

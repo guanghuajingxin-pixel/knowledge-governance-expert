@@ -8,10 +8,16 @@ from app.routes import auth, users, internal, knowledge_base, directory, documen
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """启动时从数据库 settings 表加载配置到运行时环境，重启/刷新后始终以 DB 为准。"""
+    import asyncio
     import os
     from sqlalchemy import select
     from kb_common.database import SessionLocal
     from kb_common.models import Setting
+
+    # 登记主事件循环：批处理线程临时 loop 里的 wiki 完成钩子据此把后台任务
+    # 交回主 loop（_spawn → run_coroutine_threadsafe），避免任务随临时 loop 丢弃
+    from app.services.wiki.generator import set_main_loop
+    set_main_loop(asyncio.get_running_loop())
 
     # DB 设置键 → 环境变量名
     env_map = {
@@ -86,14 +92,22 @@ async def lifespan(app: FastAPI):
     from app.routes import knowledge_gaps
     knowledge_gaps.start_gap_refresh_scheduler()
 
-    # 钉钉知识库 → 本地文档库 定时增量同步调度器（按各同步源 cron 字段注册任务）
-    try:
-        from app.services.sync.scheduler import start_sync_scheduler
-        start_sync_scheduler()
-    except Exception as e:
-        # 同步调度器启动失败不应影响主服务（如依赖缺失/表未建）
-        import logging
-        logging.getLogger(__name__).warning("同步调度器启动失败: %s", e)
+    # 同步调度器（syncBatch 批处理作业注册 + 定时编目遗留作业清理；自动同步由
+    # 事件监听驱动）。注册/清理是对 admin 的**同步 HTTP**——曾在 admin 僵死时把
+    # 事件循环冻在 lifespan 上、整个服务拒绝启动。挪到后台线程：admin 慢/不可达
+    # 只影响调度注册进度，绝不阻塞启动（线程内部自带可达性降级与异常兜底）。
+    import threading as _sched_threading
+
+    def _boot_sync_scheduler() -> None:
+        try:
+            from app.services.sync.scheduler import start_sync_scheduler
+            start_sync_scheduler()
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning("同步调度器启动失败: %s", e)
+
+    _sched_threading.Thread(target=_boot_sync_scheduler,
+                            name="sync-scheduler-boot", daemon=True).start()
 
     # 钉钉机器人 Stream 长连接（开关/凭证齐全才启动，fail fast 不假跑）
     try:
@@ -102,6 +116,15 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         import logging
         logging.getLogger(__name__).warning("钉钉机器人启动检查失败: %s", e)
+
+    # 钉钉知识库变更事件监听（自动同步触发器：事件 → 去抖 → 整源编目）
+    try:
+        from app.services.sync import event_listener
+        # 读取配置需连 DB：DB 抖动时不得卡死启动（超时后可由配置保存触发热启停）
+        await asyncio.wait_for(event_listener.refresh_listener(), timeout=15)
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("钉钉知识库变更监听启动失败: %s", e)
 
     # Wiki 库：恢复上次运行中被打断的生成/检查任务（置 FAILED 供用户重试）
     try:
@@ -116,6 +139,11 @@ async def lifespan(app: FastAPI):
     finally:
         # 关闭应用（含开发热重载）时停止后台线程，避免遗留调度任务。
         try:
+            from app.services.wiki.generator import set_main_loop as _clear_main_loop
+            _clear_main_loop(None)  # 热 reload 后旧 loop 已死，防止任务投递到失效 loop
+        except Exception:
+            pass
+        try:
             from app.services.sync.scheduler import shutdown_sync_scheduler
             shutdown_sync_scheduler()
         except Exception:
@@ -123,6 +151,11 @@ async def lifespan(app: FastAPI):
         try:
             from app.services import dingtalk_bot
             await dingtalk_bot.stop_bot()
+        except Exception:
+            pass
+        try:
+            from app.services.sync import event_listener
+            await event_listener.stop_listener()
         except Exception:
             pass
 

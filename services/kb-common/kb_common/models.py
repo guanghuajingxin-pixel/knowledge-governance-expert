@@ -516,15 +516,16 @@ class DingtalkFileReview(Base):
     reviewed_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
 
 
-# ===== 钉钉知识库 → 本地文档库 定时增量同步 =====
-# 每个同步源自带 cron 字段，不保留独立 jobs 表。
+# ===== 钉钉知识库 → 本地文档库 事件驱动自动同步 =====
+# 触发方式仅两种：auto（钉钉知识库变更事件）/ manual（上传文档、手动立即同步）。
 
 class SyncSource(Base):
-    """同步源：一个钉钉知识库目录 → 一个本地文档库，含 cron 定时表达式。
+    """同步源：一个钉钉知识库目录 → 一个本地文档库，事件驱动自动同步。
 
     目标库标识存 dataset_id / dataset_name（本地文档库的库 ID 与名称），
     远端文档 ID 存 SyncDocumentMapping.document_id（本地 LibraryDocument UUID）；
     检索召回时的钉钉链接回填据此生效。
+    自动同步：钉钉知识库变更事件（Stream 订阅）触发整源增量编目，无定时 cron。
     """
     __tablename__ = "sync_sources"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -536,17 +537,18 @@ class SyncSource(Base):
     dataset_name: Mapped[str] = mapped_column(String(200), nullable=False)
     dataset_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     delete_policy: Mapped[str] = mapped_column(String(10), server_default="keep", nullable=False)  # keep | sync
+    # deprecated：定时编目已取消（改事件驱动自动同步）。列保留兼容历史数据，代码不再读写。
     cron: Mapped[str] = mapped_column(String(120), server_default="0 2 * * *", nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, server_default=sa_text('true'), nullable=False)
     # 节点白名单：JSON 数组字符串，限定只同步这些钉钉文档节点（「添加知识」选择
     # 指定文档 + 自动同步时写入）；为空数组表示同步整棵目录树（历史行为）。
     node_whitelist: Mapped[str] = mapped_column(Text, server_default="[]", nullable=False)
-    # XXL-Job 调度中心作业 ID（迁移 0029）：同步源为作业配置唯一事实源，
-    # 后端经 admin API 幂等增删改作业，作业 ID 回存本列。
+    # deprecated：XXL-Job 调度中心作业 ID（定时编目时代，迁移 0029）。
+    # 启动时由 cleanup_source_jobs 清理并置空，仅保留列兼容历史。
     xxl_job_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # 单次导入标记（迁移 0059）：「添加知识 → 钉钉 → 单次导入」创建的一次性源，
-    # 任务仍进同步队列分批消费；该轮全部成功后自动停用源与 cron 作业
-    # （内容不随钉钉源文件更新）。失败保持启用，由 cron 增量重试直至全部成功。
+    # 任务仍进同步队列分批消费；该轮全部成功后自动停用源
+    # （内容不随钉钉源文件更新）。失败保持启用，由手动同步重试直至全部成功。
     import_once: Mapped[bool] = mapped_column(Boolean, server_default=sa_text("false"), nullable=False)
     # 同步身份归属：定时/后台同步用该用户的钉钉 unionId 调钉钉 API（迁移 0043）；
     # 为空或该用户未绑定钉钉时回退全局 dingtalk_operator_union_id 服务账号。
@@ -560,8 +562,8 @@ class SyncRun(Base):
     __tablename__ = "sync_runs"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     source_id: Mapped[int] = mapped_column(ForeignKey("sync_sources.id", ondelete="CASCADE"), nullable=False)
-    trigger: Mapped[str] = mapped_column(String(20), server_default="manual", nullable=False)  # manual | schedule
-    # 触发人：定时为「系统」，手动为登录用户名；同步队列的逐文档任务行继承该值。
+    trigger: Mapped[str] = mapped_column(String(20), server_default="manual", nullable=False)  # manual | auto（历史 schedule 也按自动展示）
+    # 触发人：自动为「系统」，手动为登录用户名；同步队列的逐文档任务行继承该值。
     operator: Mapped[str] = mapped_column(String(100), server_default="", nullable=False)
     status: Mapped[str] = mapped_column(String(20), server_default="running", nullable=False)  # running | success | partial | failed
     # 应用侧本地默认（东 8 区统一口径）：server_default=func.now() 在 sqlite（测试）

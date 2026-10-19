@@ -5,6 +5,7 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Search, Close, Top, Bottom, Edit, Delete, QuestionFilled, ArrowDown, Setting } from '@element-plus/icons-vue'
+import { Sparkles } from '@lucide/vue'
 import { listDocumentLibraries, listLibraryDocuments, getLibraryChunks, saveLibraryChunk, deleteLibraryChunk, getLibraryDocumentPreviewUrl, setDocumentConfig, libraryDocumentAction, type DocumentLibrary, type LibraryDocument, type LibraryChunk, type LibraryChunkInput } from '@/api/document-library'
 import IndexSettingsDialog from '@/components/library/IndexSettingsDialog.vue'
 import { settingsFromConfig, settingsToConfig, type IndexSettings } from '@/components/library/index-settings'
@@ -12,12 +13,15 @@ import { fileIcon } from '@/utils/file-icon'
 import { rewriteChunkImages } from '@/utils/chunk-images'
 import { useTabsStore } from '@/stores/tabs'
 import ParsedContentView from '@/components/common/ParsedContentView.vue'
-import ChunkEnhancements from '@/components/library/ChunkEnhancements.vue'
+import ChunkEnhancements, { hasEnhancements } from '@/components/library/ChunkEnhancements.vue'
 import KgPagination from '@/components/common/KgPagination.vue'
 
 const route = useRoute()
 const router = useRouter()
 const tabsStore = useTabsStore()
+// 页签路径挂载时固化：KeepAlive 缓存期间全局 route 会指向其它页面，
+// 异步回调里更新页签标题必须用本页路径，否则会把当前页签改名
+const tabPath = route.path
 const libId = Number(route.params.libId)
 const docId = route.params.docId as string
 
@@ -38,15 +42,21 @@ async function saveSettings(v: IndexSettings, reparse: boolean) {
   if (!doc.value) return
   settingsBusy.value = true
   try {
-    const updated = await setDocumentConfig(libId, docId, settingsToConfig(v))
+    // 关闭「重新解析」开关：用解析缓存按新设置重新分段（训练中），不重走 MinerU 解析
+    const updated = await setDocumentConfig(libId, docId, settingsToConfig(v), !reparse)
     Object.assign(doc.value, updated)
     settingsVisible.value = false
     if (reparse) {
       await libraryDocumentAction(libId, docId, 'parse')
       ElMessage.success('设置已保存，正在按新设置重新分段')
       setTimeout(load, 800)
+    } else if (updated.status === 'TRAINING') {
+      // 训练完成后由轮询感知；这里延迟拉一次分段列表，训练未完时分段为空属正常
+      ElMessage.success('设置已保存，正在训练（按新设置重新分段）')
+      setTimeout(load, 3000)
     } else {
-      ElMessage.success('索引设置已保存，重新解析后生效')
+      ElMessage.success('设置已保存，正在按新设置重新解析')
+      setTimeout(load, 800)
     }
   } catch (e: any) { ElMessage.error(e?.response?.data?.detail || e.message || '保存失败') }
   finally { settingsBusy.value = false }
@@ -154,6 +164,9 @@ const fulltextParent = computed(() =>
 // 子分段展示（父子分段-段落模式）：默认全部收起，点击展开/收起（父卡片独立状态）
 const expandedChildren = reactive<Record<string, boolean>>({})
 function toggleChildren(chunk: LibraryChunk) { expandedChildren[chunk.id] = !expandedChildren[chunk.id] }
+// 检索增强：每个分段独立的展开状态（操作区图标触发，详情显示在分段内）
+const enhancementsOpen = reactive<Record<string, boolean>>({})
+function toggleEnhancements(chunk: LibraryChunk) { enhancementsOpen[chunk.id] = !enhancementsOpen[chunk.id] }
 
 async function load() {
   loading.value = true
@@ -169,7 +182,7 @@ async function loadMeta() {
     if (doc.value?.name) {
       docName.value = doc.value.name
       // 页签标题固定「分段详情」，多开时自动编号 -1/-2…，避免长文档名撑爆页签
-      tabsStore.assignSequentialTitle(route.path, '分段详情')
+      tabsStore.assignSequentialTitle(tabPath, '分段详情')
     }
   } catch { /* 名称回退路由 query */ }
 }
@@ -248,7 +261,7 @@ onMounted(() => { loadMeta(); load() })
           <span class="hint">共 {{ total }} 个分段</span>
           <div class="toolbar-spacer" />
           <el-input v-model="keyword" :prefix-icon="Search" placeholder="搜索分段内容" clearable style="width: 220px" @change="page = 1; load()" />
-          <el-button :icon="Setting" :disabled="!doc || doc.status === 'PARSING'" @click="openSettings">索引设置</el-button>
+          <el-button :icon="Setting" :disabled="!doc || doc.status === 'PARSING' || doc.status === 'TRAINING'" @click="openSettings">索引设置</el-button>
           <el-button :icon="Search" @click="goRetrievalTest">检索测试</el-button>
           <el-dropdown trigger="click" placement="bottom-end" @command="handleToolCommand">
             <el-button>更多<el-icon class="el-icon--right"><ArrowDown /></el-icon></el-button>
@@ -271,6 +284,15 @@ onMounted(() => { loadMeta(); load() })
               </div>
               <div class="toolbar-spacer" />
               <div class="chunk-actions">
+                <el-tooltip v-if="hasEnhancements(chunk.retrieval_enhancements)"
+                            :content="enhancementsOpen[chunk.id] ? '收起检索增强' : '查看检索增强'" placement="top">
+                  <el-button text type="primary" class="enhance-btn"
+                             :class="{active: !!enhancementsOpen[chunk.id]}"
+                             :aria-label="`分段 ${(page - 1) * 20 + i + 1} 检索增强`"
+                             :disabled="busy" @click="toggleEnhancements(chunk)">
+                    <el-icon><Sparkles /></el-icon>
+                  </el-button>
+                </el-tooltip>
                 <el-tooltip content="向前插入分段" placement="top">
                   <el-button text type="primary" :icon="Top" :disabled="busy" @click="insertChunk(chunk, 'before')" />
                 </el-tooltip>
@@ -285,11 +307,13 @@ onMounted(() => { loadMeta(); load() })
                 </el-tooltip>
               </div>
               <el-divider direction="vertical" class="chunk-divider" />
-              <div class="switch-line"><el-switch :model-value="chunk.available" :disabled="busy" :aria-label="`分段${(page - 1) * 20 + i + 1}检索状态`" @change="toggleChunk(chunk)" /><span>{{ chunk.available ? '已启用' : '已停用' }}</span></div>
+              <el-tooltip :content="chunk.available ? '已启用（参与检索），点击停用' : '已停用（不参与检索），点击启用'" placement="top">
+                <el-switch :model-value="chunk.available" :disabled="busy" :aria-label="`分段${(page - 1) * 20 + i + 1}检索状态`" @change="toggleChunk(chunk)" />
+              </el-tooltip>
             </div>
             <!-- 段落模式：分段号在 meta 标签中；全文父块模式不展示父内容（与解析原文重复） -->
             <div v-if="!fulltextParent" class="chunk-content" v-html="renderChunk(chunk.content)" />
-            <ChunkEnhancements :data="chunk.retrieval_enhancements" />
+            <ChunkEnhancements :data="chunk.retrieval_enhancements" :expanded="!!enhancementsOpen[chunk.id]" />
             <!-- 子分段（父子分段模式）：子块是检索单元，命中后返回父分段上下文；
                  全文父块模式直接平铺全部子分段，段落模式默认收起、点击展开 -->
             <div v-if="chunk.children?.length" class="child-chunks" :class="{main: fulltextParent}">
@@ -377,8 +401,6 @@ onMounted(() => { loadMeta(); load() })
 .toolbar-spacer { flex: 1; min-width: 12px; }
 .doc-name { font-size: 15px; font-weight: 600; color: #303133; max-width: 32%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .hint { color: #909399; font-size: 13px; }
-.switch-line { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
-.switch-line span { color: var(--el-text-color-regular); font-size: 13px; }
 .el-alert { margin-bottom: 16px; }
 .chunks { flex: 1; min-height: 0; overflow: auto; }
 .chunk { border: 1px solid #e7ebf0; border-radius: 10px; padding: 14px 16px; margin-bottom: 12px; background: #fff; }
@@ -398,6 +420,8 @@ onMounted(() => { loadMeta(); load() })
 .chunk:hover .chunk-divider, .chunk:focus-within .chunk-divider { opacity: 1; }
 .chunk-actions .el-button { padding: 6px; }
 .chunk-actions .el-button .el-icon { font-size: 16px; }
+/* 检索增强：展开中保持高亮（悬停离开卡片也可从面板看出展开状态） */
+.chunk-actions .enhance-btn.active { color: var(--el-color-primary); background: var(--el-color-primary-light-9); }
 .chunk-content { overflow-wrap: anywhere; overflow: auto; line-height: 1.7; }
 .chunk-content :deep(mark) { background: var(--el-color-warning-light-8, #f3d19e); color: inherit; padding: 0 2px; border-radius: 2px; }
 .chunk-content :deep(table) { border-collapse: collapse; width: 100%; }

@@ -59,6 +59,28 @@
 | 操作列 | 固定 `width`(按钮数 × ~50 + 余量) | 两按钮 140 起步,含 loading 图标余量 |
 | 长文本 | 省略 + tooltip | 禁止换行撑高行、禁止缩字号迁就列宽 |
 
+### 1.6 统一暗提示组件 HelpTip(强制)
+
+> **背景**:全站「? 暗提示」此前以 `.tip-icon` 局部样式在 6+ 文件重复定义,且出现过页面自造圆圈边框角标导致风格不一致的返工。此后 ? 暗提示**只允许**使用统一组件。
+
+- **唯一实现**:`components/common/HelpTip.vue`——`el-tooltip` + `QuestionFilled` 图标,placeholder 灰(`--el-text-color-placeholder`)、14px、hover/focus 变主色,长文案内容区 `max-width: 360px`。
+- **两种形态**:
+  - **行内模式**(默认):跟在标签/文字后补充说明,如「Rerank 模型 ?」「分段标识符 ?」。
+  - **角标模式**(`badge` 属性):绝对定位于目标对象**右上角**(不占行内主轴位置),使用方容器需 `position: relative`;适用场景:状态 tag 的失败原因、连接状态说明等「不占主聚焦位置」的补充信息。
+- **使用方式**:
+
+```vue
+<HelpTip content="开启后按候选分段与问题的语义匹配度重排" />
+<HelpTip badge label="查看失败原因" :content="run.error" />
+```
+
+- **禁止事项**:
+  - 禁止在任何页面再手写 `?` 角标样式(圆形边框、文字问号、emoji 均不允许);
+  - 禁止绕过组件直接复制 `QuestionFilled + .tip-icon` 样式新起炉灶;
+  - 提示图标一律挂目标**右上角**、hover 轻提示,不占据主要聚焦位置(对齐 ui-guidelines §4 说明文案 tooltip 化)。
+- **图标迁移**:图标体系 lucide Phase 3(§2.7)迁移时只需替换 HelpTip 内的图标导入(`QuestionFilled` → lucide `CircleHelp`),全站点统一生效——这正是必须收敛到单一组件的原因。
+- **存量收敛**:各文件中的 `.tip-icon` 局部样式随页面改造逐步替换为 `HelpTip`,替换完成前不要求一次性翻新。
+
 ---
 
 ## 2. 图标体系(@lucide/vue)

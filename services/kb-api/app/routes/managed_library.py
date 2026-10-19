@@ -8,9 +8,11 @@ import asyncio
 import re
 import uuid
 import zipfile
+
+import httpx
 from typing import Literal
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile, status
 from fastapi.responses import Response
 from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import select, func, delete, update
@@ -35,6 +37,11 @@ image_router = APIRouter(prefix="/api/v1/document-libraries", tags=["document-li
 class ProcessingConfig(BaseModel):
     chunk_method: Literal["auto", "naive", "book", "laws", "manual", "one", "paper", "presentation", "table"] = "naive"
     layout_recognize: Literal["DeepDOC", "Plain Text"] = "DeepDOC"
+    # MinerU 解析引擎参数（知识库设置-解析引擎）：质量档位与 OCR 策略，仅库级配置、
+    # 下次解析生效；三级语义 speed/balanced/quality（quality=最高质量，默认），
+    # 本地/云端原值映射见 mineru_contract.SEMANTIC_TIERS
+    tier: Literal["speed", "balanced", "quality"] = "quality"
+    ocr_mode: Literal["auto", "txt", "ocr"] = "auto"
     chunk_token_num: int = Field(512, ge=1, le=2048)
     delimiter: str = Field("\n。！？；", min_length=1, max_length=100)
     embedding_model: str = Field("", max_length=200)
@@ -135,11 +142,14 @@ class StagingCommitIn(BaseModel):
 
 
 class DocumentConfigIn(BaseModel):
-    """文档级索引设置：strategy 为前端策略视图，processing 为解析生效的最终分段参数。"""
+    """文档级索引设置：strategy 为前端策略视图，processing 为解析生效的最终分段参数。
+    rechunk：保存后立即按新设置重新分段（训练中状态）——不重走 MinerU 解析，
+    直接用已落盘的解析缓存（parsed.md）重建分段；缓存缺失时回退完整解析。"""
     processing: ProcessingConfig
     strategy: Literal["auto", "custom", "parent_child", "by_file_type"] = "auto"
     enhancements: dict[str, bool] = Field(default_factory=dict)
     type_rules: dict = Field(default_factory=dict)
+    rechunk: bool = False
 
 
 async def library(s, library_id, lock=False):
@@ -452,10 +462,10 @@ async def import_dingtalk(library_id: int, body: DingTalkImportIn,
     """从钉钉知识库导入文档到文档库（单次导入，异步队列执行）。
 
     不再同步遍历下载（大知识库 HTTP 必超时）：创建一次性同步源
-    （import_once=True）→ 经 XXL-Job 立即触发编目 → 文档以「待同步」
+    （import_once=True）→ 进程内立即触发编目 → 文档以「待同步」
     入列表、任务进同步队列，由批处理分批下载解析；全部成功后源自动
-    停用（内容不随钉钉源文件更新，失败由 cron 增量重试直至成功）。
-    进度见「知识采集 → 同步队列」，执行留痕于 XXL-Job 调度控制台。
+    停用（内容不随钉钉源文件更新，失败可手动「立即同步」重试直至成功）。
+    进度见「知识采集 → 同步队列」。
     """
     lib = await library(s, library_id)
 
@@ -468,7 +478,7 @@ async def import_dingtalk(library_id: int, body: DingTalkImportIn,
         raise HTTPException(422, "请提供钉钉知识库 workspace_id 与 root_node_id")
 
     import json as _json
-    from app.services.sync.scheduler import reload_sync_jobs, trigger_source_sync
+    from app.services.sync.scheduler import trigger_source_sync
     from app.services.sync.sync_database import SyncSessionLocal
     from kb_common.models import SyncSource
 
@@ -480,26 +490,25 @@ async def import_dingtalk(library_id: int, body: DingTalkImportIn,
             name=name[:200], workspace_id=body.workspace_id,
             root_node_id=body.root_node_id,
             dataset_name=lib.name, dataset_id=str(library_id),
-            delete_policy="keep", cron="*/5 * * * *", enabled=True,
+            delete_policy="keep", enabled=True,
             node_whitelist=_json.dumps(body.node_ids), import_once=True,
             owner_user_id=user.id)
         sync_db.add(source)
         sync_db.commit()
         sync_db.refresh(source)
         source_id = source.id
-    # 注册 cron 作业（作为失败后的增量重试通道），再经 XXL-Job 立即触发首次编目；
-    # admin 瞬时不可达不阻塞导入——源已创建，cron 会在下一个刻度自动接管
+    # 进程内立即触发首次编目（编目内部接批处理）；失败不阻塞——源已创建，
+    # 可在同步列表对该源手动「立即同步」重试
     scheduled_now = True
     try:
-        await asyncio.to_thread(reload_sync_jobs)
         await asyncio.to_thread(trigger_source_sync, source_id,
                                 getattr(user, "username", "") or "")
-    except Exception:  # noqa: BLE001 — 调度中心瞬时不可达：任务已建，等待 cron 接管
+    except Exception:  # noqa: BLE001 — 触发瞬时失败：任务未建，提示手动重试
         scheduled_now = False
     return {"queued": True, "source_id": source_id, "source_name": name,
             "message": ("导入任务已提交同步队列，分批同步中，进度可在「知识采集 → 同步队列」查看"
                         if scheduled_now else
-                        "导入任务已创建，调度中心暂时不可达，将由定时调度自动开始同步")}
+                        "导入任务已创建，触发暂时失败，请在同步列表对该源手动「立即同步」")}
 
 
 async def bound_document(s, library_id, doc_id, lock=False):
@@ -650,13 +659,15 @@ async def _apply_chunks(s: AsyncSession, doc, markdown: str, processing: dict,
     doc.message = "部分内容解析失败，请检查分段" if partial else ""
     doc.chunk_count = count
     from datetime import datetime as _dt
-    doc.parsed_at = _dt.utcnow()
+    # 东八区统一口径（与 sync 模块 datetime.now() / DB Asia/Shanghai 一致）；
+    # 此前 utcnow() 写入导致「训练时间」与同步队列时间相差 8 小时
+    doc.parsed_at = _dt.now()
     await _store_parsed_markdown(doc, markdown)
     # Wiki 库：原料消化完成自动触发页面生成（engine_config.wiki.auto_generate，默认开）。
     # 覆盖 MinerU 完成轮询与 txt/md/csv 本地解析两条完成路径（本函数为唯一汇聚点）；
     # 入队走独立会话即时提交，不依赖调用方事务的提交时序。
     from app.services.wiki.generator import auto_trigger_for_document
-    await auto_trigger_for_document(doc)
+    await auto_trigger_for_document(s, doc)
 
 
 def _parsed_markdown_key(doc) -> str:
@@ -671,6 +682,60 @@ async def _store_parsed_markdown(doc, text: str):
     from kb_common.clients import minio_client
     await asyncio.to_thread(minio_client.upload_bytes, minio_client.RAW,
                             _parsed_markdown_key(doc), text.encode("utf-8"), "text/markdown")
+
+
+async def _read_parsed_markdown(doc) -> str:
+    """读取已落盘的解析缓存（parsed.md）；不存在（历史文档/未解析）返回空串。"""
+    from kb_common.clients import minio_client
+
+    def read():
+        try:
+            response = minio_client.minio.get_object(minio_client.RAW, _parsed_markdown_key(doc))
+            try:
+                return response.read().decode("utf-8", errors="replace")
+            finally:
+                response.close()
+                response.release_conn()
+        except Exception:
+            return ""
+
+    return await asyncio.to_thread(read)
+
+
+# TRAINING 超时兜底：后台分段任务随进程存亡，服务重启会遗留永久「训练中」；
+# refresh 轮询发现 updated_at 超过该窗口仍无进展即终结为 FAILED 引导重试
+_TRAINING_TIMEOUT_SECONDS = 15 * 60
+
+
+async def _rechunk_task(library_id: int, doc_id: uuid.UUID):
+    """后台重新分段（文档设置保存后触发）：独立会话（任务生命周期超出请求），
+    用解析缓存按最新生效配置重建分段；异常兜底置 FAILED，避免卡在训练中。"""
+    from kb_common.database import SessionLocal
+    try:
+        async with SessionLocal() as s:
+            lib = (await s.execute(select(KnowledgeLibrary).where(
+                KnowledgeLibrary.id == library_id))).scalar_one()
+            doc = (await s.execute(select(LibraryDocument).where(
+                LibraryDocument.id == doc_id))).scalar_one()
+            markdown = await _read_parsed_markdown(doc)
+            if not markdown:
+                doc.status, doc.progress, doc.message = "FAILED", 0, "解析缓存不存在，请重新训练"
+                await s.commit()
+                return
+            images = await _read_chunk_images(doc, markdown)
+            await _apply_chunks(s, doc, markdown, _processing_for(lib, doc),
+                                enhancements=_enhancements_for(lib, doc), images=images)
+            await s.commit()
+    except Exception as exc:
+        try:
+            async with SessionLocal() as s:
+                doc = await s.get(LibraryDocument, doc_id)
+                if doc and doc.status == "TRAINING":
+                    doc.status, doc.progress = "FAILED", 0
+                    doc.message = f"重新分段失败: {exc}"[:500]
+                    await s.commit()
+        except Exception:
+            pass  # 兜底失败不再向上抛（后台任务无调用方）
 
 
 def _sniff_format(text: str) -> Literal["json", "markdown"]:
@@ -748,12 +813,33 @@ async def _finalize_parse(adapter: "MinerUEngine | MinerUCloudEngine", s: AsyncS
 async def refresh_state(adapter: "MinerUEngine | MinerUCloudEngine", s: AsyncSession, lib, doc):
     """同步文档状态：查询 MinerU job；首次完成时执行本地分段（幂等，
     仅从 PARSING 状态迁出时落地，避免重复下载/重复分段）。"""
+    if doc.status == "TRAINING":
+        # 本地后台分段任务进行中（无 MinerU job 可查）；超时兜底防进程重启后永久卡死
+        from datetime import datetime as _dt
+        if doc.updated_at and (_dt.now() - doc.updated_at).total_seconds() > _TRAINING_TIMEOUT_SECONDS:
+            doc.status, doc.progress, doc.message = "FAILED", 0, "重新分段超时或服务重启中断，请重新保存设置触发训练"
+        return
     if not doc.engine_job_id:
         # 旧引擎时代的文档没有本地解析任务
         if doc.engine_document_id and doc.status == "PARSING":
             doc.status, doc.progress, doc.message = "FAILED", 0, "解析引擎已切换为 MinerU，请重新解析"
         return
-    job = await invoke(adapter.job(doc.engine_job_id))
+    # 网络抖动（代理 TLS 失败/超时）与引擎错误的统一收敛：轮询路径绝不 500。
+    # invoke 会把 EngineError 转 HTTPException(502)；httpx 原生网络异常则两者皆非，
+    # 必须一并捕获——否则代理瞬时故障会被前端每 5s 的轮询放大成刷屏 500。
+    try:
+        job = await invoke(adapter.job(doc.engine_job_id))
+    except (HTTPException, EngineError, httpx.HTTPError) as exc:
+        msg = str(getattr(exc, "detail", None) or exc)
+        if "任务不存在" in msg:
+            # job id 已失效（引擎切换/服务重启注册表清空/云端任务被清理）：不可恢复，
+            # 终结为 FAILED 引导重新解析，避免每轮轮询都 404→500。
+            doc.status, doc.progress, doc.message = "FAILED", 0, f"{msg}，请重新解析"[:500]
+        else:
+            # 瞬时网络/网关错误：保持 PARSING，下一轮轮询重试
+            doc.status, doc.progress = "PARSING", doc.progress or 0
+            doc.message = f"解析状态查询失败，稍后重试: {msg}"[:500]
+        return
     status, progress = job_state(job)
     if status == "UNKNOWN":
         return
@@ -761,7 +847,14 @@ async def refresh_state(adapter: "MinerUEngine | MinerUCloudEngine", s: AsyncSes
         doc.status, doc.progress, doc.message = "PARSING", progress, str(job.get("status") or "")
         return
     if status == "COMPLETED" and doc.status == "PARSING":
-        await _finalize_parse(adapter, s, lib, doc, job)
+        # 产物落地（zip/markdown 下载+分段）瞬时失败时保持 PARSING：
+        # 前端/批处理的高频轮询下一轮会重试 finalize（幂等，仅 PARSING 迁出时落地），
+        # 而不是把网络抖动升级成 500 / 永久 FAILED。
+        try:
+            await _finalize_parse(adapter, s, lib, doc, job)
+        except (HTTPException, EngineError, httpx.HTTPError) as exc:
+            doc.status, doc.progress = "PARSING", progress
+            doc.message = f"产物落地暂不可用，稍后重试: {getattr(exc, 'detail', '') or exc}"[:500]
         return
     if status == "FAILED":
         doc.status, doc.progress = "FAILED", 0
@@ -810,8 +903,17 @@ async def _do_parse(s: AsyncSession, library_id: int, doc_id: uuid.UUID):
                             enhancements=_enhancements_for(lib, doc))
         await s.commit()
         return
-    file_id = await invoke(adapter.upload(doc.name, raw))
-    job_id = await invoke(adapter.create_job(file_id))
+    try:
+        file_id = await invoke(adapter.upload(doc.name, raw))
+        # 解析引擎参数取库级配置（文档级不提供覆盖；旧库无值回退默认 quality/auto）
+        proc = _processing_for(lib, doc)
+        job_id = await invoke(adapter.create_job(
+            file_id, tier=proc.get("tier") or "quality",
+            ocr_mode=proc.get("ocr_mode") or "auto"))
+    except httpx.HTTPError as exc:
+        # httpx 原生网络异常（代理 TLS 失败/超时等）未经 invoke 收敛，补齐为 502：
+        # 用户显式操作失败给明确错误，而不是 500 崩溃
+        raise HTTPException(502, f"解析服务网络错误（网络/代理抖动），请稍后重试: {exc}") from exc
     # 重新解析会清除旧分段（含人工修改），完成后按库当前规则重建
     await s.execute(delete(LibraryChunk).where(LibraryChunk.document_id == doc.id))
     doc.engine_document_id, doc.engine_job_id = file_id, job_id
@@ -856,8 +958,8 @@ async def serve_image(library_id: int, doc_id: uuid.UUID, image_name: str,
 @router.post("/{library_id}/documents/{doc_id}/parse")
 async def parse(library_id: int, doc_id: uuid.UUID, s: AsyncSession = Depends(get_session)):
     lib, doc = await bound_document(s, library_id, doc_id, lock=True)
-    if doc.status == "PARSING":
-        raise HTTPException(409, "文档正在解析，请等待完成或停止后重试")
+    if doc.status in ("PARSING", "TRAINING"):
+        raise HTTPException(409, "文档正在解析/训练，请等待完成或停止后重试")
     if doc.status == "PENDING":
         raise HTTPException(409, "文档待同步，同步完成后可解析")
     await _do_parse(s, library_id, doc_id)
@@ -889,8 +991,8 @@ async def set_document_enabled(library_id: int, doc_id: uuid.UUID, body: Documen
     等价于"删索引/重建索引"的检索语义。
     """
     _, doc = await bound_document(s, library_id, doc_id, lock=True)
-    if doc.status == "PARSING":
-        raise HTTPException(409, "解析中的文档不能更改检索状态，请先停止解析")
+    if doc.status in ("PARSING", "TRAINING"):
+        raise HTTPException(409, "解析/训练中的文档不能更改检索状态，请先停止或等待完成")
     doc.enabled = body.enabled
     await s.commit()
     await s.refresh(doc)
@@ -929,11 +1031,33 @@ async def set_document_tags(library_id: int, doc_id: uuid.UUID, body: DocumentTa
 
 @router.put("/{library_id}/documents/{doc_id}/config")
 async def configure_document(library_id: int, doc_id: uuid.UUID, body: DocumentConfigIn,
+                             background_tasks: BackgroundTasks,
                              s: AsyncSession = Depends(get_session)):
-    """文档级索引设置：保存后下次解析生效（当前分段不变，需重新解析应用）。"""
+    """文档级索引设置：rechunk=保存后按新设置重新分段（TRAINING 训练中，用解析缓存
+    重建分段，不走 MinerU；缓存缺失回退完整解析）。保存的 processing 始终是
+    下次解析生效的最终分段参数。"""
     _, doc = await bound_document(s, library_id, doc_id, lock=True)
-    doc.engine_config = {"processing": body.processing.model_dump(), "strategy": body.strategy,
+    if doc.status in ("PARSING", "TRAINING"):
+        raise HTTPException(409, "解析中/训练中不能修改文档设置，请等待完成")
+    # tier/ocr_mode 仅库级配置（文档级设置界面不提供）：存储时剔除，
+    # 避免 Pydantic 补的默认值在 _processing_for 合并时覆盖库级自定义
+    doc.engine_config = {"processing": body.processing.model_dump(exclude={"tier", "ocr_mode"}),
+                         "strategy": body.strategy,
                          "enhancements": body.enhancements, "type_rules": body.type_rules}
+    if body.rechunk:
+        if doc.status == "PENDING":
+            raise HTTPException(409, "文档待同步，暂无解析产物")
+        markdown = await _read_parsed_markdown(doc)
+        if markdown:
+            # 重新分段会清除旧分段（含人工修改），按新设置重建；后台任务完成置 COMPLETED
+            await s.execute(delete(LibraryChunk).where(LibraryChunk.document_id == doc.id))
+            doc.status, doc.progress, doc.message, doc.chunk_count = "TRAINING", 0, "正在按新设置重新分段", 0
+            background_tasks.add_task(_rechunk_task, library_id, doc_id)
+        else:
+            # 历史文档未落解析缓存：回退完整解析（走 MinerU，状态 PARSING）
+            await _do_parse(s, library_id, doc_id)
+            await s.refresh(doc)
+            return doc_out(doc)
     await s.commit()
     await s.refresh(doc)
     return doc_out(doc)
@@ -1006,8 +1130,8 @@ async def parsed_content(library_id: int, doc_id: uuid.UUID, s: AsyncSession = D
 
 async def chunk_context(s, library_id, doc_id, writing=False):
     lib, doc = await bound_document(s, library_id, doc_id, lock=writing)
-    if writing and doc.status == "PARSING":
-        raise HTTPException(409, "解析期间不能修改分段")
+    if writing and doc.status in ("PARSING", "TRAINING"):
+        raise HTTPException(409, "解析/训练期间不能修改分段")
     return lib, doc
 
 
@@ -1094,6 +1218,8 @@ async def delete_document(library_id: int, doc_id: uuid.UUID, s: AsyncSession = 
     lib, doc = await bound_document(s, library_id, doc_id, lock=True)
     if doc.status == "PARSING":
         raise HTTPException(409, "请先停止解析再删除")
+    if doc.status == "TRAINING":
+        raise HTTPException(409, "训练中的文档暂不能删除，请等待重新分段完成")
     # 级联取消批处理模式下关联该文档的排队同步任务（PENDING 文档删除后无需再同步）
     from datetime import datetime as _dt
 
@@ -1102,7 +1228,7 @@ async def delete_document(library_id: int, doc_id: uuid.UUID, s: AsyncSession = 
     await s.execute(_sa_update(SyncTask).where(
         SyncTask.library_document_id == str(doc.id),
         SyncTask.status == "pending",
-    ).values(status="failed", finished_at=_dt.utcnow(), error="目标文档已删除，任务取消"))
+    ).values(status="failed", finished_at=_dt.now(), error="目标文档已删除，任务取消"))
     # Keep original object for disaster recovery; local catalog entry (and chunks) removed.
     await s.delete(doc)
     await s.commit()

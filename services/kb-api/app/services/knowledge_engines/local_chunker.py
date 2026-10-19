@@ -13,7 +13,17 @@
      字符 1/2-gram 向量做余弦相似度，谷值深度 ≥ μ+σ/2 且为局部极小处判定
      主题边界，产出仍走 ② 的长度修正；
 - 其他方法（naive/book/laws/manual/paper/presentation/table）统一按 naive
-  近似处理：delimiter 集合切句 + chunk_token_num 滚动窗口聚合（单句不硬拆）；
+  近似处理。自定义多字符分隔符（如 ###）按字面切段——段落是分段边界，不跨边界
+  合并（≤ 限长原样保留），超长段再按句读细分（对齐 Dify fixed_separator 语义）；
+  换行类同为结构边界：'\n\n' 段落级、'\n' 行级（命中即分段，行/段不跨边界合并，
+  超长行/段按句读细分）；其余句读字符（。！？；…）为段内切句单元，滚动窗口
+  聚合到 chunk_token_num（单句不硬拆）；
+- 分隔符序列化协议（delimiter / children_delimiter 单字符串，max 100）：
+  '\x1f'（ASCII Unit Separator，用户不可输入）连接多个分隔符项——
+  第一项为预设单字符集合（句读级，旧格式即无 '\x1f' 的整串字符集），
+  其后的项为多字符字面分隔符（结构级分段边界，如 '###'、'\n\n'）。
+  旧格式（无 '\x1f'）整体按字符集处理；'\n\n' 子串提升为段落级结构分隔符
+  （与 _split_by_any 旧特判一致）。存量配置零迁移自动兼容；
 - overlap：分段重叠度——滚动聚合（naive 切句聚合、递归修正的单元聚合）闭合
   分段时，携带上一分段尾部总 Token ≤ overlap 的完整单元（句子/段落/行），
   提升跨分段语义连续性；0 表示不重叠；
@@ -307,20 +317,24 @@ def _tail_units(units: list[str], overlap: int) -> list[str]:
 
 def _pack(units: list[str], joiner: str, limit: int, split_deeper, overlap: int = 0) -> list[str]:
     """滚动聚合 ≤ limit；单个超长单元交下一级拆分；闭合分段时携带尾部 overlap 重叠。
-    表格占位单元之后强制分段（表格作为分段结尾）；表格占位不进重叠尾（整表不跨分段重复）。"""
+    表格占位单元之后强制分段（表格作为分段结尾）；表格占位不进重叠尾（整表不跨分段重复）。
+    超长单元细分后 cur 只剩重叠尾且无后续单元拼接时，尾块内容已完整出现在前一分段中
+    ——不单独成块（避免标题/尾句重复落分段）。"""
     units = _split_units_on_tables(units)
     out: list[str] = []
     cur: list[str] = []
+    carried = False  # cur 当前是否只含重叠尾（尚未拼接新单元）
 
     def flush() -> list[str]:
         nonlocal cur
-        if cur:
+        if cur and not carried:  # 纯重叠尾不落块（内容已完整出现在前一分段）
             out.append(joiner.join(cur).strip())
         return _tail_units(cur, overlap)
 
     for u in units:
         if est_tokens(u) > limit:
             cur = flush()
+            carried = True
             out.extend(split_deeper(u))
             continue
         if cur and est_tokens(joiner.join(cur)) + est_tokens(u) > limit:
@@ -329,9 +343,11 @@ def _pack(units: list[str], joiner: str, limit: int, split_deeper, overlap: int 
                 tail = []  # 重叠尾带新单元已超限：放弃本次重叠，避免尾部重复成块
             cur = tail
         cur.append(u)
+        carried = False
         if _TABLE_PH_RE.match(u.strip()):
             cur = flush()  # 表格结束强制分段：_tail_units 遇占位即断，重叠尾为空，下一分段不回带表格
-    if cur:
+            carried = False
+    if cur and not carried:
         out.append(joiner.join(cur).strip())
     return out
 
@@ -590,6 +606,82 @@ def _dify_split_chunk(text: str, fixed_separator: str, separators: list[str],
     return [c for c in final_chunks if c.strip()]
 
 
+# 分隔符协议项间连接符：'\x1f'（ASCII Unit Separator）——用户输入框无法键入，
+# 用于在单个 delimiter 字符串中区分「预设单字符集合」与「多字符字面分隔符」
+_STRUCT_SEP = "\x1f"
+
+
+def _parse_delimiters(delimiters: str) -> tuple[str, list[str]]:
+    """分隔符协议解析 → (charset, literals)。
+
+    - 无 '\\x1f'（旧格式）：整体为单字符集合，其中换行类提升为结构分隔符——
+      '\\n\\n' 段落级（吸收 '\\n'，段内不再按行拆）、'\\n' 行级（命中即分段，
+      行是结构边界不跨行合并，超长行按句读细分）；其余（。！？；…）为句读
+      字符集（段内切句 + 滚动聚合到限长）；
+    - 有 '\\x1f'：第一项为句读字符集（charset，可为空），其后的项为多字符
+      字面分隔符（literals，分段边界，如 '###'）。
+    """
+    if not delimiters:
+        return "", []
+    if _STRUCT_SEP not in delimiters:
+        if "\n\n" in delimiters:
+            return delimiters.replace("\n\n", "").replace("\n", ""), ["\n\n"]
+        if "\n" in delimiters:
+            return delimiters.replace("\n", ""), ["\n"]
+        return delimiters, []
+    parts = delimiters.split(_STRUCT_SEP)
+    charset = "".join(dict.fromkeys(parts[0]))  # 第一项：预设字符集（去重保序）
+    literals = [p for p in parts[1:] if p]
+    return charset, literals
+
+
+def _structural_split(text: str, literals: list[str], limit: int, overlap: int,
+                      charset: str = "") -> list[str]:
+    """结构分隔符切分（Dify fixed_separator 语义）：
+
+    字面分隔符（'###' 等）按字面匹配切大块（长串优先，'####' 先于 '###'），
+    分隔符保留在下一块开头（'### 标题' 引领该分段，便于脱离上下文溯源）。
+    行内切点修正：分隔符嵌在行内（如 MinerU 产物 '## **###**' 分隔线）时，
+    切点前的不完整行随分隔符归下一块——分隔符所在整行完整引领新分段，
+    不产生半截残片；正文行内偶然出现的分隔符亦不触发切段。
+    切出的块 ≤ limit 原样保留——段落是用户显式指定的分段边界，不跨边界
+    合并；超长块交 _rec_split 按 charset 句读递归细分（滚动聚合，带 overlap；
+    表格占位原子不受影响）。"""
+    pats = sorted(set(literals), key=len, reverse=True)
+    regex = re.compile("(" + "|".join(re.escape(p) for p in pats) + ")")
+    parts = regex.split(text)
+    blocks: list[str] = []
+    pending = ""
+    for i, p in enumerate(parts):
+        if i % 2 == 1:  # 分隔符：归下一块开头
+            pending = p
+        else:
+            blocks.append(pending + p)
+            pending = ""
+    # 行内切点修正：前块不以换行结尾、且下一块不以换行开头（排除 '\n\n' 类换行
+    # 分隔符）= 分隔符嵌在行内，前块尾部的不完整行移入下一块开头
+    fixed: list[str] = []
+    for i, b in enumerate(blocks):
+        if (i + 1 < len(blocks) and b and not b.endswith("\n")
+                and not blocks[i + 1].startswith("\n")):
+            ls = b.rfind("\n") + 1
+            blocks[i + 1] = b[ls:] + blocks[i + 1]
+            b = b[:ls]
+        fixed.append(b)
+    blocks = fixed
+    chunks: list[str] = []
+    for b in blocks:
+        b = b.strip()
+        if not b:
+            continue
+        if est_tokens(b) <= limit and not _TABLE_PH_ANY_RE.search(b):
+            chunks.append(b)
+        else:
+            # 超长块细分：charset 空时用默认句读兜底（避免字符滑窗切在句中）
+            chunks.extend(_rec_split(b, limit, charset or "\n。！？；", overlap=overlap))
+    return chunks
+
+
 def _split_by_any(text: str, delimiters: str) -> list[str]:
     """按分隔符切分并保留在单元尾部（本地化改进：句读完整——Dify 原版 split 丢弃
     分隔符，中文句号切句会丢标点）。'\n\n' 在集合中时作为整体分隔符（段落级）优先：
@@ -612,11 +704,13 @@ def _split_by_any(text: str, delimiters: str) -> list[str]:
 def _dify_split_any(text: str, delimiters: str, limit: int, overlap: int) -> list[str]:
     """Dify split_text 的分隔符集合版（父块切分）：取集合中优先级最高且存在于文本的
     分隔符作 fixed_separator（'\n\n' 段落级整体优先于 '\n' 行级，对齐 Dify 单选语义），
-    ≤ limit 的段原样保留（段落结构优先不合并），超长段按其余标识符 + Dify 兜底递归细分。"""
-    cands: list[str] = ["\n\n"] if "\n\n" in delimiters else []
-    for ch in delimiters:
-        if ch == "\n" and "\n\n" in delimiters:
-            continue  # 段落级已覆盖行级
+    ≤ limit 的段原样保留（段落结构优先不合并），超长段按其余标识符 + Dify 兜底递归细分。
+    多字符字面分隔符（协议 literals）走 _structural_split 结构切分。"""
+    charset, literals = _parse_delimiters(delimiters)
+    if literals:
+        return _structural_split(text, literals, limit, overlap, charset)
+    cands: list[str] = []
+    for ch in charset:
         if ch and ch not in cands:
             cands.append(ch)
     fixed = next((c for c in cands if c in text), "")
@@ -639,6 +733,11 @@ def _parent_child_chunks(text: str, tables: list[str], delimiters: str, limit: i
       （对齐 Dify：child chunks ≥ 1，单子块即父块整体作为检索单元）。
     """
     def split_children(parent: str) -> list[str]:
+        # 子分隔符协议：多字符字面分隔符（'###' 等）按结构切分，短块原样保留
+        ccharset, cliterals = _parse_delimiters(child_delim)
+        if cliterals:
+            return [c for c in _structural_split(parent, cliterals, child_limit, 0, ccharset)
+                    if c.strip()]
         return [c for c in _dify_split_chunk(parent, child_delim, list(_DIFY_FALLBACK_SEPARATORS), child_limit) if c.strip()]
 
     if parent_mode == "fulltext":
@@ -678,6 +777,13 @@ def chunk_markdown(md: str, cfg: dict) -> list[dict]:
     if method == "auto":
         chunks = _auto_chunk(text, delimiters, limit, overlap)
     else:
+        # 分隔符协议：多字符字面分隔符（'###' 等）→ 结构级切段（段落不跨边界
+        # 合并，超长段句读细分）；纯句读集合 → 切句 + 滚动窗口聚合
+        charset, literals = _parse_delimiters(delimiters)
+        if literals:
+            chunks = _structural_split(text, literals, limit, overlap, charset)
+            return [{"content": _restore_tables(chunk, tables), "children": None}
+                    for chunk in chunks]
         chunks = []
         cur: list[str] = []
         # 句子流按表格占位拆开（delimiter 不含换行时占位与邻文同句），保证表格后强制分段

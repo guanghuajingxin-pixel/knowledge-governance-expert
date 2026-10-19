@@ -9,8 +9,10 @@ import {
   latestWikiLint, updateWikiLibrary, generateWiki, type WikiLibrary, type WikiPage, type WikiRun,
 } from '@/api/wiki'
 import { listLibraryDocuments, downloadOriginal, deleteLibraryDocument, type LibraryDocument } from '@/api/document-library'
+import { sourcesStatsAll } from '@/api/sync'
 import AddKnowledgeDialog from '@/components/kb/AddKnowledgeDialog.vue'
 import KgPagination from '@/components/common/KgPagination.vue'
+import HelpTip from '@/components/common/HelpTip.vue'
 import { useUserStore } from '@/stores/user'
 import { useTabsStore } from '@/stores/tabs'
 import { formatDateTime, formatSource } from '@/utils/format'
@@ -20,6 +22,9 @@ const props = defineProps<{ libId: number }>()
 const route = useRoute()
 const router = useRouter()
 const tabsStore = useTabsStore()
+// 页签路径挂载时固化：KeepAlive 缓存期间全局 route 会指向其它页面，
+// 轮询/异步回调里更新页签标题必须用本页路径，否则会把当前页签改名
+const tabPath = route.path
 const canEdit = computed(() => ['super_admin', 'admin', 'editor'].includes(useUserStore().userInfo?.role || ''))
 
 const lib = ref<WikiLibrary | null>(null)
@@ -40,7 +45,7 @@ async function load() {
   loading.value = true
   try {
     lib.value = await getWikiLibrary(props.libId)
-    tabsStore.updateTabTitle(route.path, lib.value.name)
+    tabsStore.updateTabTitle(tabPath, lib.value.name)
     const [p, d, r] = await Promise.all([
       listWikiPages(props.libId), listLibraryDocuments(props.libId), listWikiRuns(props.libId)])
     pages.value = p
@@ -178,7 +183,7 @@ async function saveSettings() {
   try {
     lib.value = await updateWikiLibrary(props.libId, { ...form })
     settingsVisible.value = false
-    tabsStore.updateTabTitle(route.path, lib.value.name)
+    tabsStore.updateTabTitle(tabPath, lib.value.name)
     ElMessage.success('设置已保存')
   } catch (e: any) {
     ElMessage.error(e?.response?.data?.detail || '保存失败')
@@ -190,11 +195,18 @@ function goRetrievalTest() {
 }
 
 // ===== 轮询：生成任务/健康检查进行中 或 原料解析中 时自动刷新 =====
-// 「添加知识」确认后的期待窗口：编目经 XXL-Job 异步执行，「待同步」占位文档
-// 几秒后才会落库；窗口内轮询无条件刷新，让新文档第一时间回显到原料列表
+// 「添加知识」确认后的期待窗口：钉钉导入经后台「编目 + 批处理」异步执行，
+// 「待同步」占位文档几秒后才开始陆续落库。优先按同步源 run 状态自适应轮询
+// （run 到终态即停止期待）；拿不到 sourceIds 的旧调用退回 60s 固定窗口兜底
 const AWAIT_ADDED_MS = 60_000
 const awaitAddedUntil = ref(0)
-function onAddSuccess() {
+const awaitingSources = ref(new Set<number>())
+let statsFailCount = 0
+function onAddSuccess(sourceIds?: number[]) {
+  if (sourceIds?.length) {
+    awaitingSources.value = new Set(sourceIds)
+    statsFailCount = 0
+  }
   awaitAddedUntil.value = Date.now() + AWAIT_ADDED_MS
   load()
 }
@@ -204,9 +216,26 @@ let timer: ReturnType<typeof setTimeout> | undefined
 async function poll() {
   try {
     if (!busy.value && !loading.value) {
+      // 期待中的同步源：run 到终态即移出期待集合（编目+批处理全部完成）。
+      // stats 单独兜错：权限不足/瞬时失败不影响主轮询，连续失败则放弃自适应
+      if (awaitingSources.value.size > 0) {
+        try {
+          const stats = await sourcesStatsAll()
+          statsFailCount = 0
+          for (const item of stats.items) {
+            if (awaitingSources.value.has(item.source_id)
+                && item.last_run && item.last_run.status !== 'running') {
+              awaitingSources.value.delete(item.source_id)
+            }
+          }
+        } catch {
+          if (++statsFailCount >= 3) awaitingSources.value.clear()
+        }
+      }
       const active = runs.value.some(r => ['PENDING', 'RUNNING'].includes(r.status))
       const parsing = documents.value.some(d => d.status === 'PARSING' || d.status === 'PENDING')
-      if (active || parsing || Date.now() < awaitAddedUntil.value) await load()
+      const awaiting = awaitingSources.value.size > 0 || Date.now() < awaitAddedUntil.value
+      if (active || parsing || awaiting) await load()
       if (lintVisible.value && lintRun.value?.status === 'RUNNING') await refreshLint()
     }
   } catch { /* 静默：下一轮重试 */ }
@@ -379,7 +408,14 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(timer) })
           <template #default="{ row }">{{ (row as WikiRun).triggered_by === 'auto' ? '自动' : (row as WikiRun).triggered_by || '手动' }}</template>
         </el-table-column>
         <el-table-column label="状态" width="85">
-          <template #default="{ row }"><el-tag size="small" :type="runType((row as WikiRun).status)">{{ RUN_LABELS[(row as WikiRun).status] || (row as WikiRun).status }}</el-tag></template>
+          <template #default="{ row }">
+            <span class="status-cell">
+              <el-tag size="small" :type="runType((row as WikiRun).status)">{{ RUN_LABELS[(row as WikiRun).status] || (row as WikiRun).status }}</el-tag>
+              <!-- 失败原因暗提示：统一 HelpTip 角标模式，悬于状态右上角 -->
+              <HelpTip v-if="(row as WikiRun).status === 'FAILED' && (row as WikiRun).error"
+                       badge label="查看失败原因" :content="(row as WikiRun).error" />
+            </span>
+          </template>
         </el-table-column>
         <el-table-column label="结果" min-width="220" show-overflow-tooltip>
           <template #default="{ row }">
@@ -480,6 +516,7 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(timer) })
 .ops { display: flex; align-items: center; gap: 12px; }
 .ops .el-button + .el-button { margin-left: 0; }
 .ops .el-dropdown { vertical-align: middle; }
+.status-cell { position: relative; display: inline-flex; align-items: center; }
 .drawer-toolbar { display: flex; align-items: center; margin-bottom: 12px; }
 .hint { font-size: 12px; color: var(--el-text-color-secondary); }
 .lint-group-title { font-size: 14px; font-weight: 600; color: #303133; margin: 14px 0 8px; }

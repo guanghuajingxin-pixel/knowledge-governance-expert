@@ -223,6 +223,18 @@ API modules in `web/src/api/`:
 - 弹窗内表格需核对可用宽度与列宽总和。交付布局调整前检查长中文名称、开关两种状态、空数据及说明文字，避免控件换行、文字挤压和无意义留白。
 - 列表「操作」列外显按钮最多 3 个（按使用频率选取），其余收进「更多」下拉，触发器以 `…` 图标表示；危险操作（删除等）归入「更多」并保留二次确认。按钮文案动词开头、明确动作（如「下载原文」而非「原文」）。
 - 列表页统一范式（**强制**）：[docs/frontend-dev-spec.md §1.5](docs/frontend-dev-spec.md) —— 四段式结构（过滤栏/工具栏/表格/分页）、表格开启 `border` 支持表头拖拽调整列宽、过滤栏「查询/重置」按钮组 `margin-left: auto` 靠右、分页统一 KgPagination、操作按钮 `link + size="small"`；新增列表页必须照范式实现，参照 KnowledgeCenter.vue 与 DocumentLibraries.vue。
+- 统一暗提示组件（**强制**）：[docs/frontend-dev-spec.md §1.6](docs/frontend-dev-spec.md) —— 「? 暗提示」一律使用 `components/common/HelpTip.vue`（行内/角标两种模式），禁止页面自造 ? 角标样式。
+
+## 工程规范索引（强制）
+
+任何任务动手前先读对应规范，交付前过其自检清单：
+
+| 规范 | 文档 | 适用 |
+|------|------|------|
+| 前端设计及编码规范 | [docs/frontend-dev-spec.md](docs/frontend-dev-spec.md)（+ [docs/ui-guidelines.md](docs/ui-guidelines.md)） | `web/` 一切界面与前端代码 |
+| 后端编码规范 | [docs/backend-dev-spec.md](docs/backend-dev-spec.md) | `services/` 一切后端代码 |
+| 架构设计规范 | [docs/architecture-spec.md](docs/architecture-spec.md)（现状描述见 [docs/architecture.md](docs/architecture.md)） | 新功能归属、拆分、选型、数据与任务架构决策 |
+| 测试规范 | [docs/testing-spec.md](docs/testing-spec.md) | 全部测试编写与交付门禁 |
 
 ## .env Configuration
 

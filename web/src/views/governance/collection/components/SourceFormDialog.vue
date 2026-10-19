@@ -8,7 +8,6 @@ import { listKnowledgeSources, fetchDingtalkFolderSnapshot } from '@/api/knowled
 import type { KnowledgeSource } from '@/types/knowledge-center'
 import { listDocumentLibraries, type DocumentLibrary } from '@/api/document-library'
 import { useRouter } from 'vue-router'
-import { cronLabel } from './cron'
 
 const router = useRouter()
 
@@ -23,48 +22,12 @@ const form = reactive<SourcePayload>({
   dataset_name: '',
   dataset_id: '',
   delete_policy: 'sync',
-  cron: '0 2 * * *',
   enabled: true,
 })
 
 const saving = ref(false)
 const testing = ref(false)
 const testedSignature = ref('')
-
-// ============ 定时任务便捷选择（频率 + 星期 + 时间 → cron） ============
-const WEEK_OPTIONS = [
-  { label: '周日', value: 0 }, { label: '周一', value: 1 }, { label: '周二', value: 2 },
-  { label: '周三', value: 3 }, { label: '周四', value: 4 }, { label: '周五', value: 5 },
-  { label: '周六', value: 6 },
-]
-const cronFreq = ref<'daily' | 'weekly' | 'workday' | 'hourly' | 'custom'>('daily')
-const cronWeekday = ref(1) // cron dow：0/7=周日，1=周一…
-const cronTime = ref('17:00') // HH:mm
-
-// 从既有 cron 反解析出便捷选择状态；无法识别时回退「自定义」
-function parseCron(expr: string) {
-  const parts = (expr || '').trim().split(/\s+/)
-  if (parts.length !== 5) { cronFreq.value = 'custom'; return }
-  const [min, hour, dom, mon, dow] = parts
-  if (dom !== '*' || mon !== '*') { cronFreq.value = 'custom'; return }
-  if (hour === '*' && min === '0') { cronFreq.value = 'hourly'; return }
-  if (!/^\d+$/.test(min) || !/^\d+$/.test(hour)) { cronFreq.value = 'custom'; return }
-  cronTime.value = `${hour.padStart(2, '0')}:${min.padStart(2, '0')}`
-  if (dow === '*') { cronFreq.value = 'daily'; return }
-  if (dow === '1-5') { cronFreq.value = 'workday'; return }
-  if (/^\d+$/.test(dow)) { cronFreq.value = 'weekly'; cronWeekday.value = Number(dow) % 7; return }
-  cronFreq.value = 'custom'
-}
-
-// 便捷选择变化时生成/回填 cron
-function syncCron() {
-  const [h, m] = (cronTime.value || '17:00').split(':')
-  if (cronFreq.value === 'custom') return // 自定义由用户手输，不覆盖
-  if (cronFreq.value === 'hourly') { form.cron = '0 * * * *'; return }
-  const dow = cronFreq.value === 'weekly' ? String(cronWeekday.value) : '*'
-  const workday = cronFreq.value === 'workday' ? '1-5' : dow
-  form.cron = `${Number(m) || 0} ${Number(h) || 0} * * ${workday}`
-}
 
 const dingtalkSources = ref<KnowledgeSource[]>([])
 const workspaceLoading = ref(false)
@@ -146,8 +109,6 @@ watch(
     form.dataset_name = source?.dataset_name || ''
     form.dataset_id = source?.dataset_id || ''
     form.delete_policy = source?.delete_policy || 'sync'
-    form.cron = source?.cron || '0 2 * * *'
-    parseCron(form.cron)
     form.enabled = source?.enabled ?? true
     testedSignature.value = ''
     selectedNodeId.value = ''
@@ -398,41 +359,11 @@ async function test() {
           </el-select>
         </el-form-item>
       </div>
-      <el-form-item label="定时任务">
-        <div style="display:flex;gap:8px;width:100%;flex-wrap:wrap">
-          <el-select v-model="cronFreq" style="width:110px" @change="syncCron">
-            <el-option label="每天" value="daily" />
-            <el-option label="每周" value="weekly" />
-            <el-option label="工作日" value="workday" />
-            <el-option label="每小时" value="hourly" />
-            <el-option label="自定义" value="custom" />
-          </el-select>
-          <el-select v-if="cronFreq === 'weekly'" v-model="cronWeekday" style="width:100px" @change="syncCron">
-            <el-option v-for="w in WEEK_OPTIONS" :key="w.value" :label="w.label" :value="w.value" />
-          </el-select>
-          <el-time-select
-            v-if="cronFreq !== 'custom' && cronFreq !== 'hourly'"
-            v-model="cronTime"
-            start="00:00"
-            end="23:45"
-            step="00:15"
-            placeholder="选择时间"
-            style="width:120px"
-            @change="syncCron"
-          />
-          <el-input
-            v-if="cronFreq === 'custom'"
-            v-model="form.cron"
-            placeholder="如：0 2 * * *（五段式：分 时 日 月 周）"
-            style="flex:1;min-width:200px"
-          />
-        </div>
-        <div style="font-size:12px;color:var(--el-text-color-secondary);margin-top:4px">
-          当前：<b style="color:var(--el-color-primary)">{{ cronLabel(form.cron) }}</b>（cron：{{ form.cron || '未设置' }}，留空或错误将不参与定时）
-        </div>
-      </el-form-item>
       <el-form-item label="立即启用">
         <el-switch v-model="form.enabled" :active-text="form.enabled ? '已启用' : '已停用'" aria-label="启用同步任务" />
+        <div style="font-size:12px;color:var(--el-text-color-secondary);margin-top:4px;width:100%">
+          启用后，钉钉知识库内容变化时自动同步到目标文档库；也可在列表中手动触发立即同步。
+        </div>
       </el-form-item>
     </el-form>
     <template #footer>

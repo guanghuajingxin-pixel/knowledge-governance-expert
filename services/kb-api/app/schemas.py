@@ -190,12 +190,11 @@ class SyncSourceBase(BaseModel):
     dataset_name: str
     dataset_id: str | None = None
     delete_policy: str = Field(default="keep", pattern="^(keep|sync)$")
-    cron: str = "0 2 * * *"
     enabled: bool = True
     # 节点白名单：限定只同步这些钉钉文档节点（「添加知识」选择指定文档 + 自动同步）；
     # 空数组表示同步整棵目录树（历史行为）。
     node_whitelist: list[str] = Field(default_factory=list)
-    # 同步身份归属用户：定时/后台同步用该用户的钉钉 unionId 调钉钉 API；
+    # 同步身份归属用户：后台同步用该用户的钉钉 unionId 调钉钉 API；
     # 为空回退全局服务账号。创建时不传默认取当前登录用户。
     owner_user_id: str | None = None
 
@@ -217,7 +216,6 @@ class SyncSourceUpdate(BaseModel):
     dataset_name: str | None = None
     dataset_id: str | None = None
     delete_policy: str | None = Field(default=None, pattern="^(keep|sync)$")
-    cron: str | None = None
     enabled: bool | None = None
     node_whitelist: list[str] | None = None
     owner_user_id: str | None = None

@@ -34,6 +34,18 @@ logger = logging.getLogger(__name__)
 API_BASE = "https://api.dingtalk.com"
 OAPI_BASE = "https://oapi.dingtalk.com"
 
+
+def _async_client(timeout: float) -> httpx.AsyncClient:
+    """钉钉 API 直连客户端：trust_env=False 忽略系统/环境代理。
+
+    macOS 开启系统代理（Clash 等）时，httpx 默认 trust_env=True 会把
+    api.dingtalk.com 经本地代理转发，代理侧对钉钉域名不稳定，出现
+    "Server disconnected without sending a response"（编目/下载随机失败）。
+    钉钉为国内公网服务，直连最稳。
+    """
+    return httpx.AsyncClient(timeout=timeout, trust_env=False)
+
+
 # 并发与限流：钉钉标准版有调用频次限制，过高并发会触发 403/overlimit。
 # 全量遍历信号量（限制同时在飞的 wiki/nodes 请求数）
 _WALK_CONCURRENCY = 3
@@ -180,7 +192,7 @@ async def _get_access_token() -> str:
     if not key or not secret:
         raise RuntimeError("钉钉 AppKey/AppSecret 未配置")
     url = f"{API_BASE}/v1.0/oauth2/accessToken"
-    async with httpx.AsyncClient(timeout=20.0) as client:
+    async with _async_client(timeout=20.0) as client:
         resp = await client.post(url, json={"appKey": key, "appSecret": secret})
         resp.raise_for_status()
         data = resp.json()
@@ -274,7 +286,7 @@ async def _list_workspaces_remote(timeout: float = 60.0,
     url = f"{API_BASE}/v2.0/wiki/workspaces"
     params = {"operatorId": operator, "maxResults": 30}
     out: list[dict[str, Any]] = []
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    async with _async_client(timeout=timeout) as client:
         while True:
             await _throttle()
             resp = await _request_with_retry("GET", url, client=client, max_retry=max_retry,
@@ -359,7 +371,7 @@ async def list_nodes(parent_node_id: str,
     url = f"{API_BASE}/v2.0/wiki/nodes"
     params = {"parentNodeId": parent_node_id, "operatorId": operator, "maxResults": 50}
     out: list[dict[str, Any]] = []
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with _async_client(timeout=60.0) as client:
         while True:
             await _throttle()
             resp = await _request_with_retry("GET", url, client=client,
@@ -456,7 +468,7 @@ async def download_document(node_id: str,
     token = await _get_access_token()
     headers = _headers(token)
 
-    async with httpx.AsyncClient(timeout=120.0) as client:
+    async with _async_client(timeout=120.0) as client:
         # 1. wiki 节点 → dentry（spaceId + dentryId）
         await _throttle()
         d1 = await _request_with_retry(
@@ -597,7 +609,7 @@ async def _get_org_storage_used_api() -> int:
     corp_id = await get_corp_id()
     token = await _get_access_token()
     url = f"{API_BASE}/v1.0/storage/orgs/{corp_id}"
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with _async_client(timeout=60.0) as client:
         try:
             resp = await _request_with_retry(
                 "GET", url, client=client,
@@ -762,7 +774,7 @@ async def get_all_workspaces_stats(workspace_ids: list[str] | None = None) -> li
 # ===================== 通讯录 =====================
 async def _fetch_user_name(userid: str, token: str) -> str:
     url = f"{OAPI_BASE}/topapi/v2/user/get?access_token={token}"
-    async with httpx.AsyncClient(timeout=15.0) as client:
+    async with _async_client(timeout=15.0) as client:
         resp = await client.post(url, json={"userid": userid})
         data = resp.json()
     if data.get("errcode") == 0:
@@ -796,7 +808,7 @@ async def search_users_by_name(query: str) -> list[dict]:
     """
     token = await _get_access_token()
     url = f"{API_BASE}/v1.0/contact/users/search"
-    async with httpx.AsyncClient(timeout=20.0) as client:
+    async with _async_client(timeout=20.0) as client:
         await _throttle()
         resp = await _request_with_retry("POST", url, client=client, headers=_headers(token),
                                          json={"queryWord": query, "offset": 0, "limit": 20})
@@ -830,7 +842,7 @@ async def send_text_message(user_ids: list[str], content: str) -> dict:
     url = f"{API_BASE}/v1.0/robot/oToMessages/send"
     body = {"robotCode": robot, "userIds": user_ids, "msgKey": "sampleText",
             "msgParam": _json.dumps({"content": content}, ensure_ascii=False)}
-    async with httpx.AsyncClient(timeout=20.0) as client:
+    async with _async_client(timeout=20.0) as client:
         await _throttle()
         resp = await _request_with_retry("POST", url, client=client, headers=_headers(token), json=body)
         if resp.status_code != 200:
@@ -854,7 +866,7 @@ async def get_user_info_by_code(code: str) -> dict:
     需应用开通「通讯录个人信息读权限」。失败抛 RuntimeError（调用方转 401）。
     """
     token = await _get_access_token()
-    async with httpx.AsyncClient(timeout=15.0) as client:
+    async with _async_client(timeout=15.0) as client:
         resp = await client.post(f"{OAPI_BASE}/topapi/v2/user/getuserinfo",
                                  params={"access_token": token}, json={"code": code})
         data = resp.json()
@@ -879,7 +891,7 @@ async def get_user_info_by_qr_code(code: str) -> dict:
     key, secret = _app_key(), _app_secret()
     if not key or not secret:
         raise RuntimeError("钉钉 AppKey/AppSecret 未配置")
-    async with httpx.AsyncClient(timeout=20.0) as client:
+    async with _async_client(timeout=20.0) as client:
         r1 = await client.post(f"{API_BASE}/v1.0/oauth2/userAccessToken",
                                json={"clientId": key, "clientSecret": secret,
                                      "code": code, "grantType": "authorization_code"})
@@ -897,7 +909,7 @@ async def get_user_info_by_qr_code(code: str) -> dict:
     if not unionid:
         raise RuntimeError(f"钉钉扫码登录未返回 unionId：{me}")
     token = await _get_access_token()
-    async with httpx.AsyncClient(timeout=15.0) as client:
+    async with _async_client(timeout=15.0) as client:
         r3 = await client.post(f"{OAPI_BASE}/topapi/user/getbyunionid",
                                params={"access_token": token}, json={"unionid": unionid})
         data = r3.json() or {}
@@ -912,7 +924,7 @@ async def get_user_info_by_qr_code(code: str) -> dict:
 # ===================== 机器人回复（问答场景） =====================
 async def reply_session_webhook(webhook: str, title: str, text: str) -> None:
     """通过消息回调自带的 sessionWebhook 回复 markdown（单聊/群 @ 通用）。"""
-    async with httpx.AsyncClient(timeout=15.0) as client:
+    async with _async_client(timeout=15.0) as client:
         resp = await client.post(webhook, json={
             "msgtype": "markdown",
             "markdown": {"title": title, "text": text},
@@ -932,7 +944,7 @@ async def send_markdown_message(user_ids: list[str], title: str, text: str) -> d
     url = f"{API_BASE}/v1.0/robot/oToMessages/send"
     body = {"robotCode": robot, "userIds": user_ids, "msgKey": "sampleMarkdown",
             "msgParam": _json.dumps({"title": title, "text": text}, ensure_ascii=False)}
-    async with httpx.AsyncClient(timeout=20.0) as client:
+    async with _async_client(timeout=20.0) as client:
         await _throttle()
         resp = await _request_with_retry("POST", url, client=client, headers=_headers(token), json=body)
         if resp.status_code != 200:
@@ -956,7 +968,7 @@ async def send_group_markdown(open_conversation_id: str, title: str, text: str) 
     body = {"robotCode": robot, "openConversationId": open_conversation_id,
             "msgKey": "sampleMarkdown",
             "msgParam": _json.dumps({"title": title, "text": text}, ensure_ascii=False)}
-    async with httpx.AsyncClient(timeout=20.0) as client:
+    async with _async_client(timeout=20.0) as client:
         await _throttle()
         resp = await _request_with_retry("POST", url, client=client, headers=_headers(token), json=body)
         if resp.status_code != 200:
@@ -991,7 +1003,7 @@ async def send_action_card(user_ids: list[str], title: str, text: str,
     }
     body = {"robotCode": robot, "userIds": user_ids, "msgKey": "sampleActionCard",
             "msgParam": _json.dumps(msg_param, ensure_ascii=False)}
-    async with httpx.AsyncClient(timeout=20.0) as client:
+    async with _async_client(timeout=20.0) as client:
         await _throttle()
         resp = await _request_with_retry("POST", url, client=client, headers=_headers(token), json=body)
         if resp.status_code != 200:
@@ -1026,7 +1038,7 @@ async def list_aitable_records(base_id: str, sheet_id: str, timeout: float = 20.
     params = {"operatorId": operator}
     body: dict[str, Any] = {"maxResults": 100}
     records: list[dict] = []
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    async with _async_client(timeout=timeout) as client:
         while True:
             resp = await _request_with_retry("POST", url, client=client, max_retry=max_retry,
                                              params=params, json=body, headers=_headers(token))

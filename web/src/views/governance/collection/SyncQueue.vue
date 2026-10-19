@@ -7,9 +7,10 @@
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import type { TableInstance } from 'element-plus'
 import { ArrowDown, ArrowUp, Collection as CollectionIcon, Refresh } from '@element-plus/icons-vue'
 import KgPagination from '@/components/common/KgPagination.vue'
-import { batchDeleteTasks, batchRetryTasks, listSources, listTasks, retryTask } from '@/api/sync'
+import { batchDeleteAllTasks, batchDeleteTasks, batchRetryTasks, fetchTaskStats, listSources, listTasks, retryTask } from '@/api/sync'
 import type { Source, SyncTask } from '@/types/sync'
 import { formatDate, formatFileSize } from '@/utils/format'
 
@@ -24,7 +25,20 @@ const page = ref(1)
 const size = ref(20)
 const loading = ref(false)
 const selection = ref<SyncTask[]>([])
+const tableRef = ref<TableInstance>()
 const sources = ref<Source[]>([])
+
+/**
+ * 彻底清空勾选：必须同时清表格组件内部状态与 selection。
+ * 勾选列开启了 reserve-selection（跨页/跨刷新按 row-key 保留勾选），
+ * 只重置 selection 变量不会取消表格内部的保留记录，数据刷新后
+ * Element Plus 会把历史上勾过、且未被本次操作覆盖的所有行重新回填，
+ * 造成「弹窗数量累计膨胀」。
+ */
+function clearSelectionAll() {
+  tableRef.value?.clearSelection()
+  selection.value = []
+}
 
 // ===== 筛选 =====
 const filters = ref<{ source_id?: number; ext: string; status: string; duration: string }>({
@@ -92,7 +106,7 @@ function reset() {
 }
 
 function onTabChange() {
-  selection.value = []
+  clearSelectionAll()
   page.value = 1
   load()
 }
@@ -140,7 +154,7 @@ async function batchRetry() {
   try {
     const res = await batchRetryTasks(ids)
     ElMessage.success(res.message)
-    selection.value = []
+    clearSelectionAll()
     load()
   } catch { /* 拦截器已提示 */ }
 }
@@ -164,7 +178,7 @@ async function batchDelete() {
   try {
     await ElMessageBox.confirm(
       deleteConfirmText(ids),
-      '批量清理', { type: 'warning', confirmButtonText: '清理', cancelButtonText: '取消' },
+      '删除选中', { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
     )
   } catch {
     return
@@ -172,9 +186,48 @@ async function batchDelete() {
   try {
     const res = await batchDeleteTasks(ids)
     ElMessage.success(res.message)
-    selection.value = []
+    clearSelectionAll()
     load()
   } catch { /* 拦截器已提示 */ }
+}
+
+/** 删除所有：当前页签+筛选条件命中的全部任务（含未翻到的页），处理中的除外 */
+async function deleteAll() {
+  if (activeTab.value === 'running') return
+  const scopeText = filters.value.status === 'success'
+    ? '已成功'
+    : filters.value.status === 'failed' ? '失败' : '全部已结束'
+  try {
+    await ElMessageBox.confirm(
+      `将删除当前范围内（${scopeText}，共 ${total.value} 个）的全部任务记录，含未翻到的页；处理中的不受影响。`
+      + '未同步完成的文档将停止自动同步；已同步的知识不受影响。是否继续？',
+      '删除所有', { type: 'warning', confirmButtonText: '全部删除', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+  try {
+    const res = await batchDeleteAllTasks({
+      tab: activeTab.value,
+      status: filters.value.status,
+      source_id: filters.value.source_id,
+      ext: filters.value.ext,
+      duration: filters.value.duration,
+      keyword: advanced.value.keyword,
+      start_from: advanced.value.range?.[0] || '',
+      start_to: advanced.value.range?.[1] || '',
+    })
+    ElMessage.success(res.message)
+    clearSelectionAll()
+    load()
+  } catch { /* 拦截器已提示 */ }
+}
+
+/** 批量管理下拉分发 */
+function onBatchCommand(cmd: string | number | object) {
+  if (cmd === 'retry') batchRetry()
+  else if (cmd === 'delete-selected') batchDelete()
+  else if (cmd === 'delete-all') deleteAll()
 }
 
 async function removeOne(row: SyncTask) {
@@ -191,21 +244,20 @@ async function removeOne(row: SyncTask) {
   try {
     const res = await batchDeleteTasks([row.id])
     ElMessage.success(res.message)
+    tableRef.value?.toggleRowSelection(row, false)
     load()
   } catch { /* 拦截器已提示 */ }
 }
 
-function onBatchCommand(command: string) {
-  if (command === 'retry') batchRetry()
-  else if (command === 'delete') batchDelete()
-}
-
-// ===== 轮询：仅当队列中存在待处理/处理中任务时刷新，且不打断勾选操作 =====
+// ===== 轮询：页签计数每 5s 实时刷新（轻量 stats 接口）；列表仅在有排队任务且未勾选时刷新 =====
 let pollTimer: ReturnType<typeof setTimeout> | undefined
 let disposed = false
 function schedulePoll() {
   pollTimer = setTimeout(async () => {
     if (disposed) return
+    // 页签计数始终实时：轻量 stats 轮询与列表解耦，勾选/空闲/任意页签都刷新。
+    // 列表本体仍只在有排队任务且未勾选时自动刷新（避免干扰浏览与勾选）。
+    fetchTaskStats().then((s) => { tabs.value = s }).catch(() => { /* 下轮重试 */ })
     if ((tabs.value.pending + tabs.value.running > 0) && !selection.value.length && !loading.value) {
       await load()
     }
@@ -295,16 +347,21 @@ onBeforeUnmount(() => {
         </div>
       </div>
 
-      <!-- 批量管理 -->
+      <!-- 批量管理：批量重试/删除选中/删除所有收进同一下拉 -->
       <div class="batch-bar">
-        <el-dropdown :disabled="!selection.length" @command="onBatchCommand">
-          <el-button :disabled="!selection.length">
+        <el-dropdown popper-class="batch-mgmt-dropdown" @command="onBatchCommand">
+          <el-button>
             批量管理<el-icon class="el-icon--right"><ArrowDown /></el-icon>
           </el-button>
           <template #dropdown>
             <el-dropdown-menu>
-              <el-dropdown-item command="retry">批量重试（仅失败）</el-dropdown-item>
-              <el-dropdown-item command="delete" divided>批量清理</el-dropdown-item>
+              <el-dropdown-item command="retry" :disabled="!retryableIds().length">批量重试</el-dropdown-item>
+              <el-dropdown-item command="delete-selected" :disabled="!selection.length" class="danger-item">
+                删除选中
+              </el-dropdown-item>
+              <el-dropdown-item command="delete-all" :disabled="activeTab === 'running' || !total" class="danger-item">
+                删除所有
+              </el-dropdown-item>
             </el-dropdown-menu>
           </template>
         </el-dropdown>
@@ -314,7 +371,7 @@ onBeforeUnmount(() => {
 
       <!-- 任务表 -->
       <div class="table-fill">
-      <el-table :data="items" v-loading="loading" border size="small" row-key="id" height="100%"
+      <el-table ref="tableRef" :data="items" v-loading="loading" border size="small" row-key="id" height="100%"
                 @selection-change="(rows: unknown[]) => (selection = rows as SyncTask[])">
         <el-table-column type="selection" width="42" reserve-selection />
         <el-table-column label="任务名称" min-width="220" show-overflow-tooltip>
@@ -346,7 +403,7 @@ onBeforeUnmount(() => {
         <el-table-column label="触发方式" width="88">
           <template #default="{ row }">
             <el-tag size="small" :type="row.trigger === 'manual' ? 'warning' : 'info'" effect="plain">
-              {{ row.trigger === 'manual' ? '手动' : '定时' }}
+              {{ row.trigger === 'manual' ? '手动' : '自动' }}
             </el-tag>
           </template>
         </el-table-column>
@@ -510,5 +567,12 @@ onBeforeUnmount(() => {
 .table-fill {
   flex: 1;
   min-height: 0;
+}
+</style>
+
+<style>
+/* 批量管理下拉菜单（popper teleport 到 body，须用非 scoped 样式） */
+.batch-mgmt-dropdown .danger-item {
+  color: var(--el-color-danger);
 }
 </style>

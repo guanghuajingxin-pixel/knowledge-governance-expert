@@ -83,7 +83,8 @@ async def is_local_alive(base: str | None = None) -> bool:
     if not base:
         return False
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(connect=3.0, read=5.0, write=5.0, pool=5.0)) as c:
+        # trust_env=False：探测本地服务不走系统代理（代理劫持 127.0.0.1 会误报可达）
+        async with httpx.AsyncClient(trust_env=False, timeout=httpx.Timeout(connect=3.0, read=5.0, write=5.0, pool=5.0)) as c:
             r = await c.get(f"{base}/health")
             return r.status_code == 200
     except Exception:
@@ -92,7 +93,8 @@ async def is_local_alive(base: str | None = None) -> bool:
 
 async def _local_engine_parse(file_bytes: bytes, filename: str, base: str) -> dict:
     """调用自托管 ``mineru-api`` 的 ``/file_parse`` 同步解析，取 md_content。"""
-    async with httpx.AsyncClient(timeout=_ENGINE_TIMEOUT) as c:
+    # trust_env=False：本地引擎不出网（系统代理劫持 127.0.0.1 会平白引入 502）
+    async with httpx.AsyncClient(trust_env=False, timeout=_ENGINE_TIMEOUT) as c:
         h = await c.get(f"{base}/health")
         if h.status_code != 200:
             raise RuntimeError(f"mineru-api 健康检查失败: HTTP {h.status_code}")

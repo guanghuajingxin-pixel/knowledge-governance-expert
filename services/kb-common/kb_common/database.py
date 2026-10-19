@@ -78,15 +78,18 @@ def pool_status() -> dict:
 
 async def warm_pool(count: int | None = None, deadline_s: float = 180.0,
                     batch: int = 5) -> int:
-    """渐进预热连接池：分批同时建连接、建满后归还，返回池内常驻连接数。
+    """渐进预热连接池：分批新建连接并**跨批持有**，建满后统一归还，返回池内常驻连接数。
 
     为什么要预热：新建一条 PG 连接常态只要 22~40ms，但本机 Docker VM 抖动时
     实测会拖到 6~39 秒。若不预热，这批连接会在用户第一次点击菜单时才去建，
     表现就是「点任何菜单都要等几秒甚至几十秒」。
 
     两个实现要点（都是踩过的坑）：
-    1. 必须**同时持有**多条连接才能把池撑大——串行地「连一条关一条」永远只有 1 条，
-       因为关掉就还回池里、下一次复用同一条；
+    1. 必须**同时持有**多条连接才能把池撑大——关掉就还回池里、下一次复用同一条。
+       （历史 bug：每建一批就整批归还，下一批全部复用池内旧连接、不再新建，
+       `have` 永远停在 batch 数，空转跑满 180s；外层 8s 熔断必然超时，取消
+       恰好落在建连中间时还会污染事件循环，lifespan 卡死在启动阶段。）
+       因此跨批累积持有，最后在 finally 统一归还。
     2. 不能一次性并发建满（实测 15 条并发会被 VM 抖动整体拖到超时、一条都建不成），
        所以按 batch 分批、每条 8s 上限、整批失败退避 1s 重试，直到建满或到截止时间。
     """
@@ -94,32 +97,36 @@ async def warm_pool(count: int | None = None, deadline_s: float = 180.0,
 
     target = count or settings.db_pool_size
     deadline = _time.monotonic() + deadline_s
-    while _time.monotonic() < deadline:
-        p = engine.pool
-        have = p.checkedin() + p.checkedout()
-        if have >= target:
-            break
-        conns = []
-        try:
-            for _ in range(min(batch, target - have)):
-                conns.append(await asyncio.wait_for(engine.connect(), timeout=8))
-        except Exception:  # noqa: BLE001 — 建到一半失败也没关系，已建的照常归还
-            pass
-        except BaseException:
-            # CancelledError（外层 wait_for 熔断）：必须回收已建连接再抛出。
-            # 否则半开连接泄漏会污染连接池/事件循环（uvloop 下实测后续所有
-            # connect 永久挂起，lifespan 卡死在启动阶段）。
-            for c in conns:
-                try:
-                    await c.close()
-                except Exception:  # noqa: BLE001
-                    pass
-            raise
-        for c in conns:
+    held: list = []
+    try:
+        while _time.monotonic() < deadline:
+            have = len(held) + engine.pool.checkedin()
+            if have >= target:
+                break
+            conns = []
+            try:
+                for _ in range(min(batch, target - have)):
+                    conns.append(await asyncio.wait_for(engine.connect(), timeout=8))
+            except Exception:  # noqa: BLE001 — 建到一半失败也没关系，已建的继续持有
+                pass
+            except BaseException:
+                # CancelledError（外层 wait_for 熔断）：必须回收已建连接再抛出。
+                # 否则半开连接泄漏会污染连接池/事件循环（uvloop 下实测后续所有
+                # connect 永久挂起，lifespan 卡死在启动阶段）。
+                for c in conns:
+                    try:
+                        await c.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                raise
+            held.extend(conns)
+            if not conns:
+                await asyncio.sleep(1.0)      # 整批失败：退避后重试
+    finally:
+        # 建满（或到截止时间/被取消）后统一归还：归还后池内即持有全部常驻连接
+        for c in held:
             try:
                 await c.close()
             except Exception:  # noqa: BLE001
                 pass
-        if not conns:
-            await asyncio.sleep(1.0)      # 整批失败：退避后重试
     return engine.pool.checkedin()

@@ -9,7 +9,7 @@ import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import httpx
 
@@ -129,7 +129,10 @@ class DingTalkClient:
         self.app_key = app_key
         self.app_secret = app_secret
         self.operator_id = operator_id
-        self._client = httpx.Client(timeout=timeout)
+        # trust_env=False：忽略系统/环境代理（macOS 系统代理会把钉钉 API 转发到
+        # 本地代理并随机断连 "Server disconnected"，编目/下载直连最稳）
+        self._timeout = timeout
+        self._client = httpx.Client(timeout=timeout, trust_env=False)
         self._token: str = ""
         self._token_expire_at: float = 0.0
         # 并发遍历（walk_tree）下多线程共享同一 client：
@@ -174,10 +177,33 @@ class DingTalkClient:
 
     def _request(self, method: str, path: str, params: dict | None = None,
                  json_body: dict | None = None) -> dict[str, Any]:
-        token = self._ensure_token()
-        headers = {"x-acs-dingtalk-access-token": token}
-        resp = self._client.request(method, f"{API_BASE}{path}", params=params, json=json_body, headers=headers)
-        return self._parse(resp, f"{method} {path}")
+        """带网络级重试的请求：对齐异步版 _request_with_retry 的策略——
+        wiki/nodes 端点限流严格，长遍历会触发滑窗限流（连接被 RST，表现为
+        SSL EOF / Errno 断连），指数退避等窗口解除即可恢复；
+        业务错误（DingTalkError）不重试。失败时重建客户端连接池，避免复用死连接。"""
+        last_exc: Exception | None = None
+        for attempt in range(5):
+            try:
+                token = self._ensure_token()
+                headers = {"x-acs-dingtalk-access-token": token}
+                resp = self._client.request(method, f"{API_BASE}{path}",
+                                            params=params, json=json_body, headers=headers)
+                return self._parse(resp, f"{method} {path}")
+            except DingTalkError:
+                raise  # 业务/HTTP 状态错误：重试无意义
+            except (httpx.TransportError, httpx.HTTPError) as exc:
+                last_exc = exc
+                if attempt < 4:
+                    # 关闭并重建客户端：连接池里的连接可能已被对端掐死，
+                    # 复用会连续 EOF；新客户端强制重建 TCP/TLS
+                    try:
+                        self._client.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    self._client = httpx.Client(timeout=self._timeout, trust_env=False)
+                    time.sleep(1.0 * (2 ** attempt))
+        raise DingTalkError(f"{method} {path}: 网络重试耗尽（{last_exc}）",
+                            status=0, code="network_exhausted")
 
     def _throttle(self) -> None:
         """全局请求间隔 ≥0.4s（并发遍历下防钉钉限流，项目既有约定）。"""
@@ -253,24 +279,19 @@ class DingTalkClient:
         return self._request("GET", f"/v2.0/wiki/nodes/{node_id}",
                              params={"operatorId": self.operator_id})
 
-    def walk_tree(self, root_node_id: str, max_depth: int = 10,
-                  max_results: int = 50, use_cache: bool = True) -> list[dict[str, Any]]:
-        """遍历目录树，为每个文件节点补充 relative_dir。目录节点不返回。
+    def walk_tree_iter(self, root_node_id: str, max_depth: int = 10,
+                       max_results: int = 50) -> Iterator[list[dict[str, Any]]]:
+        """流式遍历目录树：每个目录列举完成即产出一批文件节点（生成器）。
 
-        - use_cache=True：优先读 10 分钟 TTL 缓存（内存 + /tmp 快照，重启可热身）；
-          use_cache=False：强制重新遍历并刷新缓存（预演「刷新」按钮 / 真实同步走此路径）。
-        - 兄弟目录并发遍历（并发 ≤3 + 全局 0.4s 节流，防钉钉 403 限流）：
-          协调者模式——仅主线程阻塞等待 future，worker 只列目录互不等待，无死锁。
-        - 深度超限在发现子目录时抛出，与旧递归实现语义一致；结果按相对路径排序。
+        与 walk_tree 同一套并发协调（兄弟目录并发 ≤3 + 全局 0.4s 节流，
+        协调者模式——仅消费方阻塞等待 future，worker 只列目录互不等待）。
+        区别在于不等整树遍历结束：编目可边遍历边分批落库占位文档，
+        前端秒级看到首批「待同步」条目，整库导入无需等全树遍历完。
+        深度超限在发现子目录时抛出，与递归实现语义一致。
 
         收集所有非目录节点（在线文档 adoc/在线表格 axls/AI 表格 able/脑图 mind/
         普通上传文件等），由同步引擎按 extension 分流下载或导出。
         """
-        if use_cache:
-            cached = _walk_cache_get(root_node_id)
-            if cached is not None:
-                return cached
-
         from .export_service import safe_name
 
         def list_dir(parent_node_id: str, rel_dir: str) -> tuple[list[dict[str, Any]], list[tuple[str, str]]]:
@@ -295,7 +316,6 @@ class DingTalkClient:
                     dirs.append((node.get("nodeId", ""), child_dir))
             return files, dirs
 
-        result: list[dict[str, Any]] = []
         visited: set[str] = {root_node_id}
         with ThreadPoolExecutor(max_workers=3) as ex:
             futures: dict[Future, int] = {ex.submit(list_dir, root_node_id, ""): 0}
@@ -304,7 +324,8 @@ class DingTalkClient:
                 for fut in done:
                     depth = futures.pop(fut)
                     files, dirs = fut.result()  # worker 异常在此向上抛
-                    result.extend(files)
+                    if files:
+                        yield files
                     for child_pid, child_dir in dirs:
                         if depth + 1 > max_depth:
                             raise DingTalkError(f"目录超过最大遍历深度 {max_depth}，请提高 sync_max_depth 后重试")
@@ -312,6 +333,21 @@ class DingTalkClient:
                             continue
                         visited.add(child_pid)
                         futures[ex.submit(list_dir, child_pid, child_dir)] = depth + 1
+
+    def walk_tree(self, root_node_id: str, max_depth: int = 10,
+                  max_results: int = 50, use_cache: bool = True) -> list[dict[str, Any]]:
+        """遍历目录树返回全部文件节点（按相对路径排序，整树结果写 10 分钟缓存）。
+
+        - use_cache=True：优先读缓存（内存 + /tmp 快照，重启可热身）；
+          use_cache=False：强制重新遍历并刷新缓存（预演「刷新」按钮 / 真实同步走此路径）。
+        - 流式版见 walk_tree_iter（编目边遍历边落库，不等整树完成）。
+        """
+        if use_cache:
+            cached = _walk_cache_get(root_node_id)
+            if cached is not None:
+                return cached
+        result = [n for chunk in self.walk_tree_iter(root_node_id, max_depth, max_results)
+                  for n in chunk]
         result.sort(key=lambda n: (n.get("relative_dir", ""), n.get("name", "")))
         _walk_cache_put(root_node_id, result)
         return result

@@ -18,6 +18,7 @@ kb-api 重启后清空（SaaS 侧结果仍按 batch_id 保留，测试台重新�
 from __future__ import annotations
 
 import io
+import logging
 import tempfile
 import uuid
 import zipfile
@@ -32,6 +33,8 @@ from kb_common.config import get_settings
 from kb_common.models import Setting
 
 from app.routes.mineru_contract import SEMANTIC_TIERS, resolve_tier
+
+logger = logging.getLogger(__name__)
 
 # 统一契约状态 → 前端 JobStatus（见 ParserCustomTab.vue type JobStatus）
 _SAAS_STATE_MAP = {
@@ -242,10 +245,67 @@ def saas_list_jobs() -> dict:
     ]}
 
 
+async def _recover_job(job_id: str) -> dict | None:
+    """注册表 miss（服务重启/--reload 换 worker）时按云端 batch 结果自愈重建 job。
+
+    batch_id 即云端有效 ID、解析结果仍按 batch 保留：直接查 extract-results
+    重建本地注册项并写回 _JOBS，后续 zip/markdown 产物路径全部照常可用——
+    避免「kb-api 一重启，进行中的云任务全部报任务不存在、必须重新解析」。
+    云端也查不到（batch 过期/非法）时返回 None，由调用方按 404 处理。
+    """
+    base, key = await _effective_conn()
+    try:
+        payload = await _saas_request("GET", f"{base}/extract-results/batch/{job_id}", key=key)
+    except HTTPException:
+        return None
+    items = ((payload.get("data") or {}).get("extract_result")) or []
+    if not items:
+        # 云端尚未产出结果条目：任务仍有效（解析中），恢复为 running 占位
+        return {"batch_id": job_id, "tier": "recovered", "raw_tier": "",
+                "created_at": datetime.now().isoformat(timespec="seconds"),
+                "status": "running",
+                "files": [{"file_id": "", "name": f"file-{i}", "state": "running",
+                           "output_files": {}} for i in range(max(1, len(items)))]}
+    files = []
+    for idx, it in enumerate(items):
+        f = {"file_id": "", "name": it.get("file_name") or f"file-{idx}",
+             "state": _SAAS_STATE_MAP.get(it.get("state") or "", "running"),
+             "error": it.get("err_msg") or "", "output_files": {}}
+        if f["state"] == "completed" and it.get("full_zip_url"):
+            f["zip_url"] = it["full_zip_url"]
+            try:
+                await _ensure_zip(job_id, idx, it["full_zip_url"])
+            except Exception as exc:  # noqa: BLE001 — zip 可选产物，失败不阻断恢复
+                # httpx 网络异常 str 常为空：带类型名才可诊断（代理/TLS 问题）
+                logger.warning("恢复任务时下载结果 zip 失败（job=%s idx=%s）: %s: %s",
+                               job_id, idx, type(exc).__name__, exc)
+            f["output_files"] = _output_files(job_id, idx, f["name"])
+        files.append(f)
+    states = [f["state"] for f in files]
+    if states and all(s == "completed" for s in states):
+        status = "completed"
+    elif "failed" in states and "completed" in states:
+        status = "partial"
+    elif "failed" in states:
+        status = "failed"
+    else:
+        status = "running"
+    job = {"batch_id": job_id, "tier": "recovered", "raw_tier": "",
+           "created_at": datetime.now().isoformat(timespec="seconds"),
+           "status": status, "files": files}
+    _JOBS[job_id] = job  # 写回：zip_bundle/markdown 等产物路径继续可用
+    return job
+
+
 async def saas_get_job(job_id: str) -> dict:
     job = _JOBS.get(job_id)
     if not job:
-        raise HTTPException(404, f"任务不存在（云端任务注册表随服务重启清空）：{job_id}")
+        # 注册表 miss（服务重启后进行中的任务）：按云端 batch 结果自愈恢复，
+        # 而不是直接 404 逼用户重新解析（云端结果仍在，仅本地映射丢失）
+        recovered = await _recover_job(job_id)
+        if recovered is None:
+            raise HTTPException(404, f"任务不存在（云端亦无此 batch）：{job_id}")
+        return _job_brief(recovered)
     base, key = await _effective_conn()
     payload = await _saas_request("GET", f"{base}/extract-results/batch/{job_id}", key=key)
     items = ((payload.get("data") or {}).get("extract_result")) or []
@@ -255,7 +315,13 @@ async def saas_get_job(job_id: str) -> dict:
         f["error"] = it.get("err_msg") or ""
         if f["state"] == "completed" and it.get("full_zip_url"):
             f["zip_url"] = it["full_zip_url"]  # 供结果包整体下载（md+images）
-            await _ensure_zip(job_id, idx, it["full_zip_url"])
+            # 结果 zip 属于可选产物（不可用时上层回退 markdown / 保持 PARSING 重试）：
+            # 下载失败不能让整个任务查询 500——前端/批处理的高频轮询会被打爆。
+            try:
+                await _ensure_zip(job_id, idx, it["full_zip_url"])
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("下载结果 zip 失败（job=%s idx=%s，下轮重试）: %s: %s",
+                               job_id, idx, type(exc).__name__, exc)
             f["output_files"] = _output_files(job_id, idx, f["name"])
         elif f["state"] != "completed":
             f["output_files"] = {}

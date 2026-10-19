@@ -31,6 +31,7 @@ MENU_GROUPS: list[dict[str, Any]] = [
                     {"key": "/knowledge-sources", "label": "知识源管理"},
                     {"key": "/collection/knowledge-center", "label": "知识中心"},
                     {"key": "/collection/queue", "label": "同步队列"},
+                    {"key": "/process/engine", "label": "解析引擎"},
                 ],
             },
             {

@@ -1230,10 +1230,22 @@ async def list_source_document_tags(
     return {"items": [{"name": r.tag, "count": r.count} for r in rows]}
 
 
+def _source_doc_conditions(search: str | None, source: str | None, tag: str | None) -> list:
+    """知识源文档筛选条件（list_source_documents 与 batch-delete-all 共用，口径一致）。"""
+    conditions = [KnowledgeLibrary.library_type == "document"]
+    if source in ("local", "dingtalk", "business"):
+        conditions.append(LibraryDocument.source == source)
+    if tag and tag.strip():
+        conditions.append(LibraryDocument.tags.any(tag.strip()))
+    if search and search.strip():
+        conditions.append(LibraryDocument.name.ilike(f"%{search.strip()}%"))
+    return conditions
+
+
 @router.get("/source-documents")
 async def list_source_documents(
     search: str | None = Query(None, description="按知识标题模糊搜索"),
-    source: str | None = Query(None, description="来源筛选：local | dingtalk"),
+    source: str | None = Query(None, description="来源筛选：local | dingtalk | business"),
     tag: str | None = Query(None, description="标签筛选（命中任一标签即返回）"),
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=100),
@@ -1248,13 +1260,7 @@ async def list_source_documents(
     """
     q = (select(LibraryDocument, KnowledgeLibrary.name.label("library_name"))
          .join(KnowledgeLibrary, LibraryDocument.library_id == KnowledgeLibrary.id)
-         .where(KnowledgeLibrary.library_type == "document"))
-    if source in ("local", "dingtalk"):
-        q = q.where(LibraryDocument.source == source)
-    if tag and tag.strip():
-        q = q.where(LibraryDocument.tags.any(tag.strip()))
-    if search and search.strip():
-        q = q.where(LibraryDocument.name.ilike(f"%{search.strip()}%"))
+         .where(*_source_doc_conditions(search, source, tag)))
     total = (await s.execute(select(func.count()).select_from(q.subquery()))).scalar_one()
     rows = (await s.execute(
         q.order_by(LibraryDocument.updated_at.desc(), LibraryDocument.created_at.desc())
@@ -1315,3 +1321,104 @@ async def update_source_document(
     await s.refresh(doc)
     lib = await s.get(KnowledgeLibrary, doc.library_id)
     return _source_doc_out(doc, lib.name if lib else "")
+
+
+class SourceDocBatchDeleteIn(BaseModel):
+    """知识中心批量删除入参：文档 ID 列表（去重，单批最多 100）。"""
+    ids: list[_uuid.UUID] = Field(min_length=1, max_length=100)
+
+
+async def _delete_source_docs(s: AsyncSession, docs: list[LibraryDocument]) -> int:
+    """删库记录并按文档目录整删 MinIO 对象（原件 + parsed.md + images/），返回删除的存储对象数。
+
+    同时级联取消批处理模式下关联这些文档的排队同步任务（与单文档删除同语义）；
+    子分段由 FK ondelete CASCADE 一并清理。调用方负责 commit。
+    """
+    from datetime import datetime as _dt
+
+    from kb_common.clients import minio_client
+    from kb_common.models import SyncTask
+    from sqlalchemy import update as _sa_update
+    await s.execute(_sa_update(SyncTask).where(
+        SyncTask.library_document_id.in_([str(d.id) for d in docs]),
+        SyncTask.status == "pending",
+    ).values(status="failed", finished_at=_dt.now(), error="目标文档已删除，任务取消"))
+    removed = 0
+    for doc in docs:
+        if doc.storage_path:
+            # 同目录含原件、parsed.md 与 images/，按目录整删；尾随 / 精确限定本文档（uuid 不会互为前缀）
+            prefix = f"{doc.storage_path.rsplit('/', 1)[0]}/"
+            removed += await asyncio.to_thread(minio_client.delete_prefix, minio_client.RAW, prefix)
+        await s.delete(doc)
+    return removed
+
+
+@router.post("/source-documents/batch-delete",
+             dependencies=[Depends(require_role("super_admin", "admin"))])
+async def batch_delete_source_documents(
+    body: SourceDocBatchDeleteIn,
+    u=Depends(get_current_user),
+    s: AsyncSession = Depends(get_session),
+):
+    """批量删除知识中心文档：删库记录并清空 MinIO 文件（原件 + 解析产物），减少磁盘占用。
+
+    与文档库单文档删除（managed_library，保留原件备灾）不同，本接口按文档目录
+    整删 MinIO 对象（原件 / parsed.md / images/），删除后不可恢复；解析中的
+    文档拒绝整批删除。任一校验不过则整批不删。
+    """
+    ids = list(dict.fromkeys(body.ids))
+    docs = (await s.execute(
+        select(LibraryDocument).where(LibraryDocument.id.in_(ids)))).scalars().all()
+    found = {doc.id: doc for doc in docs}
+    missing = [str(i) for i in ids if i not in found]
+    if missing:
+        raise HTTPException(404, f"以下文档不存在：{'、'.join(missing[:5])}{'…' if len(missing) > 5 else ''}")
+    parsing = [doc.name for doc in docs if doc.status == "PARSING"]
+    if parsing:
+        raise HTTPException(409, f"以下文档正在解析，请先停止解析再删除：{'、'.join(parsing[:5])}")
+
+    removed = await _delete_source_docs(s, docs)
+    await s.commit()
+    return {"ok": True, "deleted": len(docs), "storage_objects": removed}
+
+
+@router.post("/source-documents/batch-delete-all",
+             dependencies=[Depends(require_role("super_admin", "admin"))])
+async def batch_delete_all_source_documents(
+    search: str | None = Query(None, description="按知识标题模糊搜索"),
+    source: str | None = Query(None, description="来源筛选：local | dingtalk | business"),
+    tag: str | None = Query(None, description="标签筛选（命中任一标签即返回）"),
+    limit: int | None = Query(None, ge=1, le=500,
+                               description="单批最多删除条数（前端分批删除用）；缺省一次删完"),
+    u=Depends(get_current_user),
+    s: AsyncSession = Depends(get_session),
+):
+    """删除当前筛选命中的全部知识文档（含未翻到的页），解析中的除外。
+
+    筛选口径与列表完全一致（_source_doc_conditions），叠加排除 PARSING/TRAINING
+    （与同步队列删除所有排除「处理中」同语义），避免边解析/重新分段边删产生脏数据。
+    大批量清理时前端可传 limit 分批调用（循环到 deleted=0），每批刷新列表可见数量递减。
+    """
+    q = (select(LibraryDocument)
+         .join(KnowledgeLibrary, LibraryDocument.library_id == KnowledgeLibrary.id)
+         .where(and_(*_source_doc_conditions(search, source, tag),
+                    LibraryDocument.status.notin_(["PARSING", "TRAINING"])))
+         .order_by(LibraryDocument.updated_at.desc(), LibraryDocument.created_at.desc()))
+    if isinstance(limit, int):  # 未传/默认（Query(None)）时不限制，一次删完
+        q = q.limit(limit)
+    docs = (await s.execute(q)).scalars().all()
+    if not docs:
+        return {"ok": True, "deleted": 0, "excluded": 0, "storage_objects": 0,
+                "message": "当前范围内没有可删除的知识"}
+    excluded = (await s.execute(
+        select(func.count()).select_from(LibraryDocument)
+        .join(KnowledgeLibrary, LibraryDocument.library_id == KnowledgeLibrary.id)
+        .where(and_(*_source_doc_conditions(search, source, tag),
+                   LibraryDocument.status.in_(["PARSING", "TRAINING"]))))).scalar_one()
+    removed = await _delete_source_docs(s, docs)
+    await s.commit()
+    message = f"已删除 {len(docs)} 项知识"
+    if excluded:
+        message += f"；{excluded} 项解析/训练中的知识未删除"
+    return {"ok": True, "deleted": len(docs), "excluded": excluded,
+            "storage_objects": removed, "message": message}

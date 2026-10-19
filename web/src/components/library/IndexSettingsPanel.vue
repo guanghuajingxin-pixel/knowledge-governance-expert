@@ -3,14 +3,15 @@ import { computed, reactive, ref, watch } from 'vue'
 import { ArrowDown, CopyDocument, Files, MagicStick, Operation, QuestionFilled } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import type { TypeRule } from '@/api/document-library'
-import { DELIMITER_PRESETS, FILE_TYPES, METHODS, defaultSettings, type IndexSettings, type Strategy } from './index-settings'
+import { DELIM_PROTOCOL_SEP, DELIMITER_PRESETS, FILE_TYPES, defaultSettings,
+  parseDelimiters, serializeDelimiters, type IndexSettings, type Strategy } from './index-settings'
 
 /** 索引设置分段组件（共用）：文档设置弹窗与创建/编辑知识库「解析与分段」步骤共用同一份实现，修改自动同步。
 
 props.value 传入当前设置（null/缺省用默认值），组件内部自持表单状态；
 父级通过 defineExpose 的 validate()/getSettings() 读取校验结果与最终设置。
 scope=document 隐藏「按文件类型」策略（单文档只有一种类型，该策略无意义）。
-策略卡片点击后内联展开对应配置（自定义：分段方式/分段标识符/最大长度/重叠度/预处理；
+策略卡片点击后内联展开对应配置（自定义：分段标识符/最大长度/重叠度/预处理；
 父子分段：父块模式/父块配置/子块配置/预处理；按文件类型：文件类型规则行编辑）。
 */
 const props = withDefaults(defineProps<{
@@ -22,7 +23,8 @@ const collapsed = ref(false)
 const form = reactive<IndexSettings>(defaultSettings())
 const rules = ref<(TypeRule & {ext: string})[]>([])
 
-// 分段标识符：预设多选 + 自定义输入，与 form.delimiter（分隔字符集合字符串）双向同步
+// 分段标识符：预设多选 + 自定义输入，与 form.delimiter（分隔符序列化协议串）双向同步
+// （协议与序列化/回填逻辑见 index-settings.ts 的 DELIM_PROTOCOL_SEP / serializeDelimiters / parseDelimiters）
 const delimSel = ref<string[]>([])
 const delimCustom = ref('')
 
@@ -49,53 +51,40 @@ function init(s?: IndexSettings | null) {
   Object.assign(form, v)
   rules.value = Object.entries(v.type_rules || {}).map(([ext, r]) => ({ext, ...r}))
   collapsed.value = false
-  parseDelimiters(form.delimiter)
-  childDelimCustom.value = CHILD_DELIM_PRESETS.some(p => p.chars === form.children_delimiter) ? '' : form.children_delimiter
+  const parsed = parseDelimiters(form.delimiter)
+  delimSel.value = parsed.sel
+  delimCustom.value = parsed.custom
+  const cd = form.children_delimiter
+  childDelimCustom.value = cd.startsWith(DELIM_PROTOCOL_SEP)
+    ? cd.slice(DELIM_PROTOCOL_SEP.length)
+    : CHILD_DELIM_PRESETS.some(p => p.chars === cd) ? '' : cd
 }
 
 // 每次打开/切换传入新的设置对象即重新初始化（弹窗与分步向导均以新对象触发）
 watch(() => props.value, v => init(v), {immediate: true})
 
-// 父子分段仅支持通用文档策略（后端校验 enable_children + chunk_method=naive）；
-// 选中时若分段标识符仍是默认全集合（换行+句读），自动切到段落级「2个换行」——
-// 父块是召回上下文，句级标识符会让父块过碎（用户可自行改回）
-watch(() => form.strategy, v => {
-  if (v !== 'parent_child') return
-  form.method = 'naive'
-  if (form.delimiter === '\n。！？；') delimSel.value = ['nl2']  // syncDelimiters → '\n\n'
+// 分段标识符互斥：「自定义」与系统预设不能同时生效——勾选「自定义」清空预设，
+// 勾选任一预设自动退出自定义模式（预设之间是「或」关系，任一命中即切分）
+let prevSel: string[] = []
+watch(delimSel, val => {
+  const added = val.filter(v => !prevSel.includes(v))
+  if (added.includes('custom')) {
+    if (val.length > 1) { delimSel.value = ['custom']; return }  // 触发下一轮 watch 完成 sync
+  } else if (added.length && val.includes('custom')) {
+    delimSel.value = val.filter(v => v !== 'custom'); return
+  }
+  prevSel = [...val]
+  syncDelimiters()
+}, {deep: true})
+watch(delimCustom, syncDelimiters)
+watch(childDelimCustom, v => {
+  if (childDelimSel.value === 'custom' && v) form.children_delimiter = DELIM_PROTOCOL_SEP + v
 })
 
-watch(delimSel, syncDelimiters, {deep: true})
-watch(delimCustom, syncDelimiters)
-watch(childDelimCustom, v => { if (childDelimSel.value === 'custom' && v) form.children_delimiter = v })
-
-function parseDelimiters(s: string) {
-  let rest = s || ''
-  const sel: string[] = []
-  // 换行两级：先长后短（'\n\n' 段落级 / '\n' 行级，序列化互斥可判别，
-  // 供父子分段父块切分区分段落与行——fixed_separator 单选语义）
-  if (rest.includes('\n\n')) { sel.push('nl2'); rest = rest.split('\n\n').join('') }
-  else if (rest.includes('\n')) { sel.push('nl'); rest = rest.split('\n').join('') }
-  for (const p of DELIMITER_PRESETS) {
-    if (p.id === 'nl' || p.id === 'nl2') continue
-    if (rest.includes(p.chars)) { sel.push(p.id); rest = rest.split(p.chars).join('') }
-  }
-  delimSel.value = sel
-  delimCustom.value = rest
-}
-
 function syncDelimiters() {
-  const chars: string[] = []
-  const push = (c: string) => { if (!chars.includes(c)) chars.push(c) }
-  // 段落级（2个换行）与行级（换行）互斥：选了 nl2 不再序列化单 '\n'
-  if (delimSel.value.includes('nl2')) push('\n\n')
-  else if (delimSel.value.includes('nl')) push('\n')
-  for (const p of DELIMITER_PRESETS) {
-    if (p.id === 'nl' || p.id === 'nl2') continue
-    if (delimSel.value.includes(p.id)) push(p.chars)
-  }
-  for (const c of delimCustom.value) push(c)
-  form.delimiter = chars.join('')
+  // 模式由勾选状态唯一决定：未勾「自定义」时忽略输入框残留值（互斥兜底）
+  const isCustom = delimSel.value.includes('custom')
+  form.delimiter = serializeDelimiters(delimSel.value, isCustom ? delimCustom.value : '')
 }
 
 interface StrategyCard { key: Exclude<Strategy, 'by_file_type'>; title: string; desc: string }
@@ -111,7 +100,7 @@ const enhancements = computed(() => [
   {key: 'image_caption', label: '模型补充图片描述', tip: '解析时由模型生成分段内图片的文字描述'}] as const)
 
 function addRule() {
-  rules.value.push({ext: '', strategy: 'auto', method: 'naive', chunk_token_num: 512, delimiter: '\n。！？；', children_delimiter: '\n'})
+  rules.value.push({ext: '', strategy: 'auto', chunk_token_num: 512, delimiter: '\n\n', children_delimiter: '\n'})
 }
 
 /** 校验分段设置（自定义/父子分段-段落模式必填分段标识符；文件类型规则不允许重复扩展名），失败时 Message 提示并返回 false。 */
@@ -170,16 +159,10 @@ defineExpose({validate, getSettings})
           <el-radio v-model="form.strategy" :value="card.key" class="strategy-radio" :aria-label="card.title">{{ '' }}</el-radio>
         </div>
 
-        <!-- 自定义：分段方式 / 分段标识符 / 分段最大长度 / 分段重叠度 / 文本预处理规则 -->
+        <!-- 自定义：分段标识符 / 分段最大长度 / 分段重叠度 / 文本预处理规则 -->
         <div v-if="card.key === 'custom' && form.strategy === 'custom'" class="strategy-expand">
           <div class="exp-row">
-            <span class="exp-label">分段方式</span>
-            <el-select v-model="form.method" class="exp-field">
-              <el-option v-for="m in METHODS" :key="m.value" :label="m.label" :value="m.value" />
-            </el-select>
-          </div>
-          <div class="exp-row">
-            <span class="exp-label"><span class="req">*</span>分段标识符<el-tooltip content="用于切句的分隔符，可多选" placement="top"><el-icon class="tip-icon"><QuestionFilled /></el-icon></el-tooltip></span>
+            <span class="exp-label"><span class="req">*</span>分段标识符<el-tooltip content="系统预设可多选（「或」关系，任一命中即切分）；勾选「自定义」则仅按输入的标识符字面切段，两者互斥" placement="top"><el-icon class="tip-icon"><QuestionFilled /></el-icon></el-tooltip></span>
             <el-select v-model="delimSel" multiple class="exp-field" placeholder="请选择分段标识符">
               <el-option v-for="p in DELIMITER_PRESETS" :key="p.id" :label="p.label" :value="p.id" />
               <el-option label="自定义" value="custom" />
@@ -187,10 +170,10 @@ defineExpose({validate, getSettings})
           </div>
           <div v-if="delimSel.includes('custom')" class="exp-row">
             <span class="exp-label"><span class="req">*</span>自定义</span>
-            <el-input v-model="delimCustom" class="exp-field" placeholder="请输入自定义分段标识符" />
+            <el-input v-model="delimCustom" class="exp-field" placeholder="请输入自定义分段标识符，如 ###" />
           </div>
           <div class="exp-row">
-            <span class="exp-label"><span class="req">*</span>分段最大长度<el-tooltip content="每个分段的目标长度，按 Token 数滚动窗口聚合" placement="top"><el-icon class="tip-icon"><QuestionFilled /></el-icon></el-tooltip></span>
+            <span class="exp-label"><span class="req">*</span>分段最大长度<el-tooltip content="分段的 Token 数上限：超出该长度的分段自动按句读细分" placement="top"><el-icon class="tip-icon"><QuestionFilled /></el-icon></el-tooltip></span>
             <el-input-number v-model="form.chunk_token_num" :min="1" :max="2048" controls-position="right" />
           </div>
           <div class="exp-row">
@@ -217,7 +200,7 @@ defineExpose({validate, getSettings})
           </div>
           <template v-if="form.parent_mode === 'paragraph'">
             <div class="exp-row">
-              <span class="exp-label"><span class="req">*</span>分段标识符<el-tooltip content="父块按分隔符与最大长度切分，切出的段落作为父块" placement="top"><el-icon class="tip-icon"><QuestionFilled /></el-icon></el-tooltip></span>
+              <span class="exp-label"><span class="req">*</span>分段标识符<el-tooltip content="父块按分隔符与最大长度切分，切出的段落作为父块；系统预设可多选（「或」关系），与自定义互斥" placement="top"><el-icon class="tip-icon"><QuestionFilled /></el-icon></el-tooltip></span>
               <el-select v-model="delimSel" multiple class="exp-field" placeholder="请选择分段标识符">
                 <el-option v-for="p in DELIMITER_PRESETS" :key="p.id" :label="p.label" :value="p.id" />
                 <el-option label="自定义" value="custom" />
@@ -275,15 +258,12 @@ defineExpose({validate, getSettings})
             <el-select v-model="rule.ext" class="rule-ext" filterable allow-create placeholder="选择文件类型" aria-label="文件类型">
               <el-option v-for="t in FILE_TYPES" :key="t.ext" :label="t.label" :value="t.ext" />
             </el-select>
-            <el-select v-model="rule.strategy" class="rule-strategy" aria-label="分段策略" @change="v => { if (v === 'parent_child') rule.method = 'naive' }">
+            <el-select v-model="rule.strategy" class="rule-strategy" aria-label="分段策略">
               <el-option label="自动" value="auto" />
               <el-option label="自定义" value="custom" />
               <el-option label="父子分段" value="parent_child" />
             </el-select>
             <template v-if="rule.strategy === 'custom'">
-              <el-select v-model="rule.method" class="rule-method" aria-label="分段方式">
-                <el-option v-for="m in METHODS" :key="m.value" :label="m.label" :value="m.value" />
-              </el-select>
               <el-input-number v-model="rule.chunk_token_num" :min="1" :max="2048" class="rule-num" controls-position="right" aria-label="分段最大长度" />
             </template>
             <el-input-number v-else-if="rule.strategy === 'parent_child'" v-model="rule.chunk_token_num" :min="1" :max="2048" class="rule-num" controls-position="right" aria-label="父块最大长度" />
@@ -336,7 +316,6 @@ defineExpose({validate, getSettings})
 .type-rule { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .rule-ext { width: 160px; }
 .rule-strategy { width: 110px; }
-.rule-method { width: 130px; }
 .rule-num { width: 120px; }
 .rule-hint { font-size: 12px; color: #909399; }
 .exp-sub-title { font-size: 13px; font-weight: 600; color: #303133; margin-top: 2px; }

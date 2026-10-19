@@ -1,18 +1,18 @@
-"""基于 XXL-Job 的定时同步调度（完全替换内置 APScheduler）。
+"""同步调度（XXL-Job 批处理 tick + 中断收编）。
 
 职责划分：
-- 本平台同步源为作业配置唯一事实源：cron 存 sync_sources.cron（5 段 crontab），
-  新建/编辑/启停/删除时经 admin API 幂等同步到 XXL-Job（推送时转 Quartz 6 段）；
-- 调度与触发由 XXL-Job admin 负责；内嵌执行器（xxljob_executor）接收回调执行同步；
+- 定时编目已取消：自动同步由钉钉知识库变更事件驱动（event_listener.py），
+  手动同步（上传文档/立即同步）进程内直跑编目；
+- XXL-Job 仅保留全局批处理作业（syncBatch tick：分批消费编目预建的任务队列）；
 - 中断运行收编扫描（超时/崩溃孤儿 run）为独立线程，与调度中心无关。
 
-启动行为（fail fast）：
-- XXL_JOB_ENABLED=true（默认）时 admin 不可达/登录失败 → 抛异常终止启动；
-- XXL_JOB_ENABLED=false → 定时同步整体关闭（手动同步/同步队列/重试不受影响），启动告警。
+启动行为（fail-soft）：
+- XXL_JOB_ENABLED=true 时 admin 不可达 → 跳过调度、降级线程消费批处理，启动告警；
+- XXL_JOB_ENABLED=false → 调度中心整体不用，批处理由进程内降级线程消费。
+- 启动时清理历史遗留的 syncSource 定时作业（定时编目时代的存量）。
 """
 from __future__ import annotations
 
-import json
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -56,116 +56,46 @@ def _ensure_group() -> int:
     return _group_id
 
 
-def _job_spec(group_id: int, source: SyncSource) -> dict:
-    return {
-        "jobGroup": group_id,
-        "jobDesc": f"知识同步-{source.name}",
-        "author": "kge",
-        "alarmEmail": "",
-        "scheduleType": "CRON",
-        "scheduleConf": crontab_to_quartz(source.cron),
-        "glueType": "BEAN",
-        "executorHandler": "syncSource",
-        "executorParam": str(source.id),
-        "executorRouteStrategy": "FIRST",
-        "childJobId": "",
-        "misfireStrategy": "DO_NOTHING",
-        "executorBlockStrategy": "SERIAL_EXECUTION",
-        "executorTimeout": 0,
-        "executorFailRetryCount": 0,
-        "glueRemark": "GLUE代码初始化描述",
-    }
-
-
-def _handle_sync_source(param: str, job_log) -> tuple[int, str]:
-    """xxl-job handler：param 为同步源 ID（cron 触发）或 JSON（手动触发携带 operator/trigger）。
-
-    统一走编目（run_catalog：预建任务/文档，由 syncBatch 批处理分批消费）。
-    """
-    source_id: int | None = None
-    operator = ""
-    trigger = "schedule"
-    raw = (param or "").strip()
-    if raw:
-        try:
-            data = json.loads(raw)
-            source_id = int(data.get("source_id"))
-            operator = str(data.get("operator") or "")
-            trigger = str(data.get("trigger") or "manual")
-        except (ValueError, TypeError, AttributeError):
-            try:
-                source_id = int(raw)
-            except ValueError:
-                return 500, f"无效的作业参数（应为同步源 ID 或 JSON）: {param!r}"
-    if source_id is None:
-        return 500, f"无效的作业参数（应为同步源 ID 或 JSON）: {param!r}"
-    from .catalog import run_catalog
-    summary = run_catalog(source_id, trigger, operator)
-    job_log.log(f"同步结果: {summary}")
-    status = summary.get("status")
-    message = str(summary.get("message") or status)[:400]
-    if status in ("success", "partial", "skipped"):
-        return 200, message
-    return 500, message
-
-
 def _handle_sync_batch(param: str, job_log) -> tuple[int, str]:
     """xxl-job handler：全局批处理 tick（library 编目任务分批消费，param 未用）。"""
     from .batch import run_sync_batch_tick
     return run_sync_batch_tick(job_log)
 
 
-def _apply_source_job(admin: XxlJobAdminClient, group_id: int, source: SyncSource) -> int | None:
-    """幂等应用单个同步源的作业配置；返回处于启动状态的作业 ID（停用/跳过/失败为 None）。"""
-    job_id = source.xxl_job_id
-    if not source.enabled:
-        if job_id:
-            try:
-                admin.stop_job(job_id)
-            except XxlJobAdminError as exc:
-                logger.warning("停用 XXL-Job 作业 %s 失败: %s", job_id, exc)
-        return None
-    try:
-        spec = _job_spec(group_id, source)
-    except ValueError as exc:
-        # cron 转不了 Quartz：停掉旧作业，避免旧 cron 继续跑（路由层保存时已校验）
-        logger.error("同步源 %s 的 cron 转换失败，跳过并停用旧作业: %s", source.id, exc)
-        if job_id:
-            try:
-                admin.stop_job(job_id)
-            except XxlJobAdminError:
-                pass
-        return None
-    try:
-        if job_id:
-            try:
-                admin.update_job({**spec, "id": job_id})
-            except XxlJobAdminError:
-                logger.warning("XXL-Job 作业 %s 在调度中心不存在，重建", job_id)
-                job_id = None
-        if not job_id:
-            job_id = admin.add_job(spec)
-            source.xxl_job_id = job_id
-        admin.start_job(job_id)
-        return job_id
-    except XxlJobAdminError as exc:
-        logger.error("同步源 %s 的 XXL-Job 作业同步失败: %s", source.id, exc)
-        return None
-
-
-def sync_all_jobs() -> int:
-    """把所有同步源的作业配置幂等同步到 admin；返回处于启动状态的作业数。"""
-    admin = get_admin_client()
-    group_id = _ensure_group()
-    active = 0
+def cleanup_source_jobs(admin: XxlJobAdminClient) -> int:
+    """清理定时编目时代遗留的 syncSource 作业：持久化 ID + 孤儿扫描，幂等 best effort。"""
+    removed = 0
     with SyncSessionLocal() as db:
-        for source in db.query(SyncSource).order_by(SyncSource.id).all():
-            if _apply_source_job(admin, group_id, source) is not None:
-                active += 1
+        stale = db.query(SyncSource).filter(SyncSource.xxl_job_id.isnot(None)).all()
+        for source in stale:
+            job_id = source.xxl_job_id
+            source.xxl_job_id = None
+            if job_id:
+                try:
+                    admin.remove_job(job_id)
+                    removed += 1
+                except XxlJobAdminError as exc:
+                    logger.warning("清理同步源 %s 的遗留作业 %s 失败: %s", source.id, job_id, exc)
         db.commit()
-    # 全局批处理作业（library 分批同步消费）一并幂等对齐
-    _apply_batch_job(admin, group_id)
-    return active
+    # 补扫孤儿作业（xxl_job_id 未落库但调度中心仍存在的 syncSource 作业）。
+    # 加单次上限：删除接口版本不匹配等异常场景下若作业始终删不掉，无限 while
+    # 会以极高频率轰炸 admin（实测 90 次/秒打满 Tomcat 线程，拖死其它接口）；
+    # 剩余孤儿下次启动继续清理。
+    for _ in range(100):
+        row = admin.find_job_by_handler("syncSource")
+        if row is None:
+            break
+        try:
+            admin.remove_job(int(row["id"]))
+            removed += 1
+        except XxlJobAdminError as exc:
+            logger.warning("清理遗留 syncSource 作业 %s 失败: %s", row.get("id"), exc)
+            break
+    else:
+        logger.warning("遗留 syncSource 作业清理达单次上限 100 个，其余下次启动继续")
+    if removed:
+        logger.info("已清理定时编目遗留的 syncSource 作业 %s 个", removed)
+    return removed
 
 
 def _batch_schedule_conf() -> str:
@@ -247,73 +177,31 @@ def trigger_batch_once() -> None:
 
 
 def trigger_source_sync(source_id: int, operator: str = "") -> dict:
-    """「确认并开始同步」/立即同步：触发消息交给 XXL-Job admin，由执行器回调执行。
+    """「确认并开始同步」/立即同步：进程内直跑编目（run_catalog）。
 
-    不经 MQ：admin 的 /jobinfo/trigger 即可靠投递通道（触发留痕于调度日志，
-    执行器串行队列缓冲并发）；执行器内嵌 kb-api，与 UI 同生命周期，无投递空窗。
-    调度关闭（XXL_JOB_ENABLED=false）时回退进程内直跑，保证开发环境可用。
+    定时编目已取消，不再经 XXL-Job admin 触发；编目内部会接着触发批处理
+    （ensure_batch_job_running + trigger_batch_once / 进程内降级线程），
+    任务/文档进同步队列由批处理分批消费，进度在同步队列查看。
     """
-    if not get_settings().xxl_job_enabled:
-        # 降级也走编目（run_catalog 内部会触发进程内批处理线程）
-        from .catalog import run_catalog
-        _direct_executor.submit(run_catalog, source_id, "manual", operator)
-        return {"via": "direct",
-                "message": "调度中心未启用（XXL_JOB_ENABLED=false），本次直接执行；进度可在同步队列查看"}
-    admin = get_admin_client()
-    with SyncSessionLocal() as db:
-        source = db.get(SyncSource, source_id)
-        if source is None:
-            raise XxlJobAdminError(f"同步源 {source_id} 不存在")
-        job_id = source.xxl_job_id
-        if not job_id:
-            # 作业缺失（如调度关闭期间建的源）：先对齐一次配置再触发
-            if _apply_source_job(admin, _ensure_group(), source) is None:
-                raise XxlJobAdminError("调度中心无可用作业（同步源已停用或 cron 无效），请检查同步源配置")
-            db.commit()
-            job_id = source.xxl_job_id
-    param = json.dumps({"source_id": source_id, "operator": operator, "trigger": "manual"},
-                       ensure_ascii=False)
-    admin.trigger_job(job_id, param)
-    return {"via": "xxl-job",
-            "message": "同步任务已提交调度中心（XXL-Job），进度见同步队列，执行日志见调度控制台"}
+    from .catalog import run_catalog
+    _direct_executor.submit(run_catalog, source_id, "manual", operator)
+    return {"via": "direct",
+            "message": "同步任务已提交，进度可在同步队列查看"}
 
 
 def trigger_first_sync(source_id: int, operator: str = "") -> dict:
-    """同步源创建后的首次同步：经 XXL-Job admin 触发（与手动同步同一通道）。
-
-    触发记录留痕于调度日志，任务/文档进同步队列由批处理分批消费；
-    调度关闭（XXL_JOB_ENABLED=false）时 trigger_source_sync 内部降级直跑。
-    若 admin→执行器回调偶发失败（开发态热重载窗口），下一个 cron 刻度
-    会自然接管（增量编目），不会丢失同步。
-    """
+    """同步源创建后的首次同步（与手动同步同一通道）。"""
     return trigger_source_sync(source_id, operator)
 
 
-def reload_sync_jobs() -> int:
-    """同步源 CRUD 后调用：幂等全量对齐作业配置。调度关闭时为 no-op。"""
-    if not get_settings().xxl_job_enabled:
-        return 0
-    return sync_all_jobs()
-
-
 def remove_source_job(job_id: int | None) -> None:
-    """删除同步源时清理调度中心作业（best effort）。"""
+    """删除同步源时清理调度中心遗留作业（定时编目时代存量，best effort）。"""
     if not job_id or not get_settings().xxl_job_enabled:
         return
     try:
         get_admin_client().remove_job(job_id)
     except XxlJobAdminError as exc:
         logger.warning("删除 XXL-Job 作业 %s 失败（请在控制台手工清理）: %s", job_id, exc)
-
-
-def stop_source_job(job_id: int | None) -> None:
-    """停用调度中心作业（单次导入源收编用，best effort）。"""
-    if not job_id or not get_settings().xxl_job_enabled:
-        return
-    try:
-        get_admin_client().stop_job(job_id)
-    except XxlJobAdminError as exc:
-        logger.warning("停用 XXL-Job 作业 %s 失败: %s", job_id, exc)
 
 
 def _recovery_loop() -> None:
@@ -366,22 +254,21 @@ def start_sync_scheduler() -> int:
     XXL-Job admin 不可达时**降级**（记录错误、跳过 executor 启动），
     绝不抛异常——lifespan 抛异常会直接杀死整个 kb-api（BGE-M3/搜索/问答全挂），
     且 reloader 模式下 worker 退出后端口仍在监听但无人 accept，所有请求挂死超时。
-    cron 定时同步缺席不影响手动同步/同步队列/失败重试。
+    调度缺席时批处理由进程内降级线程消费；自动同步由事件监听驱动，不受影响。
     """
     s = get_settings()
     _start_recovery_thread()
     if not s.xxl_job_enabled:
         logger.warning("XXL-Job 调度已禁用（XXL_JOB_ENABLED=false）："
-                       "cron 定时同步不运行，手动同步/同步队列/重试不受影响；"
-                       "批处理由进程内降级线程消费")
+                       "批处理 tick 由进程内降级线程消费；自动同步（事件监听）/手动同步不受影响")
         _start_batch_fallback_thread()
         return 0
     admin = get_admin_client()
     try:
         admin.ping()
     except Exception as exc:  # noqa: BLE001 — 调度器缺席不能拖死 API 服务
-        logger.error("XXL-Job admin 不可达（%s），本次启动跳过定时调度：cron 同步不运行，"
-                     "手动同步/同步队列/重试不受影响；批处理由进程内降级线程消费。"
+        logger.error("XXL-Job admin 不可达（%s），本次启动跳过定时调度："
+                     "批处理由进程内降级线程消费；自动同步（事件监听）/手动同步不受影响。"
                      "恢复 admin 后重启 kb-api 即可恢复调度", exc)
         _start_batch_fallback_thread()
         return 0
@@ -392,11 +279,17 @@ def start_sync_scheduler() -> int:
     _executor = XxlJobExecutor(s.xxl_job_admin_url, s.xxl_job_access_token,
                                s.xxl_job_executor_appname, ip, s.xxl_job_executor_port,
                                log_path)
-    _executor.start({"syncSource": _handle_sync_source, "syncBatch": _handle_sync_batch})
-    count = sync_all_jobs()
-    logger.info("XXL-Job 调度已启动：执行器 http://%s:%s，启用作业 %s 个（含批处理作业）",
-                ip, s.xxl_job_executor_port, count)
-    return count
+    _executor.start({"syncBatch": _handle_sync_batch})
+    # 定时编目已取消：仅注册批处理作业，并清理定时编目时代的遗留 syncSource 作业
+    try:
+        cleanup_source_jobs(admin)
+    except Exception as exc:  # noqa: BLE001 — 遗留作业清理失败不影响启动
+        logger.warning("遗留 syncSource 作业清理失败（可稍后在调度控制台手工清理）: %s", exc)
+    group_id = _ensure_group()
+    _apply_batch_job(admin, group_id)
+    logger.info("XXL-Job 调度已启动：执行器 http://%s:%s，批处理作业已注册"
+                "（定时编目已取消，自动同步由知识库变更事件驱动）", ip, s.xxl_job_executor_port)
+    return 1
 
 
 def shutdown_sync_scheduler() -> None:

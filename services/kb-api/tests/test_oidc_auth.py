@@ -198,3 +198,67 @@ class OidcTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(HTTPException) as error:
             await oidc.authenticate(token)
         self.assertEqual(error.exception.status_code, 401)
+
+
+class LocalAuthenticateTests(unittest.IsolatedAsyncioTestCase):
+    """本地密码登录模式的 JWT 鉴权（deps.authenticate 走的分支）。"""
+
+    def setUp(self):
+        self.local_cfg = SimpleNamespace(auth_provider='local')
+        patcher = patch.object(oidc, 'get_settings', return_value=self.local_cfg)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    @staticmethod
+    def fake_session(user=None, error=None):
+        from contextlib import asynccontextmanager as _acm
+        @_acm
+        async def _session():
+            if error is not None:
+                raise error
+            yield SimpleNamespace(get=AsyncMock(return_value=user))
+        return _session
+
+    async def test_valid_token_returns_user(self):
+        from kb_common.security import create_jwt
+        user = User(id=uuid4(), username='localdev', role='admin', is_active=True)
+        with patch.object(oidc, 'short_session', self.fake_session(user=user)):
+            resolved = await oidc.authenticate(create_jwt(str(user.id), 'admin'))
+        self.assertEqual(resolved.id, user.id)
+
+    async def test_invalid_or_expired_token_is_401(self):
+        from kb_common.security import create_jwt
+        with self.assertRaises(HTTPException) as error:
+            await oidc.authenticate('not-a-jwt')
+        self.assertEqual(error.exception.status_code, 401)
+        # 过期 token（ttl=0 分钟）→ 401；编解码须在同一密钥配置下生成/校验
+        expired_cfg = SimpleNamespace(auth_provider='local', jwt_secret='kb-mvp-dev-secret', jwt_algo='HS256', jwt_ttl_minutes=0)
+        with patch.object(oidc, 'get_settings', return_value=expired_cfg), \
+             patch('kb_common.security.get_settings', return_value=expired_cfg):
+            expired = create_jwt(str(uuid4()), 'admin')
+            time.sleep(0.01)
+            with patch.object(oidc, 'short_session', self.fake_session()), \
+                 self.assertRaises(HTTPException) as error:
+                await oidc.authenticate(expired)
+        self.assertEqual(error.exception.status_code, 401)
+
+    async def test_db_failure_propagates_not_401(self):
+        """回归（本地登录闪退）：DB 故障必须原样上抛，不得吞成 401——
+
+        否则数据库抖动/热重载窗口期，合法登录后的首个请求会被误判为
+        凭证失效，前端强制登出跳回登录页。
+        """
+        from kb_common.security import create_jwt
+        token = create_jwt(str(uuid4()), 'admin')
+        with patch.object(oidc, 'short_session',
+                          self.fake_session(error=RuntimeError('Event loop is closed'))), \
+             self.assertRaises(RuntimeError):
+            await oidc.authenticate(token)
+
+    async def test_inactive_user_is_401(self):
+        from kb_common.security import create_jwt
+        user = User(id=uuid4(), username='localdev', is_active=False)
+        with patch.object(oidc, 'short_session', self.fake_session(user=user)), \
+             self.assertRaises(HTTPException) as error:
+            await oidc.authenticate(create_jwt(str(user.id), 'admin'))
+        self.assertEqual(error.exception.status_code, 401)
