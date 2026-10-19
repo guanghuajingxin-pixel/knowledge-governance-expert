@@ -135,5 +135,88 @@ class SyncTaskLifecycleTest(unittest.TestCase):
             self.assertEqual(run.status, 'success')
 
 
+class OrphanSettleClaimExemptionTest(unittest.TestCase):
+    """孤儿收尾认领豁免：文档终态早于任务认领（旧失败残留）不收尾，
+    避免重试任务刚认领就被旧状态打死（重试永远失败的死循环）。"""
+
+    def setUp(self):
+        from datetime import datetime as _dt
+        from tests.test_sync_event_listener import _sqlite_sessions
+        from sqlalchemy import Column, DateTime, String, Text
+        from sqlalchemy.dialects.postgresql import UUID
+        from sqlalchemy.orm import declarative_base
+
+        self._dt = _dt
+        self.engine, self.sessions = _sqlite_sessions(SyncSource, SyncRun, SyncTask, SyncLog)
+        # LibraryDocument 带 PG ARRAY 列，sqlite 建不了原表：stub 只建 settle 用到的列
+        class _StubDoc(declarative_base()):
+            __tablename__ = 'library_documents'
+            id = Column(UUID(as_uuid=True), primary_key=True, default=_uuid.uuid4)
+            status = Column(String(20), default='PENDING')
+            message = Column(Text, default='')
+            updated_at = Column(DateTime)
+        _StubDoc.__table__.create(self.engine)
+        self._stub_doc_cls = _StubDoc
+        patches = [patch.object(batch, 'LibraryDocument', _StubDoc),
+                   patch.object(batch, 'SyncSessionLocal', self.sessions)]
+        for p in patches:
+            p.start(); self.addCleanup(p.stop)
+        self.doc_uuid = _uuid.uuid4()
+        with self.sessions() as db:
+            db.add(SyncSource(name='s', workspace_id='ws', root_node_id='r',
+                              dataset_id='1', dataset_name='t', enabled=True))
+            db.commit()
+            src = db.query(SyncSource).one()
+            run = SyncRun(source_id=src.id, trigger='manual', status='running')
+            db.add(run)
+            db.commit()
+            db.add(SyncTask(run_id=run.id, source_id=src.id, name='表格.able',
+                            library_document_id=str(self.doc_uuid), status='running',
+                            started_at=None))
+            db.commit()
+            self.task_id = db.query(SyncTask).one().id
+
+    def tearDown(self):
+        self.engine.dispose()
+
+    def _add_doc(self, status, updated_at, message=''):
+        with self.sessions() as db:
+            db.add(self._stub_doc_cls(id=self.doc_uuid, status=status,
+                                      message=message, updated_at=updated_at))
+            db.commit()
+
+    def _claim(self, started_at):
+        with self.sessions() as db:
+            t = db.get(SyncTask, self.task_id)
+            t.started_at = started_at
+            db.commit()
+
+    def test_stale_doc_failed_before_claim_not_settled(self):
+        """文档 FAILED 终态早于任务认领（重试场景旧残留）：不收尾，任务留待消费主路径。"""
+        self._claim(self._dt(2026, 10, 19, 21, 20, 0))
+        self._add_doc('FAILED', self._dt(2026, 10, 19, 19, 7, 36),
+                      message='同步失败: ExportError: 找不到 dws 命令')
+        self.assertEqual(batch._settle_orphaned_running_tasks(), 0)
+        with self.sessions() as db:
+            task = db.get(SyncTask, self.task_id)
+            self.assertEqual(task.status, 'running')
+            self.assertEqual(task.error, '')
+
+    def test_doc_advanced_after_claim_settles(self):
+        """认领后文档被外部（前端 refresh）推进 COMPLETED：正常兜底收尾。"""
+        self._claim(self._dt(2026, 10, 19, 21, 20, 0))
+        self._add_doc('COMPLETED', self._dt(2026, 10, 19, 21, 21, 5))
+        self.assertEqual(batch._settle_orphaned_running_tasks(), 1)
+        with self.sessions() as db:
+            self.assertEqual(db.get(SyncTask, self.task_id).status, 'success')
+
+    def test_started_at_missing_falls_back_to_settle(self):
+        """存量任务 started_at 缺失：维持旧行为兜底收尾，防孤儿卡 30 分钟回收窗。"""
+        self._add_doc('FAILED', self._dt(2026, 10, 19, 19, 7, 36), message='解析失败')
+        self.assertEqual(batch._settle_orphaned_running_tasks(), 1)
+        with self.sessions() as db:
+            self.assertEqual(db.get(SyncTask, self.task_id).status, 'failed')
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -24,6 +24,10 @@ services:
       STRUCTURED_KIT_BASE_URL: ""
     volumes:
       - kb-api-data:/app/services/kb-api/data
+      # dws CLI（钉钉官方 CLI）：AI 表格(.able)/在线文档(.adoc/.axls)导出依赖。
+      # 宿主 /opt/kge/dws 装 Linux 版二进制（install.sh），容器内路径对齐代码
+      # 约定 tools/dws/dws；.env.app 需 DWS_BIN=/app/tools/dws/dws。
+      - /opt/kge/dws:/app/tools/dws:ro
     networks: [kge-network]
 
   deerflow:

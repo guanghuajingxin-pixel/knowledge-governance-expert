@@ -609,6 +609,10 @@ class SyncQueueConsistencyTests(unittest.TestCase):
             library_id = Column(Integer)
             status = Column(String(20), default='PENDING')
             message = Column(Text, default='')
+            # 孤儿收尾认领豁免读 updated_at（本测试任务 started_at 均为 None，
+            # 走 started_at 缺失的旧行为兜底路径，不受豁免逻辑影响）
+            from sqlalchemy import DateTime
+            updated_at = Column(DateTime)
 
         self.doc_cls = _Doc
         self.doc_cls.__table__.create(self.sql)

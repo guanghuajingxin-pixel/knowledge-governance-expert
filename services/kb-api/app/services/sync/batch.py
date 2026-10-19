@@ -229,29 +229,46 @@ def _settle_orphaned_running_tasks() -> int:
     running 直到 30min 回收窗口回退 pending 重跑下载。这里每轮兜底扫描
     「文档已终态、任务仍 running」的组合，按文档终态直接收尾（幂等：只动
     running 任务；与 _process_locked 的终态回写语义一致）。
+
+    认领豁免：只收「文档终态出现在任务认领之后」的组合（updated_at > started_at）。
+    重试场景里文档带着**认领前**的旧失败终态（如上轮下载失败留下的
+    「同步失败: ...」），任务刚被认领还没执行——此时收尾等于用旧状态把重试
+    任务打死（重试永远失败的死循环）；正确路径是让 _process_batch_task 重新
+    下载上传，把文档重置回 UPLOADED/PARSING。外部推进（前端 refresh）必然
+    发生在认领之后，不受影响；started_at 缺失的存量任务仍按旧行为兜底收尾。
     """
     with SyncSessionLocal() as db:
-        id_strs = {row[0] for row in db.query(SyncTask.library_document_id).filter(
-            SyncTask.status == "running",
-            SyncTask.library_document_id.isnot(None),
-        ).distinct().all()}
-        uuids = []
-        for v in id_strs:
+        # 同文档多个 running 任务取最新认领时间：任一任务认领晚于文档终态
+        # 即视为外部推进，正常兜底；全部任务都早于终态才豁免。
+        claimed_at: dict[str, datetime] = {}
+        for lib_doc_id, started_at in db.query(
+                SyncTask.library_document_id, SyncTask.started_at).filter(
+                SyncTask.status == "running",
+                SyncTask.library_document_id.isnot(None)).all():
             try:
-                uuids.append(uuid.UUID(v))
-            except ValueError:
+                key = str(uuid.UUID(lib_doc_id))
+            except (ValueError, TypeError):
                 continue
-        if not uuids:
+            ts = started_at or datetime.min
+            if key not in claimed_at or ts > claimed_at[key]:
+                claimed_at[key] = ts
+        if not claimed_at:
             return 0
         docs = db.query(LibraryDocument).filter(
-            LibraryDocument.id.in_(uuids),
+            LibraryDocument.id.in_([uuid.UUID(k) for k in claimed_at]),
             LibraryDocument.status.in_(("COMPLETED", "FAILED", "CANCELLED")),
         ).all()
+        settle_docs = []
         for doc in docs:
+            latest_claim = claimed_at.get(str(doc.id), datetime.min)
+            if doc.updated_at and doc.updated_at <= latest_claim:
+                continue  # 终态早于认领：旧状态残留，交给消费主路径重新上传重置
+            settle_docs.append(doc)
+        for doc in settle_docs:
             _settle_tasks_for_document(db, doc)
-        if docs:
+        if settle_docs:
             db.commit()
-        return len(docs)
+        return len(settle_docs)
 
 
 # ---------- (d) 逐任务处理 ----------
