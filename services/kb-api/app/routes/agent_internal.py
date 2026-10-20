@@ -48,6 +48,40 @@ async def _effective_setting(s: AsyncSession, key: str) -> str:
     return (row.value if row else None) or getattr(get_settings(), key, "") or ""
 
 
+async def _effective_models(s: AsyncSession) -> set[str]:
+    """有效模型名集合：全部 LLM profile 配置的模型 + 系统 llm_model。
+
+    agent_bootstrap 据此校验智能体配置 resolve 出的模型是否真实存在——
+    models 列表是历史遗留脏数据的高发位（引用已删除的模型配置）。
+    """
+    from kb_common.models import LLMProfile
+
+    names: set[str] = set()
+    for p in (await s.execute(select(LLMProfile))).scalars().all():
+        try:
+            for m in json.loads(p.models or "[]"):
+                n = (m.get("name") or "").strip() if isinstance(m, dict) else ""
+                if n:
+                    names.add(n)
+        except (ValueError, TypeError):
+            continue
+    sys_model = await _effective_setting(s, "llm_model")
+    if sys_model:
+        names.add(sys_model)
+    return names
+
+
+def _sanitize_agent_model(resolved: str, valid: set[str], fallback: str) -> str:
+    """resolve 出的模型不在有效集合时回退系统模型（fallback）。
+
+    兜底顺序：有效 → 系统模型 → 原值（全部无效时不改写，让请求自然报错
+    暴露配置问题，而不是静默改成另一个错误配置）。
+    """
+    if resolved in valid:
+        return resolved
+    return fallback if (fallback and fallback != resolved) else resolved
+
+
 class RetrieveIn(BaseModel):
     query: str
     kb_ids: list[str] | None = None                # 平台本地 ES 知识库
@@ -362,8 +396,14 @@ async def agent_bootstrap(s: AsyncSession = Depends(get_session)):
     from app.services.agent.config import load_agent_config, resolve_agent_model
 
     agent_cfg = await load_agent_config(s)
+    # 加固：智能体配置的 models 可能引用已删除的模型配置（历史遗留脏数据），
+    # base_url/Key 取自当前 profile 而模型名不匹配会 400（生产实锤：
+    # models 残留 glm-5.3 而 profile 只有 deepseek）。
+    model = _sanitize_agent_model(
+        resolve_agent_model(agent_cfg, model),
+        await _effective_models(s), model)
     return {
-        "model": resolve_agent_model(agent_cfg, model),
+        "model": model,
         "base_url": base_url or "https://api.deepseek.com/v1",
         "api_key": api_key,
         "temperature": float(agent_cfg.get("temperature", 0.7)),

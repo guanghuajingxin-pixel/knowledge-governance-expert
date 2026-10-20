@@ -57,5 +57,48 @@ class PersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(loaded['default_model'], DEFAULT_CONFIG['default_model'])
 
 
+class SanitizeAgentModelTests(unittest.TestCase):
+    """agent_bootstrap 加固：智能体配置 resolve 出脏模型（引用已删除的模型配置）
+    时回退系统模型，防止模型名与 LLM 端点不匹配导致问答 400（生产实锤：
+    models 残留 glm-5.3 而 llm_profiles 只有 deepseek 系列）。"""
+
+    def test_valid_model_kept(self):
+        from app.routes.agent_internal import _sanitize_agent_model
+        self.assertEqual(
+            _sanitize_agent_model('deepseek-flash', {'deepseek-flash', 'deepseek-v4-pro'}, 'deepseek-flash'),
+            'deepseek-flash')
+
+    def test_stale_model_falls_back_to_system(self):
+        from app.routes.agent_internal import _sanitize_agent_model
+        self.assertEqual(
+            _sanitize_agent_model('glm-5.3', {'deepseek-flash', 'deepseek-v4-pro'}, 'deepseek-flash'),
+            'deepseek-flash')
+
+    def test_all_invalid_keeps_original(self):
+        """系统模型也无效时不改写：让请求自然报错暴露配置问题，不静默换错配置。"""
+        from app.routes.agent_internal import _sanitize_agent_model
+        self.assertEqual(_sanitize_agent_model('x', set(), ''), 'x')
+
+
+class EffectiveModelsTests(unittest.IsolatedAsyncioTestCase):
+    """有效模型集合：全部 LLM profile 模型 + 系统 llm_model 合并。"""
+
+    async def test_merges_profiles_and_system_model(self):
+        import json as _json
+        from types import SimpleNamespace as _NS
+        from app.routes.agent_internal import _effective_models
+
+        class _Session:
+            async def execute(self, stmt):
+                if 'llm_profiles' in str(stmt):
+                    rows = [_NS(models=_json.dumps(
+                        [{"name": "deepseek-flash"}, {"name": "deepseek-v4-pro"}]))]
+                    return _NS(scalars=lambda: _NS(all=lambda: rows))
+                return _NS(scalar_one_or_none=lambda: _NS(value='deepseek-flash'))
+
+        self.assertEqual(await _effective_models(_Session()),
+                         {'deepseek-flash', 'deepseek-v4-pro'})
+
+
 if __name__ == '__main__':
     unittest.main()
