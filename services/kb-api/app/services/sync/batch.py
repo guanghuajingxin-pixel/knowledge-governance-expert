@@ -273,6 +273,43 @@ def _settle_orphaned_running_tasks() -> int:
 
 # ---------- (d) 逐任务处理 ----------
 
+def _reset_stale_doc_for_retry(db, task: SyncTask) -> bool:
+    """状态口径统一：任务已认领开始处理（下载/上传/解析在途），文档若停留在
+    上一轮的失败终态，先回到 PARSING（处理中）——知识列表与同步队列同时
+    显示「处理中」，消除「文档解析失败、队列还在处理中」的割裂观感。
+
+    只动 FAILED/CANCELLED（重试对象）：COMPLETED 的更新任务在下载完成前
+    旧内容仍可检索，保持已上传状态；下载/上传失败由 _record_task_failure
+    重新置回 FAILED（覆盖 PARSING），成功路径由 upload_file 重新进入解析。
+    返回是否发生了重置（发生重置的即使内容未变也要重新提交解析）。
+    """
+    if not task.library_document_id:
+        return False
+    try:
+        doc_uuid = uuid.UUID(task.library_document_id)
+    except ValueError:
+        return False
+    doc = db.query(LibraryDocument).filter_by(id=doc_uuid).first()
+    if doc is not None and doc.status in ("FAILED", "CANCELLED"):
+        doc.status = "PARSING"
+        doc.message = "同步重新处理中..."
+        db.commit()
+        return True
+    return False
+
+
+def _should_skip_reupload(mapping, content_hash: str, doc_row) -> bool:
+    """增量跳过判定：上一轮已同步且内容未变。
+
+    文档解析失败的（FAILED/CANCELLED）不跳过——重传同一文件重新提交解析
+    （外部解析服务可能是瞬时故障，重试解析有机会成功），避免「队列 success、
+    文档永远 FAILED」的反向不一致。
+    """
+    if mapping is None or mapping.status != "synced" or mapping.content_hash != content_hash:
+        return False
+    return doc_row is None or doc_row.status not in ("FAILED", "CANCELLED")
+
+
 def _process_batch_task(task_id: int) -> tuple[str, str]:
     """处理单个已认领任务；返回 (outcome, error)。"""
     with SyncSessionLocal() as db:
@@ -320,6 +357,9 @@ def _process_locked(db, task: SyncTask, source: SyncSource) -> tuple[str, str]:
     node_id = task.node_id or ""
     name = task.name
     try:
+        # 处理开始即对齐文档状态：旧失败终态 → PARSING（下载/上传期间知识列表
+        # 与同步队列同为「处理中」）；发生重置的文档本轮必定重新提交解析
+        retried_parse = _reset_stale_doc_for_retry(db, task)
         from app.services.dingtalk_operator import resolve_source_operator_sync
         op_union, _tag = resolve_source_operator_sync(db, source)
         dt = make_dingtalk_client(db, operator_union_id=op_union)
@@ -340,20 +380,20 @@ def _process_locked(db, task: SyncTask, source: SyncSource) -> tuple[str, str]:
         local_file, content_hash = engine._fetch(dt, node, name, base_dir, rel_dir)
 
         mapping = _mapping_for(db, source.id, node_id)
-        # 增量跳过：上一轮已同步且内容未变化（与 engine _process_node 同口径）
-        if (mapping is not None and mapping.status == "synced"
-                and mapping.content_hash == content_hash):
+        # 增量跳过：上一轮已同步且内容未变化（与 engine _process_node 同口径）；
+        # 文档解析失败的重新提交解析（_should_skip_reupload）
+        doc_row = None
+        if mapping is not None and mapping.document_id:
+            try:
+                doc_row = db.query(LibraryDocument).filter_by(
+                    id=uuid.UUID(mapping.document_id)).first()
+            except ValueError:
+                doc_row = None
+        if _should_skip_reupload(mapping, content_hash, doc_row) and not retried_parse:
             # 内容未变不重新上传；任务终态同样跟随文档解析状态——
             # 文档仍在 PARSING（上一轮提交的解析未收尾）时保持 running，
             # 由 tick refresh 段在解析结束时收尾，避免口径断裂
             if task is not None:
-                doc_row = None
-                if mapping.document_id:
-                    try:
-                        doc_row = db.query(LibraryDocument).filter_by(
-                            id=uuid.UUID(mapping.document_id)).first()
-                    except ValueError:
-                        doc_row = None
                 if doc_row is not None and doc_row.status == "PARSING":
                     task.status = "running"
                     task.finished_at = None

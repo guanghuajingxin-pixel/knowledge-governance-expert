@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import time
 import uuid
 
@@ -6,13 +7,15 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update
+from sqlalchemy import select, update, func
 from kb_common.database import get_session
 from kb_common.models import Setting, LLMProfile, RerankProfile, EmbeddingProfile
 from app.deps import require_role, get_principal, get_current_user
 from kb_common.config import get_settings
 from kb_common.clients import llm_client
 from app.services.agent.deerflow_runner import notify_reconfig
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/settings", tags=["settings"])
 
@@ -1105,6 +1108,19 @@ async def _sync_embedding_settings(s: AsyncSession) -> None:
     无生效配置时清空旧键：本地 RAG 检索/入库提示未配置。
     """
     row = (await s.execute(select(EmbeddingProfile).where(EmbeddingProfile.enabled == True))).scalar_one_or_none()  # noqa: E712
+    # 生效模型变更检测：文档库分段持久化向量按模型名判定过期，切换后需重跑回填
+    old_model_row = (await s.execute(
+        select(Setting).where(Setting.key == "embedding_model"))).scalar_one_or_none()
+    old_model = (old_model_row.value or "") if old_model_row else ""
+    new_model = row.model if row else ""
+    if old_model and new_model and old_model != new_model:
+        from kb_common.models import LibraryChunkEmbedding
+        stale = (await s.execute(select(func.count()).select_from(LibraryChunkEmbedding)
+                                 .where(LibraryChunkEmbedding.model == old_model))).scalar_one()
+        if stale:
+            logger.warning("向量模型 %s → %s：%d 条存量分段向量将按过期处理（查询降级词项召回），"
+                           "请运行 scripts/backfill_chunk_embeddings.py 重建",
+                           old_model, new_model, stale)
     values = ([("embedding_base_url", row.api_url), ("embedding_api_key", row.api_key), ("embedding_model", row.model)] if row
               else [("embedding_base_url", ""), ("embedding_api_key", ""), ("embedding_model", "")])
     for k, v in values:

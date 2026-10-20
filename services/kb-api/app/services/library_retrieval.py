@@ -1,7 +1,8 @@
 """Real retrieval over local MinerU chunks; never simulate vector matches.
 
-Chunks currently have no persistent vector index. Batch embeddings use a bounded
-content/model cache; all eligible leaf chunks participate before top-k selection.
+文档库分段向量持久化在 library_chunk_embeddings（入库时写入）：检索只 embed
+查询语句本身，分段向量经 app.services.chunk_vectors 从库读取并按库矩阵打分；
+wiki 库无持久化分段，仍走查询期实时 embed（页面小节，量级小）。
 """
 import asyncio
 import hashlib
@@ -300,19 +301,42 @@ async def search(session, lib, query, top_k, mode='hybrid', *, document_ids=None
               'title': name, 'keywords': c.important_keywords or []}
              for c, name in leaves]
     recall_count = max(1024, top_k * 5)
-    lexical_ids = await asyncio.to_thread(lexical_candidates, prepared, texts, recall_count) if weight < 1 else []
-    similarities = [None] * len(leaves)
+
+    async def _lexical_ids() -> list[int]:
+        # 持久化词项召回：读 library_chunk_tokens 做 BM25（弱 CPU 上 15k 分段
+        # 实时整库分词需 5 分钟+，必然超出调用方 60s 超时）；缺失小增量自愈，
+        # 未回填大缺失告警降级（不影响向量召回）
+        from app.services import chunk_vectors
+        try:
+            return await chunk_vectors.lexical_candidates_db(
+                session, lib.id, prepared, leaves, texts, recall_count)
+        except Exception as e:  # noqa: BLE001 - 词项链路异常不阻断检索
+            logger.warning("document library %s lexical recall failed: %s", lib.id, e)
+            return []
+
+    lexical_ids = await _lexical_ids() if weight < 1 else []
+    sim_by_id: dict = {}
     dense_ids = []
     if weight > 0:
         try:
-            vectors = await embeddings([query] + [c.content for c, _ in leaves], await config(session, 'embedding'))
-            similarities = [cosine(vectors[0], vector) for vector in vectors[1:]]
-            dense_ids = sorted(range(len(leaves)), key=lambda i: (-similarities[i], i))[:recall_count]
+            # 持久化分段向量：只 embed 查询语句本身，分段向量从库读取
+            # （入库时写入，大库整库实时 embed 会超出调用方 60s 超时）
+            cfg = await config(session, 'embedding')
+            query_vec = (await embeddings([query], cfg))[0]
+            from app.services import chunk_vectors
+            sim_by_id = await chunk_vectors.dense_scores(session, lib.id, cfg, query_vec, leaves)
+            if sim_by_id:
+                dense_ids = sorted((i for i, (c, _) in enumerate(leaves) if c.id in sim_by_id),
+                                   key=lambda i: (-sim_by_id[leaves[i][0].id], i))[:recall_count]
+            else:  # 一条可用向量都没有：与旧链路同口径降级纯全文
+                weight = 0.0
+                if not lexical_ids:
+                    lexical_ids = await _lexical_ids()
         except ValueError as e:  # 向量模型未配置/不可用/超时：降级纯全文，不阻断检索
             logger.warning("document library %s vector embedding failed, fallback to fulltext: %s", lib.id, e)
             weight = 0.0
             if not lexical_ids:
-                lexical_ids = await asyncio.to_thread(lexical_candidates, prepared, texts, recall_count)
+                lexical_ids = await _lexical_ids()
     # Stable sort preserves recall ranking when similarity scores tie.
     candidates = list(dict.fromkeys(lexical_ids + dense_ids))
     if not candidates:
@@ -324,7 +348,7 @@ async def search(session, lib, query, top_k, mode='hybrid', *, document_ids=None
     hits = []
     for i, token_score in zip(candidates, lexical):
         chunk, name = leaves[i]
-        semantic = similarities[i]
+        semantic = sim_by_id.get(chunk.id)
         score = blend(token_score, semantic or 0.0, weight)
         parent = by_id.get(chunk.parent_id)
         hits.append({'content': parent.content if parent else chunk.content,

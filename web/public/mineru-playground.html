@@ -444,7 +444,7 @@ function setHealth(state_, text) {
 function apiBase() {
   const v = $('cfgBase').value.trim();
   if (v) return v.replace(/\/+$/, '');
-  // 同源：Vite dev(3000) 有 /api/v1 → 8000 的代理；直接部署到 kb-api 同源也可用
+  // 同源：Vite dev(8080) 有 /api/v1 → 8000 的代理；直接部署到 kb-api 同源也可用
   return window.location.origin === 'file://' ? 'http://127.0.0.1:8000' : '';
 }
 function engineHeader() {
@@ -465,10 +465,10 @@ function netHint(e) {
   if (e && e.message === 'Failed to fetch') {
     const proto = window.location.protocol;
     if (proto === 'file:') {
-      return '（网络层失败：当前以 file:// 打开页面，直连 kb-api 会被 CORS 拦截。请改用 http://localhost:3000/mineru-playground.html 打开，并把「kb-api Base URL」留空走同源代理）';
+      return '（网络层失败：当前以 file:// 打开页面，直连 kb-api 会被 CORS 拦截。请改用 http://localhost:8080/mineru-playground.html 打开，并把「kb-api Base URL」留空走同源代理）';
     }
     if (!isLoopback()) {
-      return '（网络层失败：当前页面源 ' + window.location.origin + ' 是远程预览/托管域名，无法访问你本机的 kb-api。请在本机浏览器打开 http://localhost:3000/mineru-playground.html 并留空 Base URL）';
+      return '（网络层失败：当前页面源 ' + window.location.origin + ' 是远程预览/托管域名，无法访问你本机的 kb-api。请在本机浏览器打开 http://localhost:8080/mineru-playground.html 并留空 Base URL）';
     }
     return '（网络层失败：多为跨域 CORS 或后端未启动。请留空「kb-api Base URL」走同源代理；若确需直连 8000，须把当前源 ' + window.location.origin + ' 加入 kb-api CORS 白名单 services/kb-api/app/main.py）';
   }
@@ -862,12 +862,12 @@ $('btnDownJson').addEventListener('click', () => {
  * 初始化
  * =======================================================*/
 (function init() {
-  // 默认基址：如果页面挂在 3000（Vite）或 8000（kb-api）都可用同源；file:// 回退 8000
+  // 默认基址：如果页面挂在 8080（Vite）或 8000（kb-api）都可用同源；file:// 回退 8000
   if (window.location.protocol === 'file:') {
     $('cfgBase').value = 'http://127.0.0.1:8000';
-    log('警告：当前以 file:// 打开页面。浏览器直连 kb-api(8000) 会被 CORS 拦截（白名单仅 localhost:5173）。请改用 http://localhost:3000/mineru-playground.html 打开并留空 Base URL。', 'warn');
+    log('警告：当前以 file:// 打开页面。浏览器直连 kb-api(8000) 会被 CORS 拦截（白名单为 localhost:8080/5173）。请改用 http://localhost:8080/mineru-playground.html 打开并留空 Base URL。', 'warn');
   } else if (!isLoopback()) {
-    log('警告：当前页面源为 ' + window.location.origin + '（远程预览/托管域名），无法连通你本机的 kb-api。请在本机浏览器打开 http://localhost:3000/mineru-playground.html 并留空 Base URL。', 'warn');
+    log('警告：当前页面源为 ' + window.location.origin + '（远程预览/托管域名），无法连通你本机的 kb-api。请在本机浏览器打开 http://localhost:8080/mineru-playground.html 并留空 Base URL。', 'warn');
   }
   log('Playground 已加载。使用步骤：① 测试连接 → ② 登录 → ③ 选择文件 → ④ 开始解析');
   log('所有请求仅调用文档中列出的 kb-api OpenAPI 端点（/api/v1/auth/login、/api/v1/mineru/v1/*）', 'dim');

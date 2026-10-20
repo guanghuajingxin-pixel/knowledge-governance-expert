@@ -17,7 +17,7 @@ python3 deploy/keycloak/bootstrap_admin.py
 
 本次联调入口：门户 http://localhost:3200 、知识治理专家 http://localhost:3300 、统一管理 http://localhost:8180/admin/jack/console/ 。API/FAQ 分别运行于本机 8015/8016，复用本机业务数据库，仅为联调进程，不启动第二份调度任务。原有 3000/8000 进程及内网服务器尚未切换。
 
-Realm 初始导入默认只允许门户 `http://localhost:3200/*`、知识治理 `http://localhost:3000/*`；本机初始化脚本额外注册 `http://localhost:3300/*` 供联调。生产应替换为实际的 HTTPS origin，不得使用通配主机。
+Realm 初始导入默认只允许门户 `http://localhost:3200/*`、知识治理 `http://localhost:8080/*`（KGE 前端端口永久口径 8080，禁用 3000；服务器现有 realm 已同步替换）；本机初始化脚本额外注册 `http://localhost:3300/*` 供联调。生产应替换为实际的 HTTPS origin，不得使用通配主机。
 
 ## 应用接入
 

@@ -81,6 +81,41 @@ def cosine(a, b) -> float:
     return max(-1.0, min(1.0, sum(x*y for x, y in zip(a, b)) / norm))
 
 
+# ===== 持久化分段向量的 numpy 内核（大库矩阵打分，纯 Python cosine 供单条校验）=====
+
+def pack_vector(vector: list[float]) -> bytes:
+    """float32 小端 pack；输入先经 embeddings() 的 cosine(v,v) 校验。"""
+    import numpy as np
+    return np.asarray(vector, dtype=np.float32).tobytes()
+
+
+def unpack_matrix(blobs: list[bytes], dim: int) -> list | None:
+    """拼接字节流还原 (n, dim) 矩阵；长度不符/空输入返回 None（维度防御）。"""
+    import numpy as np
+    if dim <= 0 or not blobs or any(len(b) != dim * 4 for b in blobs):
+        return None
+    return np.frombuffer(b''.join(blobs), dtype=np.float32).reshape(len(blobs), dim)
+
+
+def matrix_cosine(matrix, query: list[float]):
+    """行归一化矩阵 × 归一化查询 → 每行余弦相似度（零范数行记 0）。
+
+    与逐条 cosine 同义；维度不匹配 raise ValueError（复用现有报错语义）。
+    """
+    import numpy as np
+    if matrix is None or not len(matrix):
+        return np.zeros(0, dtype=np.float32)
+    q = np.asarray(query, dtype=np.float32)
+    if q.shape[0] != matrix.shape[1] or not np.isfinite(q).all():
+        raise ValueError('向量维度不一致或包含无效值')
+    qnorm = float(np.linalg.norm(q))
+    if not qnorm:
+        raise ValueError('模型返回了零向量')
+    norms = np.linalg.norm(matrix, axis=1)
+    sims = (matrix @ (q / qnorm)) / np.where(norms > 0, norms, 1.0)
+    return np.clip(sims.astype(np.float32), -1.0, 1.0)
+
+
 def blend(token: float, semantic: float, weight: float) -> float:
     """RAGFlow rerank_with_knn / rerank_by_model formula; never rank-normalize."""
     if not 0 <= weight <= 1 or not all(math.isfinite(s) for s in (token, semantic)):
@@ -118,16 +153,40 @@ def lexical_candidates(query: Query, documents: list[dict], limit: int) -> list[
     query_weights = queryer().tw.weights(list(query.keywords), preprocess=False)
     fields = [(Counter(tokens(d['text'])), Counter(tokens(d.get('title', ''))),
                Counter(t for k in d.get('keywords', []) for t in tokens(k))) for d in documents]
+    return _bm25_rank(query_weights, fields, limit)
+
+
+def lexical_candidates_from_fields(query: Query, fields: list[tuple[dict, dict, dict]],
+                                   limit: int) -> list[int]:
+    """BM25 召回（预分词字段版）：fields 为持久化词频字典 (t, h, k) 三元组。
+
+    与 lexical_candidates 同公式同结果（词频字典即 Counter 的 dict 形态），
+    跳过查询期整库分词——弱 CPU 服务器上 15k 分段实时分词需 5 分钟以上，
+    BM25 召回必然超时；持久化后查询期解析 + 打分为秒级。
+    """
+    if not query.keywords or not fields:
+        return []
+    query_weights = queryer().tw.weights(list(query.keywords), preprocess=False)
+    return _bm25_rank(query_weights, fields, limit)
+
+
+def _bm25_rank(query_weights, fields, limit: int) -> list[int]:
+    """共享 BM25 内核：df 只统计查询词项（避免全库词表集合运算）。"""
     lengths = [[sum(field.values()) for field in row] for row in fields]
     averages = [sum(length[j] for length in lengths) / len(fields) or 1 for j in range(3)]
-    df = Counter(t for row in fields for t in set().union(*(set(f) for f in row)))
+    terms = [term for term, _ in query_weights]
+    df = Counter()
+    for row in fields:
+        for term in terms:
+            if term in row[0] or term in row[1] or term in row[2]:
+                df[term] += 1
     scores = []
     for i, row in enumerate(fields):
         score = 0.0
         for term, weight in query_weights:
             idf = math.log(1 + (len(fields) - df[term] + .5) / (df[term] + .5))
             for j, boost in enumerate((2, 10, 30)):
-                tf = row[j][term]
+                tf = row[j].get(term, 0)
                 if tf:
                     norm = tf + 1.2 * (.25 + .75 * lengths[i][j] / averages[j])
                     score += weight * idf * boost * tf * 2.2 / norm

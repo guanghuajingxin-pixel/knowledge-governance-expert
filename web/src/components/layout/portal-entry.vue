@@ -2,13 +2,21 @@
 import { ElTooltip } from 'element-plus'
 import portalMark from '@/assets/portal-mark.svg'
 
+// 门户统一占用主机默认端口（本地 dev :80 / 生产 Nginx 80，容器源站 3200）。
+// KGE 本体固定 8080（本地与生产同口径），因此入口 URL = 当前主机去掉端口（即 80），
+// 本地 http://localhost:8080 → 门户 http://localhost/，生产 http://10.10.166.2:8080 → http://10.10.166.2/。
+// 独立域名部署时用 VITE_PORTAL_URL 覆盖（构建期注入）。
 const defaultPortalUrl = new URL(window.location.origin)
-defaultPortalUrl.port = '3200'
+defaultPortalUrl.port = ''
 const portalUrl = import.meta.env.VITE_PORTAL_URL?.trim() || defaultPortalUrl.href
+
+// KGE 以 iframe 形式内嵌在门户内时（门户「知识治理专家」应用页），用户本就在门户里，
+// 再展示「跳回门户」入口只会造成「门户里再开门户」的冗余跳转，此时隐藏该按钮。
+const embeddedInPortal = window.self !== window.top
 </script>
 
 <template>
-  <ElTooltip content="打开杰克科技 AIGC 门户（新标签页）" placement="bottom">
+  <ElTooltip v-if="!embeddedInPortal" content="打开杰克科技 AIGC 门户（新标签页）" placement="bottom">
     <a
       class="portal-entry"
       :href="portalUrl"

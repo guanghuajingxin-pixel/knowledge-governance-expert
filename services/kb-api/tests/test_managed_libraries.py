@@ -96,6 +96,132 @@ class UpgradeAndIsolationTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValidationError): routes.ProcessingConfig(enable_children=True, chunk_method='table')
 
 
+class ChunkEmbeddingHookTests(unittest.IsolatedAsyncioTestCase):
+    """分段向量入库钩子：叶子才入向量、best-effort 不阻断解析/编辑。"""
+
+    async def test_apply_chunks_persists_index_for_leaves_only(self):
+        """叶子 = 子分段 + 无子块的父分段；有子块的父块不参与索引入库。"""
+        doc = SimpleNamespace(id=uuid.uuid4(), name='doc', status='', progress=0,
+                              message='', chunk_count=0, parsed_at=None)
+        session = AsyncMock()
+        with patch.object(routes, 'chunk_markdown', return_value=[
+                {'content': '父段内容', 'children': ['子段A', '子段B']},
+                {'content': '无子块父段', 'children': []}]), \
+             patch.object(routes, '_enhancement_llm_config', AsyncMock()), \
+             patch.object(routes, 'enhance_chunk', AsyncMock(return_value={})), \
+             patch.object(routes, '_store_parsed_markdown', AsyncMock()), \
+             patch('app.services.wiki.generator.auto_trigger_for_document', AsyncMock()), \
+             patch.object(routes, '_persist_chunk_index', AsyncMock()) as persist:
+            await routes._apply_chunks(session, doc, 'markdown', {})
+        leaf_ids = [c.content for c in persist.await_args.args[2]]
+        self.assertEqual(leaf_ids, ['子段A', '子段B', '无子块父段'])
+        self.assertEqual(doc.status, 'COMPLETED')
+
+    async def test_persist_chunk_index_writes_tokens_and_vectors(self):
+        from kb_common.models import LibraryChunkEmbedding, LibraryChunkToken
+        from app.services import library_retrieval as retrieval
+        from kb_common.rag.scoring import pack_vector
+
+        leaves = [SimpleNamespace(id=uuid.uuid4(), content='文本',
+                                  important_keywords=[], retrieval_enhancements={})]
+        doc = SimpleNamespace(id=uuid.uuid4(), name='手册')
+        session = AsyncMock()
+        cfg = {'base_url': 'http://e/v1', 'model': 'm', 'api_key': ''}
+        with patch.object(retrieval, 'config', AsyncMock(return_value=cfg)), \
+             patch.object(retrieval, 'embeddings', AsyncMock(return_value=[[.6, .8]])):
+            await routes._persist_chunk_index(session, doc, leaves)
+        add_all_rows = [call.args[0] for call in session.add_all.call_args_list]
+        token_rows, vector_rows = add_all_rows[0], add_all_rows[1]
+        self.assertIsInstance(token_rows[0], LibraryChunkToken)
+        self.assertEqual(token_rows[0].chunk_id, leaves[0].id)
+        self.assertIn('t', token_rows[0].tokens)
+        self.assertIsInstance(vector_rows[0], LibraryChunkEmbedding)
+        self.assertEqual(vector_rows[0].model, 'm')
+        self.assertEqual(vector_rows[0].embedding, pack_vector([.6, .8]))
+
+    async def test_persist_chunk_index_best_effort(self):
+        """向量模型未配置/失败 → 词项仍写入，且不抛异常（解析照常完成）。"""
+        from kb_common.models import LibraryChunkToken
+        from app.services import library_retrieval as retrieval
+
+        doc = SimpleNamespace(id=uuid.uuid4(), name='手册')
+        leaves = [SimpleNamespace(id=uuid.uuid4(), content='文本',
+                                  important_keywords=[], retrieval_enhancements={})]
+        with patch.object(retrieval, 'config',
+                          AsyncMock(return_value={'base_url': '', 'model': '', 'api_key': ''})):
+            session = AsyncMock()
+            await routes._persist_chunk_index(session, doc, leaves)
+            rows = session.add_all.call_args_list
+            self.assertEqual(len(rows), 1)  # 仅词项；向量未配置跳过
+            self.assertIsInstance(rows[0].args[0][0], LibraryChunkToken)
+
+        cfg = {'base_url': 'http://e/v1', 'model': 'm', 'api_key': ''}
+        with patch.object(retrieval, 'config', AsyncMock(return_value=cfg)), \
+             patch.object(retrieval, 'embeddings',
+                          AsyncMock(side_effect=ValueError('向量模型调用失败'))):
+            session = AsyncMock()
+            await routes._persist_chunk_index(session, doc, leaves)  # 不抛
+            self.assertEqual(len(session.add_all.call_args_list), 1)  # 词项已写，向量失败被吞
+
+    async def test_write_chunk_upserts_index_for_leaf(self):
+        """手工新增分段（叶子）同步 upsert 词项 + 向量。"""
+        from app.services import chunk_vectors, library_retrieval as retrieval
+
+        lib, doc = SimpleNamespace(id=1), SimpleNamespace(id=uuid.uuid4(), name='d', chunk_count=0)
+        body = routes.ChunkIn(content='新增分段内容')
+        session = AsyncMock()
+        # execute 顺序：max(position) → 子块存在性检查（无 → 叶子）
+        session.execute.side_effect = [
+            SimpleNamespace(scalar_one=lambda: -1),
+            SimpleNamespace(first=lambda: None),
+        ]
+        with patch.object(routes, 'chunk_context', AsyncMock(return_value=(lib, doc))), \
+             patch.object(routes, 'enhance_chunk', AsyncMock(return_value={})), \
+             patch.object(routes, '_enhancements_for', return_value={}), \
+             patch.object(routes, '_enhancement_llm_config', AsyncMock()), \
+             patch.object(routes, '_read_chunk_images', AsyncMock(return_value={})), \
+             patch.object(routes, 'parent_chunk_count', AsyncMock(return_value=1)), \
+             patch.object(retrieval, 'config',
+                          AsyncMock(return_value={'base_url': 'http://e/v1', 'model': 'm', 'api_key': ''})), \
+             patch.object(retrieval, 'embeddings', AsyncMock(return_value=[[.6, .8]])), \
+             patch.object(chunk_vectors, 'build_token_rows', return_value=[(uuid.uuid4(), {'t': {}})]) , \
+             patch.object(chunk_vectors, 'upsert_tokens', AsyncMock()) as upsert_tokens, \
+             patch.object(chunk_vectors, 'upsert_embeddings', AsyncMock()) as upsert_vectors:
+            await routes.write_chunk(1, doc.id, body, None, session)
+        upsert_tokens.assert_awaited_once()
+        upsert_vectors.assert_awaited_once()
+        _chunk_id, model, blob = upsert_vectors.await_args.args[1][0]
+        self.assertEqual(model, 'm')
+        self.assertEqual(len(blob), 8)  # float32×2 维
+        session.commit.assert_awaited()
+
+    async def test_write_chunk_skips_parent_with_children(self):
+        """编辑有子块的父分段：非检索单元，不写索引。"""
+        from app.services import chunk_vectors
+
+        parent = SimpleNamespace(id=uuid.uuid4(), parent_id=None, content='父段',
+                                 document_id=uuid.uuid4(), available=True,
+                                 important_keywords=[], retrieval_enhancements={},
+                                 position=0)
+        lib, doc = SimpleNamespace(id=1), SimpleNamespace(id=uuid.uuid4(), name='d', chunk_count=1)
+        body = routes.ChunkIn(content='改后的父段')
+        session = AsyncMock()
+        session.execute.return_value = SimpleNamespace(first=lambda: 'child-row')  # 有子块
+        with patch.object(routes, 'chunk_context', AsyncMock(return_value=(lib, doc))), \
+             patch.object(routes, 'enhance_chunk', AsyncMock(return_value={})), \
+             patch.object(routes, '_enhancements_for', return_value={}), \
+             patch.object(routes, '_enhancement_llm_config', AsyncMock()), \
+             patch.object(routes, '_read_chunk_images', AsyncMock(return_value={})), \
+             patch.object(routes, '_owned_chunk', AsyncMock(return_value=parent)), \
+             patch.object(routes, 'parent_chunk_count', AsyncMock(return_value=1)), \
+             patch.object(chunk_vectors, 'upsert_tokens', AsyncMock()) as upsert_tokens, \
+             patch.object(chunk_vectors, 'upsert_embeddings', AsyncMock()) as upsert_vectors:
+            await routes.write_chunk(1, doc.id, body, str(parent.id), session)
+        upsert_tokens.assert_not_called()
+        upsert_vectors.assert_not_called()
+        session.commit.assert_awaited()
+
+
 
 class MinerULocalTests(unittest.TestCase):
     def test_job_state_mapping(self):

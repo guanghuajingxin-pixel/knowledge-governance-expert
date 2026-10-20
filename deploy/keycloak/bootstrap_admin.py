@@ -35,7 +35,7 @@ def main():
     web_client = api('/clients?clientId=knowledge-web')[0]
     web_client['redirectUris'] = list(dict.fromkeys(web_client['redirectUris'] + ['http://localhost:3300/*']))
     web_client['webOrigins'] = list(dict.fromkeys(web_client['webOrigins'] + ['http://localhost:3300']))
-    web_client['attributes']['post.logout.redirect.uris'] = 'http://localhost:3000/*##http://localhost:3300/*'
+    web_client['attributes']['post.logout.redirect.uris'] = 'http://localhost:8080/*##http://localhost:3300/*'
     api('/clients/' + web_client['id'], web_client, 'PUT')
     scopes = api('/client-scopes')
     basic = next(scope for scope in scopes if scope['name'] == 'basic')

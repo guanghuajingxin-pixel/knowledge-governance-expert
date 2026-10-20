@@ -1,0 +1,58 @@
+# 知识治理专家前端容器（本地/通用 Docker 模式，宿主端口统一 8080——与生产
+# deploy/intranet/nginx-kge.conf 同口径；容器内部监听 80，由 compose 映射 8080）。
+# 反代目标由环境变量模板注入（compose 容器网络用服务名；容器前端+本机后端可覆盖为 host.docker.internal）
+server {
+    listen 80;
+    server_name _;
+    root /usr/share/nginx/html;
+    index index.html;
+
+    client_max_body_size 100M;
+
+    # SPA 外壳每次部署后必须重新校验，防止浏览器加载已下线的旧哈希包
+    location = /index.html {
+        add_header Cache-Control "no-cache, no-store, must-revalidate" always;
+        expires -1;
+        try_files $uri =404;
+    }
+
+    # FAQ 服务（更长前缀优先匹配，原路径透传）
+    location /api/v1/faq {
+        proxy_pass ${FAQ_API_UPSTREAM};
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_read_timeout 600s;
+        proxy_connect_timeout 10s;
+    }
+
+    # kb-api（含智能问答 SSE 长连接）
+    location /api/v1 {
+        proxy_pass ${KB_API_UPSTREAM};
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_buffering off;
+        proxy_read_timeout 3600s;
+        proxy_connect_timeout 10s;
+    }
+
+    # /api/* 兜底：显式 location 未命中的 /api 请求转给 kb-api，
+    # 由 FastAPI 返回结构化 JSON 404，避免落入 SPA try_files 的 HTML 405
+    location /api/ {
+        proxy_pass ${KB_API_UPSTREAM};
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_buffering off;
+        proxy_read_timeout 300s;
+        proxy_connect_timeout 10s;
+    }
+
+    # SPA 前端
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}

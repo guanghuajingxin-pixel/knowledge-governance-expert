@@ -9,7 +9,7 @@
 ```
                      ┌─────────────────────────────────────────┐
    Web (Vue3)        │  本地原生进程（开发模式）                │
-   :3000 (vite)      │                                         │
+   :8080 (vite)      │                                         │
         │            │  kb-api:8000      FastAPI（模型外接）   │
         │  /api/v1   │   ├ 文档/目录/检索/问答/认证/设置        │
         │  /api/v1/  │   ├ DeerFlow Runner (SSE 转译/回退)     │
@@ -140,8 +140,8 @@ bash scripts/start-mineru.sh         # 本地 MinerU 文档解析引擎:2028（�
 # 不启动 sidecar 也可问答：kb-api 健康检查失败时自动回退内置 LangGraph 工作流
 # 不启动 MinerU 也能读办公文档：自动降级 python-pptx/python-docx 等即时解析（图片型/扫描件效果弱于 MinerU）
 
-# 6. 前端由 start-dev.sh 一并启动（web :3000 / portal :80）；手动方式：
-cd web && pnpm install && pnpm dev   # http://localhost:3000
+# 6. 前端由 start-dev.sh 一并启动（web :8080（永久口径，禁用 3000）/ portal :80）；手动方式：
+cd web && pnpm install && pnpm dev   # http://localhost:8080
 cd portal && PORTAL_API_TARGET=http://127.0.0.1:8000 pnpm dev
 ```
 
@@ -159,7 +159,7 @@ cd portal && PORTAL_API_TARGET=http://127.0.0.1:8000 pnpm dev
 
 `AUTH_PROVIDER=keycloak` + SSH 隧道调用 **10.10.166.2** 上的身份中心——本地调试也一样，不依赖本地 Keycloak 容器（`jack-identity-*` 保持停止即可）。隧道由 `scripts/dev-sso-tunnel.sh` 维护（start-dev.sh 自动拉起）。
 
-原理：远端 Keycloak 的 hostname 即 `http://127.0.0.1:8180`，与隧道本地地址一致——浏览器登录回调、后端 JWKS 拉取、token issuer 校验三者天然对齐；远端 `knowledge-web` 客户端已放行 `http://localhost:3000/*` 回调。登录账号用远端身份中心的业务账号。首次在本地库登录某账号时若报「该用户名已有本地账号」（409），需在本地 `user_identities` 表手工补绑该身份（issuer = `http://127.0.0.1:8180/realms/jack`，subject = Keycloak 用户 UUID）。
+原理：远端 Keycloak 的 hostname 即 `http://127.0.0.1:8180`，与隧道本地地址一致——浏览器登录回调、后端 JWKS 拉取、token issuer 校验三者天然对齐；远端 `knowledge-web` 客户端已放行 `http://localhost:8080/*` 回调（KGE 前端端口永久口径 8080，禁用 3000）。登录账号用远端身份中心的业务账号。首次在本地库登录某账号时若报「该用户名已有本地账号」（409），需在本地 `user_identities` 表手工补绑该身份（issuer = `http://127.0.0.1:8180/realms/jack`，subject = Keycloak 用户 UUID）。
 
 注意：门户回调仅在 `http://localhost:3200` 放行；用 `http://127.0.0.1:3200` 访问门户时 Keycloak 会拒绝回调（Invalid redirect_uri）。仓库根 `.env` 的 `AUTH_PROVIDER` 仅作为兜底基线，`start-dev.sh` 启动时的环境变量优先；不再提供 `DEV_AUTH_TOKEN` 写死令牌的调试旁路登录（已移除）。
 
@@ -347,7 +347,7 @@ KB_API_INTERNAL_URL=http://kb-api:8000
 | `uv sync` 报 `kb-common` 找不到 | 在 `services/kb-common` 先 `uv sync`；Docker 构建已通过 repo-root context 解决 |
 | 端口 8000/8004 被占用 | `lsof -i :8000` 找到进程；或改 uvicorn `--port` |
 | dev-network 不存在 | 先启 dev-services compose：`docker compose ls` 找配置文件 |
-| HiAgent 页提示「当前域名无访问权限」 | HiAgent 智能体配置了网站访问白名单（WebSiteList）；到 HiAgent 控制台把当前访问域名（如 `http://localhost:5173`）加入 WebSDK 嵌入白名单，或清空白名单允许所有域名 |
+| HiAgent 页提示「当前域名无访问权限」 | HiAgent 智能体配置了网站访问白名单（WebSiteList）；到 HiAgent 控制台把当前访问域名（如 `http://localhost:8080`）加入 WebSDK 嵌入白名单，或清空白名单允许所有域名 |
 | HiAgent 页一直加载/脚本加载失败 | 需能访问外网 `hia.volcenginepaas.com`；公司网络拦截时放开该域名，或检查 appKey 是否有效（appKey/baseUrl 在 [hiagent/index.vue](web/src/views/hiagent/index.vue) 顶部常量维护） |
 
 ## 智能问答交互（前端）

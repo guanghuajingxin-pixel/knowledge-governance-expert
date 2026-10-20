@@ -4,7 +4,7 @@ from app.routes import kb, directory, entry, search
 
 app = FastAPI(title="FAQ Service")
 app.add_middleware(CORSMiddleware,
-                   allow_origins=["http://localhost:5173", "http://localhost:3000"],
+                   allow_origins=["http://localhost:5173", "http://localhost:8080", "http://127.0.0.1:8080"],
                    allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 for r in (kb.router, directory.router, entry.router, search.router):
     app.include_router(r)

@@ -90,7 +90,7 @@ async def _get_frontend_base_url() -> str:
         )).scalar_one_or_none()
     if row and row.value:
         return row.value.rstrip("/")
-    return "http://localhost:5173"
+    return "http://localhost:8080"
 
 
 # ===================== 列表 / 新建 / 编辑 / 删除 =====================

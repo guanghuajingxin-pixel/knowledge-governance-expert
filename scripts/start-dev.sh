@@ -18,7 +18,7 @@
 #   scripts/start-dev.sh <mode> restart             # 重启
 #   scripts/start-dev.sh status                    # 查看状态（无需模式）
 #
-# 进程：kb-api :8000 / faq-service :8004 / web :3000 / portal :80
+# 进程：kb-api :8000 / faq-service :8004 / web :8080（永久口径，禁用 3000）/ portal :80
 # PID 与日志：/tmp/kge-dev/<name>.{pid,log}（kb-worker 默认不启动，需要时手动：
 #   cd services/kb-api && uv run celery -A app.worker worker -Q ingestion -l info）
 set -euo pipefail
@@ -161,14 +161,14 @@ start_all() {
     uv run uvicorn app.main:app --reload --port 8000
   start_proc faq-service "$REPO/services/faq-service" "http://127.0.0.1:8004/health" \
     uv run uvicorn app.main:app --reload --port 8004
-  start_proc web "$REPO/web" "http://127.0.0.1:3000" \
+  start_proc web "$REPO/web" "http://127.0.0.1:8080" \
     pnpm dev
   start_proc portal "$REPO/portal" "http://127.0.0.1:80" \
     env PORTAL_API_TARGET=http://127.0.0.1:8000 pnpm dev
 
   echo
   echo "[start-dev] 全部进程已按 $mode 模式启动；kb-api 就绪约需 5-15s"
-  echo "[start-dev] 入口：web http://127.0.0.1:3000 · 门户 http://127.0.0.1"
+  echo "[start-dev] 入口：web http://127.0.0.1:8080 · 门户 http://127.0.0.1"
 }
 
 stop_all() {
@@ -198,5 +198,5 @@ action="${2:-start}"
 case "$action" in
   start) start_all "$mode" ;;
   restart) stop_all; sleep 1; start_all "$mode" ;;
-  *) echo "未知子命令：$action（可选 start|restart；status/stop 直接作首参数）" >&2; exit 1 ;;
+  *) echo "未知子命令：${action}（可选 start|restart；status/stop 直接作首参数）" >&2; exit 1 ;;
 esac

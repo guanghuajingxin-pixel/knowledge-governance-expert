@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime, date
-from sqlalchemy import String, Text, Integer, BigInteger, Boolean, DateTime, Date, JSON, ForeignKey, Float, func, UniqueConstraint, text as sa_text
+from sqlalchemy import String, Text, Integer, BigInteger, Boolean, DateTime, Date, JSON, ForeignKey, Float, LargeBinary, func, UniqueConstraint, text as sa_text
 from sqlalchemy.dialects.postgresql import UUID, ARRAY
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -734,6 +734,36 @@ class LibraryChunk(Base):
     position: Mapped[int] = mapped_column(Integer, default=0)
     child_index: Mapped[int | None] = mapped_column(Integer, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class LibraryChunkEmbedding(Base):
+    """分段持久化向量：入库时写入，检索时只 embed 查询语句本身。
+
+    chunk_id 与检索单元（叶子分段）一一对应，随分段删除/重分段由 FK 级联清理；
+    model 记录生成向量所用模型名，模型切换后旧行判定过期（查询降级词项召回，
+    由回填脚本或查询自愈重建）；维度由 len(embedding)//4 隐式携带，
+    float32 小端 pack（numpy tobytes）。
+    """
+    __tablename__ = "library_chunk_embeddings"
+    chunk_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("library_chunks.id", ondelete="CASCADE"), primary_key=True)
+    model: Mapped[str] = mapped_column(String(200), nullable=False)
+    embedding: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class LibraryChunkToken(Base):
+    """分段持久化词项统计：入库时分词一次，检索期不再整库实时分词。
+
+    弱 CPU 服务器上 15k 分段的 RAGFlow 分词单次需 5 分钟以上（BM25 召回
+    必然超时）；tokens 存 {"t": {词: 次数}, "h": {…}, "k": {…}} 三字段
+    词频字典（正文/标题/关键词），查询期 json 解析 + BM25 打分为秒级。
+    """
+    __tablename__ = "library_chunk_tokens"
+    chunk_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("library_chunks.id", ondelete="CASCADE"), primary_key=True)
+    tokens: Mapped[dict] = mapped_column(JSON, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
 # ===== Wiki 知识库（卡帕提 LLM Wiki 模式）=====

@@ -1,12 +1,21 @@
+import asyncio
 import math
 import unittest
 from types import SimpleNamespace as NS
 from uuid import uuid4
 from unittest.mock import AsyncMock, Mock, patch
 
-from app.services import library_retrieval as retrieval
+from app.services import chunk_vectors, library_retrieval as retrieval
 from kb_common.rag import searcher, reranker
-from kb_common.rag.scoring import cosine, term_similarity
+from kb_common.rag.scoring import cosine, term_similarity, lexical_candidates
+
+
+EMB_CFG = {'base_url': 'http://embedding/v1', 'api_key': '', 'model': 'test-model'}
+
+
+async def _lexical_db_shim(session, library_id, prepared, leaves, texts, recall_count):
+    """测试替身：持久化词项召回退回旧内存口径（断言语义不变）。"""
+    return await asyncio.to_thread(lexical_candidates, prepared, texts, recall_count)
 
 
 def chunk(text, parent=None, ident=None):
@@ -48,13 +57,50 @@ class ScoringTests(unittest.TestCase):
 
 
 class RetrievalTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        patcher = patch.object(chunk_vectors, 'lexical_candidates_db', _lexical_db_shim)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     async def test_vector_retrieves_without_literal_overlap(self):
         rows = [(chunk('带薪休假如何申请'), '员工手册'), (chunk('服务器重启'), '运维手册')]
-        with patch.object(retrieval, 'config', AsyncMock(return_value={})), patch.object(retrieval, 'embeddings', AsyncMock(return_value=[[1,0], [.8,.6], [0,1]])):
+        sims = {rows[0][0].id: .8, rows[1][0].id: 0.0}
+        with patch.object(retrieval, 'config', AsyncMock(return_value=EMB_CFG)), \
+             patch.object(retrieval, 'embeddings', AsyncMock(return_value=[[1, 0]])) as embed, \
+             patch.object(chunk_vectors, 'dense_scores', AsyncMock(return_value=sims)):
             hits = await retrieval.search(session_for(rows), NS(id=1), '年假办理', 1, 'vector')
         self.assertEqual(hits[0]['content'], '带薪休假如何申请')
         self.assertAlmostEqual(hits[0]['score'], .8)
         self.assertEqual(hits[0]['token_similarity'], 0)
+        # 回归断言（整库实时 embed 超时 bug）：只 embed 查询语句本身
+        embed.assert_awaited_once_with(['年假办理'], EMB_CFG)
+
+    async def test_dense_missing_all_degrades_to_fulltext(self):
+        """一条可用向量都没有 → 与旧链路同口径降级纯全文（weight=0）。"""
+        rows = [(chunk('合同审批'), ''), (chunk('合同审批'), '')]
+        with patch.object(retrieval, 'config', AsyncMock(return_value=EMB_CFG)), \
+             patch.object(retrieval, 'embeddings', AsyncMock(return_value=[[1, 0]])), \
+             patch.object(chunk_vectors, 'dense_scores', AsyncMock(return_value={})):
+            hits = await retrieval.search(session_for(rows), NS(id=1), '合同审批流程', 5, 'hybrid')
+        self.assertTrue(hits)
+        for hit in hits:
+            self.assertEqual(hit['score_type'], 'ragflow_token')
+            self.assertIsNone(hit['vector_similarity'])
+
+    async def test_dense_partial_missing_scores_only_covered(self):
+        """部分分段无向量：缺失块 semantic=None（blend 按 0），命中块正常打分。"""
+        covered, uncovered = chunk('合同审批'), chunk('合同审批流程')
+        rows = [(covered, ''), (uncovered, '')]
+        sims = {covered.id: .8}
+        with patch.object(retrieval, 'config', AsyncMock(return_value=EMB_CFG)), \
+             patch.object(retrieval, 'embeddings', AsyncMock(return_value=[[1, 0]])), \
+             patch.object(chunk_vectors, 'dense_scores', AsyncMock(return_value=sims)):
+            hits = await retrieval.search(session_for(rows), NS(id=1), '合同审批流程', 5, 'hybrid')
+        by_segment = {h['segment_id']: h for h in hits}
+        self.assertAlmostEqual(by_segment[str(covered.id)]['vector_similarity'], .8)
+        self.assertIsNone(by_segment[str(uncovered.id)]['vector_similarity'])
+        self.assertGreater(by_segment[str(covered.id)]['score'],
+                           by_segment[str(uncovered.id)]['score'])
 
     async def test_fulltext_is_model_free_and_not_constant(self):
         rows = [(chunk('合同审批流程'), ''), (chunk('合同审批'), ''), (chunk('天气'), '')]
@@ -66,7 +112,10 @@ class RetrievalTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_hybrid_formula_and_threshold(self):
         rows = [(chunk('合同审批'), '')]
-        with patch.object(retrieval, 'config', AsyncMock(return_value={})), patch.object(retrieval, 'embeddings', AsyncMock(return_value=[[1,0], [.8,.6]])):
+        sims = {rows[0][0].id: .8}
+        with patch.object(retrieval, 'config', AsyncMock(return_value=EMB_CFG)), \
+             patch.object(retrieval, 'embeddings', AsyncMock(return_value=[[1, 0]])), \
+             patch.object(chunk_vectors, 'dense_scores', AsyncMock(return_value=sims)):
             hits = await retrieval.search(session_for(rows), NS(id=1), '合同审批流程', 5, 'hybrid', threshold=.65)
         self.assertAlmostEqual(hits[0]['score'], .3 * 0.4060327034971552 + .7 * .8)
 

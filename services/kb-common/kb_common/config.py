@@ -56,10 +56,17 @@ class Settings(BaseSettings):
     embedding_api_key: str = ""
     embedding_model: str = ""        # 如 BAAI/bge-m3（API 版）；维度须与既有 ES 索引一致（embed_dim）
     embed_dim: int = 1024
+    # 模型服务短超时：不可达时单次调用最多等这么久（曾为 30s——服务宕机时
+    # 检索串行多库累计 60~95s，拖垮连接池后全应用卡顿）
+    embedding_timeout_seconds: float = 5.0
+    # 文档库分段向量的进程内矩阵缓存预算（MB）：查询时按库缓存已归一化的 float32
+    # 向量矩阵（大库可达 15k×2560×4B≈150MB），0=禁用缓存（每次直读 PG）。
+    library_vector_cache_mb: int = Field(default=256, ge=0)
     # 重排模型：Jina/SiliconFlow 风格 /rerank 端点；留空时检索跳过重排（RRF/BM25 排序兜底）
     rerank_api_url: str = ""         # 如 https://api.siliconflow.cn/v1/rerank
     rerank_api_key: str = ""
     rerank_model: str = ""           # 如 BAAI/bge-reranker-v2-m3
+    rerank_timeout_seconds: float = 5.0
     mineru_api_url: str = "https://mineru.net/api/v4"
     mineru_api_key: str = ""          # 运行时可被 settings 表覆盖
     # 本地 MinerU 解析引擎（mineru-api 常驻服务，见 services/mineru）；

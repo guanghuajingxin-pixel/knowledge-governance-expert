@@ -45,6 +45,18 @@ services:
     env_file: .env.docker
     networks: [dev-network]
 
+  # KGE 前端（nginx 托管 dist + 反代 API）。端口永久约定 8080，与生产
+  # deploy/intranet/nginx-kge.conf 及门户卡片 VITE_KNOWLEDGE_URL 同口径。
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    ports: ["8080:80"]
+    depends_on:
+      - kb-api
+      - faq-service
+    networks: [dev-network]
+
 networks:
   dev-network:
     external: true

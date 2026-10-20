@@ -19,7 +19,7 @@
 ```mermaid
 flowchart TB
     subgraph L1["接入层"]
-        WEB["Web 前端<br/>Vue 3 + TypeScript + Element Plus<br/>Vite :5173 / Nginx :8080"]
+        WEB["Web 前端<br/>Vue 3 + TypeScript + Element Plus<br/>Vite :8080 / Nginx :8080"]
         DINGAPP["钉钉客户端<br/>(机器人对话 / 知识库源)"]
     end
 
@@ -86,7 +86,7 @@ flowchart TB
 
 ```mermaid
 flowchart LR
-    WEB["Web 前端<br/>:5173"]
+    WEB["Web 前端<br/>:8080"]
 
     subgraph APPS["应用进程"]
         KBAPI["kb-api<br/>:8000"]
@@ -372,7 +372,7 @@ dingtalk_folder_stats                 # 钉钉目录快照（治理/采集复用
 ```mermaid
 flowchart TB
     subgraph M1["模式 1：本地开发（推荐）"]
-        V1["vite :5173"] --> A1["uvicorn kb-api :8000<br/>uvicorn faq :8004<br/>celery -Q ingestion<br/>start-deerflow.sh :2027<br/>start-mineru.sh :2028"]
+        V1["vite :8080"] --> A1["uvicorn kb-api :8000<br/>uvicorn faq :8004<br/>celery -Q ingestion<br/>start-deerflow.sh :2027<br/>start-mineru.sh :2028"]
         A1 --> I1["dev-services compose<br/>PG/Redis/ES/MinIO/kkFileView<br/>(external dev-network)"]
     end
 

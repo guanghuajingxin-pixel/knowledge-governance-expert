@@ -5,6 +5,7 @@ job 完成时下载 markdown → 本地分段器按库分段规则切块 → Lib
 分段 CRUD / 导出 / 检索测试全部本地化实现。
 """
 import asyncio
+import logging
 import re
 import uuid
 import zipfile
@@ -25,7 +26,10 @@ from app.services.knowledge_engines.chunk_enhancer import enhance_chunk, referen
 from kb_common.config import get_settings
 from kb_common.database import get_session
 from kb_common.models import (EmbeddingProfile, KnowledgeLibrary, LibraryChunk,
-                              LibraryDocument, RerankProfile, Setting, User)
+                              LibraryChunkEmbedding, LibraryChunkToken, LibraryDocument,
+                              RerankProfile, Setting, User)
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/document-libraries", tags=["document-libraries"],
     dependencies=[Depends(require_role("super_admin", "admin", "editor"))])
@@ -613,6 +617,38 @@ def _job_message(job: dict) -> str:
     return str(job.get("error") or "")
 
 
+async def _persist_chunk_index(s: AsyncSession, doc, leaf_chunks: list[LibraryChunk]):
+    """叶子分段持久化索引入库（词项 + 向量，同一事务随分段落库）。best-effort：
+
+    - 词项（本地分词，无外部依赖）：缺失意味着 BM25 召回退化为查询期实时
+      分词（大库必然超时），但仍不阻断入库（查询期自愈/回填兜底）；
+    - 向量（外部 embedding API）：失败/未配置仅告警（词项检索不受影响）。
+    """
+    if not leaf_chunks:
+        return
+    from app.services import chunk_vectors
+    # 词项：本地分词，失败仅告警
+    try:
+        token_rows = await asyncio.to_thread(chunk_vectors.build_token_rows, leaf_chunks, doc.name)
+        s.add_all([LibraryChunkToken(chunk_id=cid, tokens=tok) for cid, tok in token_rows])
+    except Exception as e:  # noqa: BLE001 - 词项失败不阻断解析状态机
+        logger.warning("文档 %s 分段词项入库失败（待自愈/回填）: %s", doc.id, e)
+    # 向量：外部 API，失败仅告警
+    try:
+        from app.services.library_retrieval import config as lr_config, embeddings
+        cfg = await lr_config(s, 'embedding')
+        if not cfg['base_url'] or not cfg['model']:
+            logger.info("向量模型未配置，文档 %s 跳过分段向量入库", doc.id)
+            return
+        vectors = await embeddings([chunk_vectors.embed_text(c.content) for c in leaf_chunks], cfg)
+        s.add_all([LibraryChunkEmbedding(chunk_id=c.id, model=cfg['model'],
+                                         embedding=chunk_vectors.pack_vector(v))
+                   for c, v in zip(leaf_chunks, vectors) if v])
+        logger.info("文档 %s 分段向量已入库 %d 条", doc.id, len(leaf_chunks))
+    except Exception as e:  # noqa: BLE001 - 向量失败不阻断解析状态机
+        logger.warning("文档 %s 分段向量入库失败（词项检索仍可用，待自愈/回填）: %s", doc.id, e)
+
+
 async def _apply_chunks(s: AsyncSession, doc, markdown: str, processing: dict,
                         partial: bool = False, enhancements: dict | None = None,
                         images: dict[str, bytes] | None = None):
@@ -641,6 +677,7 @@ async def _apply_chunks(s: AsyncSession, doc, markdown: str, processing: dict,
                           for (parent_index, child_index, _), result in zip(targets, metadata)}
     await s.execute(delete(LibraryChunk).where(LibraryChunk.document_id == doc.id))
     count = 0
+    leaf_chunks: list[LibraryChunk] = []   # 检索单元（叶子）：向量入库的目标
     for position, piece in enumerate(pieces):
         parent = LibraryChunk(document_id=doc.id, content=piece["content"], available=True,
                               important_keywords=[],
@@ -651,10 +688,15 @@ async def _apply_chunks(s: AsyncSession, doc, markdown: str, processing: dict,
         if piece["children"]:
             await s.flush()  # 需要 parent.id 建立父子关系
             for child_index, text in enumerate(piece["children"]):
-                s.add(LibraryChunk(document_id=doc.id, parent_id=parent.id, content=text,
-                                   available=True, important_keywords=[], position=position,
-                                   retrieval_enhancements=metadata_by_target.get((position, child_index), {}),
-                                   child_index=child_index))
+                child = LibraryChunk(document_id=doc.id, parent_id=parent.id, content=text,
+                                     available=True, important_keywords=[], position=position,
+                                     retrieval_enhancements=metadata_by_target.get((position, child_index), {}),
+                                     child_index=child_index)
+                s.add(child)
+                leaf_chunks.append(child)
+        else:
+            leaf_chunks.append(parent)
+    await _persist_chunk_index(s, doc, leaf_chunks)
     doc.status, doc.progress = "COMPLETED", 1.0
     doc.message = "部分内容解析失败，请检查分段" if partial else ""
     doc.chunk_count = count
@@ -1198,6 +1240,29 @@ async def write_chunk(library_id: int, doc_id: uuid.UUID, body: ChunkIn, chunk_i
                              retrieval_enhancements=enhancement_data, position=position)
         s.add(chunk)
         await s.flush()
+    # 叶子分段持久化索引同步（词项 + 向量，新增/编辑同一口径，commit 前同事务
+    # best-effort）：父块（有子块）非检索单位，跳过
+    try:
+        is_leaf = chunk.parent_id is not None or not (await s.execute(
+            select(LibraryChunk.id).where(LibraryChunk.parent_id == chunk.id).limit(1))).first()
+        if is_leaf:
+            from app.services import chunk_vectors
+            # 词项（本地分词）
+            try:
+                token_rows = await asyncio.to_thread(
+                    chunk_vectors.build_token_rows, [chunk], doc.name)
+                await chunk_vectors.upsert_tokens(s, token_rows)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("分段 %s 词项更新失败（下次查询自愈）: %s", chunk.id, e)
+            # 向量（外部 API）
+            from app.services.library_retrieval import config as lr_config, embeddings
+            cfg = await lr_config(s, 'embedding')
+            if cfg['base_url'] and cfg['model']:
+                vec = (await embeddings([chunk_vectors.embed_text(chunk.content)], cfg))[0]
+                await chunk_vectors.upsert_embeddings(
+                    s, [(chunk.id, cfg['model'], chunk_vectors.pack_vector(vec))])
+    except Exception as e:  # noqa: BLE001 - 索引失败不阻断分段编辑
+        logger.warning("分段 %s 索引更新失败（下次查询自愈）: %s", chunk.id, e)
     doc.chunk_count = await parent_chunk_count(s, doc.id)
     await s.commit()
     return {"ok": True, "data": chunk_out(chunk)}

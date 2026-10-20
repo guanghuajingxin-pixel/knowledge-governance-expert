@@ -75,15 +75,10 @@ async def lifespan(app: FastAPI):
         import logging
         logging.getLogger(__name__).warning("连接池预热任务启动失败（不影响启动）: %r", e)
 
-    # 检索内核预热：RAGFlow 分词器词典懒加载 1s 级，放启动阶段吃掉，
-    # 避免首个检索请求承担冷启动成本（线程内执行，不阻塞事件循环）。
-    try:
-        import logging
-        from kb_common.rag import scoring as _rag_scoring
-        await asyncio.wait_for(asyncio.to_thread(_rag_scoring.warmup), timeout=15)
-        logging.getLogger(__name__).info("检索内核（分词器）预热完成")
-    except Exception as e:  # noqa: BLE001 — 预热失败只回退到旧的懒加载行为
-        logging.getLogger(__name__).warning("检索内核预热失败（首个请求将承担加载成本）: %r", e)
+    # 检索内核预热（RAGFlow 分词器词典加载）：由下方 scoring-warmup 后台线程
+    # 承担。历史实现是 asyncio.wait_for(to_thread(warmup), timeout=15)——弱 CPU
+    # 词典加载实测 ~25s，每次启动必然 15s 超时告警（TimeoutError）且阻塞
+    # lifespan 15s；线程版不阻塞启动、不限时长、失败自动重试。
 
     # 旧版单值配置 → LLM profiles 表一次性迁移（模型配置页下线后存量配置仍可见可管理）
     try:
@@ -101,6 +96,30 @@ async def lifespan(app: FastAPI):
     # （看板「部门知识库上传进度」实时聚合该快照表，随刷新自动更新）
     from app.routes import knowledge_gaps
     knowledge_gaps.start_gap_refresh_scheduler()
+
+    # 检索内核预热（RAGFlow 分词/同义词典懒加载，弱 CPU 实测约 25s）：后台
+    # 线程执行，不阻塞启动、不限时长；偶发失败自动重试（60s 间隔 ×3）。
+    import threading as _warm_threading
+    import time as _warm_time
+
+    def _warm_scoring_kernel() -> None:
+        import logging
+        for attempt in range(3):
+            try:
+                from kb_common.rag.scoring import warmup
+                warmup()
+                logging.getLogger(__name__).info("检索内核预热完成（后台线程）")
+                return
+            except Exception as e:  # noqa: BLE001 — 预热失败只回退到懒加载
+                if attempt == 2:
+                    logging.getLogger(__name__).warning(
+                        "检索内核预热失败（首个请求将承担加载成本）: %s", e,
+                        exc_info=True)
+                else:
+                    _warm_time.sleep(60)
+
+    _warm_threading.Thread(target=_warm_scoring_kernel,
+                           name="scoring-warmup", daemon=True).start()
 
     # 同步调度器（syncBatch 批处理作业注册 + 定时编目遗留作业清理；自动同步由
     # 事件监听驱动）。注册/清理是对 admin 的**同步 HTTP**——曾在 admin 僵死时把
@@ -214,8 +233,7 @@ if _cors_env:
 else:
     _cors_origins = [
         "http://localhost:5173",   # vite dev
-        "http://localhost:8080",   # 本地生产端口
-        "http://localhost:3000",   # 常见前端调试端口
+        "http://localhost:8080",   # 本地/生产前端统一端口（永久口径，禁用 3000）
         "http://127.0.0.1:5173",
         "http://127.0.0.1:8080",
         "http://10.10.166.2:8080", # 内网 AI-KB 生产

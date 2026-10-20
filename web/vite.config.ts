@@ -34,7 +34,8 @@ export default defineConfig({
     },
   },
   server: {
-    port: 3000,
+    // KGE 前端端口永久约定 8080（与生产 10.10.166.2:8080 及 portal 端 VITE_KNOWLEDGE_URL 口径一致；禁止使用 3000）
+    port: 8080,
     host: true,
     proxy: {
       '/api/openapi': { target: process.env.KB_API_TARGET || 'http://127.0.0.1:8000', changeOrigin: true },

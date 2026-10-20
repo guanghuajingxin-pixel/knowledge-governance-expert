@@ -674,6 +674,59 @@ class SyncQueueConsistencyTests(unittest.TestCase):
             self.assertEqual(run.failed_count, 1)    # b：FAILED → failed
             self.assertEqual(run.status, 'running')  # c 未终态，run 继续跑
 
+    def test_reset_stale_doc_for_retry_aligns_processing_state(self):
+        """任务开始处理时旧失败终态 → PARSING：知识列表与同步队列同为「处理中」。"""
+        from app.services.sync import batch
+        with self.sessions() as db:
+            run = self._mk_run(db, total=2)
+            failed_doc = self.doc_cls(library_id=1, status='FAILED', message='解析失败')
+            done_doc = self.doc_cls(library_id=1, status='COMPLETED')
+            db.add(failed_doc); db.add(done_doc); db.flush()
+            t1 = SyncTask(run_id=run.id, source_id=1, name='a', action='update',
+                          status='running', library_document_id=str(failed_doc.id))
+            t2 = SyncTask(run_id=run.id, source_id=1, name='b', action='update',
+                          status='running', library_document_id=str(done_doc.id))
+            t3 = SyncTask(run_id=run.id, source_id=1, name='c', action='update',
+                          status='running', library_document_id=None)
+            db.add_all([t1, t2, t3]); db.commit()
+
+        with patch.object(batch, 'LibraryDocument', self.doc_cls):
+            with self.sessions() as db:
+                self.assertTrue(batch._reset_stale_doc_for_retry(db, db.get(SyncTask, t1.id)))
+                self.assertFalse(batch._reset_stale_doc_for_retry(db, db.get(SyncTask, t2.id)))
+                self.assertFalse(batch._reset_stale_doc_for_retry(db, db.get(SyncTask, t3.id)))
+
+        with self.sessions() as db:
+            docs = {d.message: d for d in db.query(self.doc_cls).all()}
+            self.assertEqual(docs['同步重新处理中...'].status, 'PARSING')  # FAILED → PARSING
+            self.assertEqual(docs[''].status, 'COMPLETED')  # COMPLETED 不动
+
+    def test_should_skip_reupload_reparses_failed_docs(self):
+        """增量跳过：解析失败的文档不跳过（重传触发重新解析），已完成的照常跳过。"""
+        from types import SimpleNamespace
+        from app.services.sync import batch
+
+        def mapping(status='synced', content_hash='h1', document_id='d'):
+            return SimpleNamespace(status=status, content_hash=content_hash,
+                                   document_id=document_id)
+
+        def doc(status):
+            return SimpleNamespace(status=status)
+
+        # 内容未变 + 文档已完成 → 跳过
+        self.assertTrue(batch._should_skip_reupload(mapping(), 'h1', doc('COMPLETED')))
+        # 内容未变 + 解析在途 → 跳过（由 refresh 段收尾）
+        self.assertTrue(batch._should_skip_reupload(mapping(), 'h1', doc('PARSING')))
+        # 解析失败/已取消 → 不跳过（重新提交解析）
+        self.assertFalse(batch._should_skip_reupload(mapping(), 'h1', doc('FAILED')))
+        self.assertFalse(batch._should_skip_reupload(mapping(), 'h1', doc('CANCELLED')))
+        # 内容已变化 / 映射未同步 / 无映射 → 不跳过
+        self.assertFalse(batch._should_skip_reupload(mapping(), 'h2', doc('COMPLETED')))
+        self.assertFalse(batch._should_skip_reupload(mapping(status='error'), 'h1', doc('COMPLETED')))
+        self.assertFalse(batch._should_skip_reupload(None, 'h1', doc('COMPLETED')))
+        # 文档行已删除（映射残留）→ 跳过
+        self.assertTrue(batch._should_skip_reupload(mapping(), 'h1', None))
+
     def test_refresh_parsing_documents_settles_terminal_sync_side(self):
         """tick refresh：文档到终态后在同步侧收尾任务（不再经 AsyncSession）。"""
         from app.services.sync import batch

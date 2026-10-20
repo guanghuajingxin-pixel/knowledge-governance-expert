@@ -53,7 +53,7 @@ if [ "$QUICK" = "0" ]; then
   echo "== 6. 服务延迟探测 =="
   probe() { printf "%-42s " "$1"; curl -s -m 30 -o /dev/null -w "%{http_code}  %{time_total}s\n" "$2"; }
   probe "kb-api  :8000/health" http://localhost:8000/health
-  probe "web     :3000/"       http://localhost:3000/
+  probe "web     :8080/"       http://localhost:8080/
   probe "mineru-kit :8010"     http://127.0.0.1:8010/v1/health
   probe "mineru-webui :7860"   http://127.0.0.1:7860/
   PG_START=$(python3 -c "import time;print(time.time())")

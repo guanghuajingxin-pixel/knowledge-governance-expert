@@ -30,7 +30,7 @@ cd services/kb-api && uv run celery -A app.worker worker -Q ingestion --concurre
 cd services/faq-service && uv run uvicorn app.main:app --reload --port 8004
 
 # 6. Start frontend
-cd web && pnpm install && pnpm dev   # http://localhost:3000 or :5173
+cd web && pnpm install && pnpm dev   # http://localhost:8080 (permanent convention; 3000 is banned)
 ```
 
 ### Docker all-in-one mode
@@ -67,7 +67,7 @@ pnpm test:run     # vitest run
 **MVP**: 3 application processes + 5 Docker infrastructure containers, sharing one PostgreSQL database.
 
 ```
-Web (Vue 3) :5173  ──/api/v1──►  kb-api :8000       (FastAPI + BGE-M3)
+Web (Vue 3) :8080  ──/api/v1──►  kb-api :8000       (FastAPI + BGE-M3)
                       /api/v1/faq ► faq-service :8004  (FastAPI)
 
 kb-worker  (Celery, queue: ingestion)

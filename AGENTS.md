@@ -34,8 +34,8 @@ cd services/kb-api && uv run uvicorn app.main:app --reload --port 8000
 cd services/kb-api && uv run celery -A app.worker worker -Q ingestion --concurrency=2 -l info
 cd services/faq-service && uv run uvicorn app.main:app --reload --port 8004
 
-# 6. 前端由 start-dev.sh 一并启动（web :3000 / portal :80）；手动方式：
-cd web && pnpm install && pnpm dev   # http://localhost:3000
+# 6. 前端由 start-dev.sh 一并启动（web :8080（永久口径，禁用 3000）/ portal :80）；手动方式：
+cd web && pnpm install && pnpm dev   # http://localhost:8080
 ```
 
 > **认证策略约定**：本地调试不再有免密自动登录通道（DEV_AUTH_TOKEN/dev-login 已移除）。两种策略均由 `scripts/start-dev.sh` 启动时注入：`local` = 本地账号登录（门户用户/角色管理直接管本地 PG 账号）；`keycloak` = 经 `scripts/dev-sso-tunnel.sh` 隧道调用 166.2 身份中心（本地调试也一样，issuer `http://127.0.0.1:8180/realms/jack` 三方一致零改造）。**服务端（10.10.166.2）默认使用 KEYCLOAK 登录**。
@@ -90,7 +90,7 @@ pnpm test:run     # vitest run
 **MVP**: 3 application processes + 5 Docker infrastructure containers, sharing one PostgreSQL database.
 
 ```
-Web (Vue 3) :5173  ──/api/v1──►  kb-api :8000       (FastAPI, models external)
+Web (Vue 3) :8080  ──/api/v1──►  kb-api :8000       (FastAPI, models external)
                       /api/v1/faq ► faq-service :8004  (FastAPI)
 
 kb-worker  (Celery, queue: ingestion)
