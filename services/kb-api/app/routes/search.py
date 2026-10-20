@@ -305,13 +305,13 @@ _ACTIVE_QA: dict[tuple[str, str], asyncio.Task] = {}
 async def _qa_events(params: dict):
     from app.services.agent.deerflow_runner import (DeerflowUnavailable,
                                                      cancel_deerflow_stream,
-                                                     run_deerflow_stream)
+                                                     run_deerflow_stream_with_retry)
     if not params["llm_config"].get("api_key"):
         yield {"type": "config_error", "code": "llm_not_configured", "message": "请先在系统配置中配置问答模型。"}
         return
     try:
         async with asyncio.timeout(660):
-            async for event in run_deerflow_stream(**params):
+            async for event in run_deerflow_stream_with_retry(**params):
                 yield event
     except asyncio.TimeoutError:
         await cancel_deerflow_stream(params["thread_id"])
@@ -326,7 +326,7 @@ async def _qa_events(params: dict):
     except DeerflowUnavailable as exc:
         # fail-fast：sidecar 未就绪直接报错，不回退旧链
         yield {"type": "config_error", "code": "agent_not_ready",
-               "message": f"DeerFlow 问答服务未就绪：{exc}。请确认 sidecar 已启动。"}
+               "message": f"问答服务未就绪：{exc}。请稍后重试或联系管理员检查服务状态。"}
     except Exception:
         import logging
         logging.getLogger(__name__).exception("DeerFlow QA failed")

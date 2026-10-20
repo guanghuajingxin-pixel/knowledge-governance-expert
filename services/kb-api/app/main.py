@@ -75,6 +75,16 @@ async def lifespan(app: FastAPI):
         import logging
         logging.getLogger(__name__).warning("连接池预热任务启动失败（不影响启动）: %r", e)
 
+    # 检索内核预热：RAGFlow 分词器词典懒加载 1s 级，放启动阶段吃掉，
+    # 避免首个检索请求承担冷启动成本（线程内执行，不阻塞事件循环）。
+    try:
+        import logging
+        from kb_common.rag import scoring as _rag_scoring
+        await asyncio.wait_for(asyncio.to_thread(_rag_scoring.warmup), timeout=15)
+        logging.getLogger(__name__).info("检索内核（分词器）预热完成")
+    except Exception as e:  # noqa: BLE001 — 预热失败只回退到旧的懒加载行为
+        logging.getLogger(__name__).warning("检索内核预热失败（首个请求将承担加载成本）: %r", e)
+
     # 旧版单值配置 → LLM profiles 表一次性迁移（模型配置页下线后存量配置仍可见可管理）
     try:
         from app.routes.settings_route import seed_profiles_from_legacy_settings

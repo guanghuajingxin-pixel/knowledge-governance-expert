@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any, Self
 
@@ -170,6 +171,12 @@ class AppConfig(BaseModel):
 
         Environment variables are resolved using the `os.getenv` function. Example: $OPENAI_API_KEY
 
+        Modified for knowledge-governance-expert: only strings whose remainder is a
+        valid environment variable name (letters/digits/underscore, not starting
+        with a digit) are treated as references. Literal secrets that merely start
+        with `$` (e.g. bcrypt-style API keys like `$2b$12$...`) must pass through
+        verbatim instead of failing config load with an obscure getenv error.
+
         Args:
             config: The config to resolve environment variables in.
 
@@ -177,7 +184,7 @@ class AppConfig(BaseModel):
             The config with environment variables resolved.
         """
         if isinstance(config, str):
-            if config.startswith("$"):
+            if config.startswith("$") and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", config[1:]):
                 env_value = os.getenv(config[1:])
                 if env_value is None:
                     raise ValueError(f"Environment variable {config[1:]} not found for config value {config}")

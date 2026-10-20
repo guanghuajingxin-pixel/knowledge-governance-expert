@@ -5,8 +5,9 @@ import os
 from pathlib import Path
 
 import yaml
+import pytest
 
-from deerflow.config.app_config import get_app_config, reset_app_config
+from deerflow.config.app_config import AppConfig, get_app_config, reset_app_config
 
 
 def _write_config(path: Path, *, model_name: str, supports_thinking: bool) -> None:
@@ -79,3 +80,19 @@ def test_get_app_config_reloads_when_config_path_changes(tmp_path, monkeypatch):
         assert second is not first
     finally:
         reset_app_config()
+
+
+def test_resolve_env_variables_treats_non_identifier_dollar_strings_as_literals():
+    """bcrypt 风格 API Key（$2b$12$...）以 $ 开头但不是合法环境变量名，必须原样透传。"""
+    bcrypt_key = "$2b$12$bso5AC/NM3paYsN68rtGk.bAC8es.DZG.AJJdvWKcQwq2yu5dUSR."
+    config = {"models": [{"name": "m", "api_key": bcrypt_key}]}
+    resolved = AppConfig.resolve_env_variables(config)
+    assert resolved["models"][0]["api_key"] == bcrypt_key
+
+
+def test_resolve_env_variables_still_resolves_named_references(monkeypatch):
+    """合法 $VAR 引用行为不变：存在则解析，缺失仍报错。"""
+    monkeypatch.setenv("TEST_DF_API_KEY", "sk-real")
+    assert AppConfig.resolve_env_variables("$TEST_DF_API_KEY") == "sk-real"
+    with pytest.raises(ValueError, match="TEST_DF_MISSING"):
+        AppConfig.resolve_env_variables("$TEST_DF_MISSING")

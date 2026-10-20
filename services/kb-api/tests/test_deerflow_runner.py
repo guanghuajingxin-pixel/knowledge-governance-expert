@@ -182,3 +182,85 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(pauses[0]["question"], "继续探索？")
         self.assertEqual(pauses[0]["options"], ["继续", "停止"])
         self.assertFalse(any(e["type"] == "final" for e in events))
+
+
+class NotifyReconfigTests(unittest.IsolatedAsyncioTestCase):
+    """LLM 配置保存后通知 sidecar 热更新（fire-and-forget，失败静默）。"""
+
+    async def test_posts_reconfig_and_swallows_errors(self):
+        real_client = httpx.AsyncClient
+        captured = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured.append(str(request.url))
+            return httpx.Response(200, json={"ok": True})
+
+        def factory(*args, **kwargs):
+            return real_client(transport=httpx.MockTransport(handler))
+
+        with patch.object(deerflow_runner.httpx, "AsyncClient", factory):
+            await deerflow_runner.notify_reconfig()
+        self.assertEqual(captured, [f"{deerflow_runner.DEERFLOW_URL}/v1/reconfig"])
+
+        def failing(*args, **kwargs):
+            return real_client(transport=httpx.MockTransport(
+                lambda request: httpx.Response(500)))
+
+        with patch.object(deerflow_runner.httpx, "AsyncClient", failing):
+            await deerflow_runner.notify_reconfig()  # 不抛异常即通过
+
+        def unreachable(*args, **kwargs):
+            raise httpx.ConnectError("refused")
+
+        with patch.object(deerflow_runner.httpx, "AsyncClient", unreachable):
+            await deerflow_runner.notify_reconfig()  # sidecar 未启动时静默
+
+
+class RetryOnBusyTests(unittest.IsolatedAsyncioTestCase):
+    """上游个人级并发限额（429 personal_rolling_*）自动退避重试。"""
+
+    @staticmethod
+    def _fake_stream(frames):
+        async def _run(**kwargs):
+            for f in frames:
+                yield f
+        return _run
+
+    async def _collect(self, runs_frames):
+        calls = {"n": 0}
+
+        def factory(**kwargs):
+            frames = runs_frames[min(calls["n"], len(runs_frames) - 1)]
+            calls["n"] += 1
+            return self._fake_stream(frames)(**kwargs)
+
+        with patch.object(deerflow_runner, "run_deerflow_stream", factory):
+            return [e async for e in deerflow_runner.run_deerflow_stream_with_retry(
+                query="q", thread_id="t1")]
+
+    async def test_busy_then_success_retries(self):
+        busy = {"type": "config_error", "message": "RateLimitError: personal_rolling_7d_concurrent_attempt"}
+        events = await self._collect([
+            [{"type": "ready"}, busy],
+            [{"type": "ready"}, {"type": "answer_delta", "text": "答案"},
+             {"type": "final", "result": {"answer": "答案"}}],
+        ])
+        retries = [e for e in events if e.get("step_id") == "upstream_retry"]
+        self.assertEqual(len(retries), 1)
+        self.assertFalse(any(e["type"] == "config_error" for e in events))
+        self.assertTrue(any(e["type"] == "final" for e in events))
+
+    async def test_busy_after_progress_not_retried(self):
+        busy = {"type": "config_error", "message": "personal_rolling 上游拒绝"}
+        events = await self._collect([
+            [{"type": "tool_start", "call_id": "c1", "name": "knowledge_search"}, busy],
+        ])
+        self.assertTrue(any(e["type"] == "config_error" for e in events))
+        self.assertFalse(any(e.get("step_id") == "upstream_retry" for e in events))
+
+    async def test_persistent_busy_exhausts_and_forwards_last_error(self):
+        busy = {"type": "config_error", "message": "personal_rolling"}
+        events = await self._collect([[{"type": "ready"}, busy]] * 3)
+        retries = [e for e in events if e.get("step_id") == "upstream_retry"]
+        self.assertEqual(len(retries), 2)  # 前两次重试，第三次透传原始错误
+        self.assertEqual(sum(1 for e in events if e["type"] == "config_error"), 1)

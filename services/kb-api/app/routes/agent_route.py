@@ -32,7 +32,7 @@ async def _df_get(path: str) -> dict:
     except Exception as e:  # noqa: BLE001
         raise HTTPException(
             status_code=503,
-            detail=f"DeerFlow 智能体服务未就绪（{e.__class__.__name__}），请确认 sidecar 已启动",
+            detail=f"智能体服务未就绪（{e.__class__.__name__}），请确认 sidecar 已启动",
         ) from e
 
 
@@ -50,7 +50,7 @@ async def _df_post(path: str, payload: dict) -> dict:
     except httpx.RequestError as e:
         raise HTTPException(
             status_code=503,
-            detail=f"DeerFlow 智能体服务未就绪（{e.__class__.__name__}），请确认 sidecar 已启动",
+            detail=f"智能体服务未就绪（{e.__class__.__name__}），请确认 sidecar 已启动",
         ) from e
 
 
@@ -68,7 +68,7 @@ async def _df_put(path: str, payload: dict) -> dict:
     except httpx.RequestError as e:
         raise HTTPException(
             status_code=503,
-            detail=f"DeerFlow 智能体服务未就绪（{e.__class__.__name__}），请确认 sidecar 已启动",
+            detail=f"智能体服务未就绪（{e.__class__.__name__}），请确认 sidecar 已启动",
         ) from e
 
 
@@ -201,7 +201,7 @@ async def remove_skill(slug: str,
     except httpx.RequestError as e:
         raise HTTPException(
             status_code=503,
-            detail=f"DeerFlow 智能体服务未就绪（{e.__class__.__name__}），请确认 sidecar 已启动",
+            detail=f"智能体服务未就绪（{e.__class__.__name__}），请确认 sidecar 已启动",
         ) from e
 
 

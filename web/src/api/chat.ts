@@ -32,6 +32,8 @@ export interface TokenUsage {
 export interface ChatResponse {
   answer_status?: 'answered' | 'partial' | 'insufficient' | 'clarification' | 'greeting'
   engine?: string
+  /** sidecar 实际生效模型名：有值时覆盖前端本地选择的展示（配置热更新后以实际为准） */
+  model?: string
   quality?: { verification: string; dws: string; warnings: string[] }
   answer: string
   citations: SearchResult[]

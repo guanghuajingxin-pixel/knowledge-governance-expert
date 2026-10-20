@@ -12,6 +12,7 @@ from kb_common.models import Setting, LLMProfile, RerankProfile, EmbeddingProfil
 from app.deps import require_role, get_principal, get_current_user
 from kb_common.config import get_settings
 from kb_common.clients import llm_client
+from app.services.agent.deerflow_runner import notify_reconfig
 
 router = APIRouter(prefix="/api/v1/settings", tags=["settings"])
 
@@ -798,6 +799,7 @@ async def create_llm_profile(body: LLMProfileIn,
         await _clear_other_defaults(s, str(profile.id))
     await _sync_legacy_llm_settings(s)
     await s.commit()
+    await notify_reconfig()  # 默认模型可能变化，通知 DeerFlow sidecar 热更新
     return {"ok": True, "id": str(profile.id)}
 
 
@@ -831,6 +833,7 @@ async def update_llm_profile(profile_id: str, body: LLMProfileIn,
             await _clear_other_defaults(s, profile_id)
     await _sync_legacy_llm_settings(s)
     await s.commit()
+    await notify_reconfig()  # 默认模型可能变化，通知 DeerFlow sidecar 热更新
     return {"ok": True}
 
 
@@ -846,6 +849,7 @@ async def delete_llm_profile(profile_id: str,
     await s.commit()
     await _sync_legacy_llm_settings(s)
     await s.commit()
+    await notify_reconfig()  # 默认模型可能变化，通知 DeerFlow sidecar 热更新
     return {"ok": True}
 
 

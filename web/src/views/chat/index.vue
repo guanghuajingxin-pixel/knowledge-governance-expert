@@ -680,6 +680,8 @@ async function askQuestion(q: string, action: '' | 'continue' | 'stop' = '', tar
         onFinal: (res) => {
           const msg = assistantMsg
           msg.done = true
+          // sidecar 实际生效模型优先：配置热更新后页面显示以真实运行为准
+          if (res.model) run.model = res.model
           // 全量召回快照（含未引用分段）：问答明细记录「过程中召回了哪些」
           msg.retrievalAll = res.retrieval_all || []
           // 完成：最后一步标记完成，过程条自动收起（用户可点击展开）

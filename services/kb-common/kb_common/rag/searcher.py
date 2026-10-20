@@ -44,6 +44,23 @@ async def _bm25(es: AsyncElasticsearch, index: str, query: str, top_k: int, filt
     return [(h["_id"], h["_score"], h["_source"]) for h in r["hits"]["hits"]]
 
 
+async def _none() -> list:
+    return []
+
+
+async def _search_kb(es: AsyncElasticsearch, kb_id: str, qvec, query: str,
+                     count: int, filters: dict, mode: str):
+    """单库检索：kNN 与 BM25 并行执行。返回 (index, knn_hits, lexical_hits)；索引不存在返回空。"""
+    index = f"kb_{kb_id.replace('-', '')}"
+    if not await es.indices.exists(index=index):
+        return index, [], []
+    knn, lexical = await asyncio.gather(
+        _knn(es, index, qvec, count, filters) if qvec is not None else _none(),
+        _bm25(es, index, query, count, filters) if mode != 'semantic' else _none(),
+    )
+    return index, knn, lexical
+
+
 async def _search(kb_ids, query, top_k, filters, rerank, mode):
     if not query.strip() or not kb_ids:
         return []
@@ -60,13 +77,12 @@ async def _search(kb_ids, query, top_k, filters, rerank, mode):
                 raise  # 纯向量检索依赖向量，缺向量无法降级
             logger.warning("ES kb %s embedding failed, fallback to keyword: %s", kb_ids, e)
     es = es_client.es
+    # 多库并行：KB 间 gather 并行，库内 kNN/BM25 也并行（原为两层串行 await）。
+    per_kb = await asyncio.gather(
+        *(_search_kb(es, kb_id, qvec, query, count, filters, mode)
+          for kb_id in dict.fromkeys(kb_ids)))
     candidates = {}
-    for kb_id in dict.fromkeys(kb_ids):
-        index = f"kb_{kb_id.replace('-', '')}"
-        if not await es.indices.exists(index=index):
-            continue
-        knn = await _knn(es, index, qvec, count, filters) if qvec is not None else []
-        lexical = await _bm25(es, index, query, count, filters) if mode != 'semantic' else []
+    for index, knn, lexical in per_kb:
         knn_scores = {hid: score for hid, score, _ in knn}
         for hid, raw, src in knn + lexical:
             key = (index, hid)

@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -31,6 +32,35 @@ _HEALTH_TTL = 5.0
 
 class DeerflowUnavailable(Exception):
     """sidecar 未启动或未就绪；调用方直接报错（fail-fast），不回退旧链。"""
+
+
+async def notify_reconfig() -> None:
+    """LLM/智能体配置保存后通知 sidecar 热更新（重新拉 bootstrap → 重写 config.yaml）。
+
+    fire-and-forget：sidecar 未启动或通知失败不影响配置保存，仅记日志；
+    sidecar 下次重启时 ensure_bootstrapped 仍会拉到最新配置。
+    """
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.post(f"{DEERFLOW_URL}/v1/reconfig")
+            resp.raise_for_status()
+    except Exception as e:  # noqa: BLE001 - sidecar 未启动属常态，静默降级
+        logger.warning("sidecar reconfig notify failed: %s", e)
+
+
+async def get_sidecar_model() -> str:
+    """读取 sidecar 当前生效模型名（/health 返回），失败返回空串。
+
+    用于 final 事件向前端透传真实模型：前端展示以实际运行为准，
+    避免配置热更新后页面仍显示旧模型名。
+    """
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            resp = await client.get(f"{DEERFLOW_URL}/health")
+            resp.raise_for_status()
+            return str(resp.json().get("model") or "")
+    except Exception:  # noqa: BLE001 - 非关键信息，失败不阻断回答
+        return ""
 
 
 def _filter_cited_citations(answer: str, citations: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -179,6 +209,41 @@ async def _generate_follow_ups(query: str, answer: str,
     except Exception as e:  # noqa: BLE001
         logger.warning("deerflow follow-up generation failed: %s", e)
         return []
+
+
+_BUSY_MARK = "personal_rolling"  # 上游个人级并发限额错误码特征（HTTP 429）
+
+
+async def run_deerflow_stream_with_retry(**kwargs):
+    """上游个人级并发限额（429 personal_rolling_*）时自动退避重试。
+
+    仅在本轮尚未产生实质进展（未进入工具/答案流）时重试：此时前端停在
+    「处理问题」步骤，重跑无重复感；已有进展后的失败原样透传。
+    """
+    for attempt in range(3):
+        progressed = False
+        retriable = False
+        agen = run_deerflow_stream(**kwargs)
+        try:
+            async for event in agen:
+                etype = event.get("type")
+                if etype in {"tool_start", "phase", "citations", "answer_delta"}:
+                    progressed = True
+                if etype == "config_error" and not progressed \
+                        and _BUSY_MARK in str(event.get("message") or ""):
+                    if attempt < 2:
+                        retriable = True
+                        break
+                    # 重试额度用尽：原样透传最后一次错误
+                yield event
+        finally:
+            await agen.aclose()
+        if not retriable:
+            return
+        wait = 3 * (attempt + 1)
+        yield _sse({"type": "step", "step_id": "upstream_retry", "status": "running",
+                    "title": "上游模型繁忙", "detail": f"上一请求尚未结束，{wait} 秒后自动重试"})
+        await asyncio.sleep(wait)
 
 
 async def run_deerflow_stream(
@@ -449,9 +514,9 @@ async def run_deerflow_stream(
                             logger.info("deerflow stream cancelled by user: %s", thread_id)
                             return
                         elif etype == "error":
-                            warnings.append(f"DeerFlow 智能体执行失败：{evt.get('message', '未知错误')}")
+                            warnings.append(f"智能体执行失败：{evt.get('message', '未知错误')}")
                             yield _sse({"type": "config_error", "code": "agent_failed",
-                                        "message": f"🤖 DeerFlow 智能体执行失败：{evt.get('message', '未知错误')}"})
+                                        "message": f"🤖 智能体执行失败：{evt.get('message', '未知错误')}"})
                             return
                         elif etype == "end":
                             saw_end = True
@@ -554,6 +619,8 @@ async def run_deerflow_stream(
         "type": "final",
         "result": {
             "answer": answer or "（未生成回答）",
+            # sidecar 实际生效模型：前端展示以此为准（配置热更新后页面不再显示旧模型）
+            "model": await get_sidecar_model(),
             "citations": citations,
             # 全量召回快照（含未引用分段，cited 标记是否被答案引用）：问答明细用
             "retrieval_all": retrieval_all,

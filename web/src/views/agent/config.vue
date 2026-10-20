@@ -295,7 +295,7 @@ async function loadPrompts() {
     persona.content = p.content; persona.saved = p.content; persona.custom = p.custom; persona.default = p.default
     personaLoaded.value = true
   } catch (e: any) {
-    ElMessage.error(e?.response?.data?.detail || '人格配置加载失败（请确认 DeerFlow 服务已启动）')
+    ElMessage.error(e?.response?.data?.detail || '人格配置加载失败（请确认智能体服务已启动）')
   } finally {
     promptLoading.value = false
   }
@@ -381,7 +381,7 @@ async function loadSkills() {
     const res = await listSkills()
     skills.value = res.skills || []
   } catch (e: any) {
-    ElMessage.error(e?.response?.data?.detail || '技能加载失败（请确认 DeerFlow 服务已启动）')
+    ElMessage.error(e?.response?.data?.detail || '技能加载失败（请确认智能体服务已启动）')
   } finally {
     skillsLoading.value = false
   }
@@ -560,7 +560,7 @@ async function onImportFile(e: Event) {
           <el-collapse-item name="model">
             <template #title>
               <span class="card-title"><span class="card-ico ico-model">🧊</span> 模型
-                <span class="card-hint">仅可选择系统已接入的模型（最多 10 个）；问答页模型下拉仅展示此列表；点击模型右侧标记设置智能体默认模型（DeerFlow 问答与问答页预选，未设置时跟随列表首个），保存后热更新至服务</span>
+                <span class="card-hint">仅可选择系统已接入的模型（最多 10 个）；问答页模型下拉仅展示此列表；点击模型右侧标记设置智能体默认模型（智能体问答与问答页预选，未设置时跟随列表首个），保存后热更新至服务</span>
               </span>
             </template>
             <el-select
@@ -725,7 +725,7 @@ async function onImportFile(e: Event) {
               </span>
             </template>
             <div class="mode-desc">
-              <p>开启后 DeerFlow 智能体对复杂问题先生成任务计划（TodoList）再逐步检索执行；关闭后直接检索作答。检索轮数上限见「超参维护」。</p>
+              <p>开启后智能体对复杂问题先生成任务计划（TodoList）再逐步检索执行；关闭后直接检索作答。检索轮数上限见「超参维护」。</p>
             </div>
           </el-collapse-item>
 
@@ -737,7 +737,7 @@ async function onImportFile(e: Event) {
               </span>
             </template>
             <div class="mode-desc">
-              <p>开启后同一会话共享 DeerFlow 会话记忆（按会话隔离），用于理解「它/那个/上一条」等指代；关闭后每轮问答使用独立线程，不携带上文。</p>
+              <p>开启后同一会话共享会话记忆（按会话隔离），用于理解「它/那个/上一条」等指代；关闭后每轮问答使用独立线程，不携带上文。</p>
             </div>
           </el-collapse-item>
 
@@ -769,7 +769,7 @@ async function onImportFile(e: Event) {
               </div>
             </div>
             <div class="mode-desc">
-              <p>Top-P 与 Tokens 上限保存后热更新至 DeerFlow 服务、新对话生效；召回条数与检索轮数逐问即时生效（单轮 knowledge_search 调用上限 = 轮数 × 3）。</p>
+              <p>Top-P 与 Tokens 上限保存后热更新至智能体服务、新对话生效；召回条数与检索轮数逐问即时生效（单轮 knowledge_search 调用上限 = 轮数 × 3）。</p>
             </div>
           </el-collapse-item>
         </el-collapse>
@@ -777,7 +777,7 @@ async function onImportFile(e: Event) {
 
       <!-- ============ 人格（DeerFlow SOUL 提示词） ============ -->
       <el-tab-pane label="人格" name="prompt">
-        <el-alert title="人格（SOUL）即问答智能体（DeerFlow）的系统提示词：保存后在新对话中生效，自定义内容持久化，服务重启不丢失。" type="info" :closable="false" show-icon />
+        <el-alert title="人格（SOUL）即问答智能体的系统提示词：保存后在新对话中生效，自定义内容持久化，服务重启不丢失。" type="info" :closable="false" show-icon />
         <div v-loading="promptLoading">
           <!-- 人格 SOUL.md -->
           <div class="prompt-card">
@@ -794,7 +794,7 @@ async function onImportFile(e: Event) {
               </div>
             </div>
             <p class="prompt-desc">
-              定义智能体的身份、职责与行为准则（DeerFlow 系统提示词）。例如：双源检索策略、
+              定义智能体的身份、职责与行为准则（智能体系统提示词）。例如：双源检索策略、
               答案风格、引用规范。修改后<strong>在问答智能体的新对话中生效</strong>，进行中的会话不受影响；自定义内容持久化，服务重启不丢失。
             </p>
             <el-input
@@ -814,7 +814,7 @@ async function onImportFile(e: Event) {
           <div class="skill-toolbar">
             <div class="skill-toolbar-hint">
               兼容 ClawHub 通用技能结构：每个技能为一个目录 + <code>SKILL.md</code>（含 name/description frontmatter）。
-              问答智能体（DeerFlow）在新对话中按启用状态加载这些技能；问答技能与其他技能统一在此维护。
+              问答智能体在新对话中按启用状态加载这些技能；问答技能与其他技能统一在此维护。
             </div>
             <div class="skill-toolbar-ops">
               <input

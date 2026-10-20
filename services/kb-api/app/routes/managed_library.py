@@ -572,13 +572,13 @@ def _enhancements_for(lib, doc) -> dict[str, bool]:
 
 
 async def _enhancement_llm_config(s: AsyncSession) -> dict[str, str]:
-    """LLM 运行配置沿用系统设置优先、.env 回退的口径。"""
-    keys = ("llm_base_url", "llm_api_key", "llm_model")
-    rows = (await s.execute(select(Setting).where(Setting.key.in_(keys)))).scalars().all()
-    configured = {row.key: row.value for row in rows}
-    defaults = get_settings()
-    return {key.removeprefix("llm_"): (configured.get(key) or getattr(defaults, key) or "").strip()
-            for key in keys}
+    """LLM 运行配置与智能问答同口径：llm_profiles 默认模型优先，settings/env 兜底。"""
+    from app.services.llm_resolver import resolve_llm_config
+
+    cfg = await resolve_llm_config(s)
+    return {"base_url": (cfg.get("base_url") or "").strip(),
+            "api_key": (cfg.get("api_key") or "").strip(),
+            "model": (cfg.get("model") or "").strip()}
 
 
 async def _read_chunk_images(doc, content: str) -> dict[str, bytes]:

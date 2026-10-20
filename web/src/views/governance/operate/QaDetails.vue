@@ -62,7 +62,7 @@
 
         <!-- 元信息行 -->
         <div class="qa-meta-row">
-          <span class="meta-chip">系统编码：{{ item.model || item.meta || 'DeerFlow' }}</span>
+          <span class="meta-chip">系统编码：{{ item.model || item.meta || '智能体' }}</span>
           <el-divider direction="vertical" />
           <span class="meta-chip">TopK：{{ item.retrieval.length || '-' }}</span>
           <el-divider direction="vertical" />

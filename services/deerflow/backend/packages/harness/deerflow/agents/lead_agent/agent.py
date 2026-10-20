@@ -10,6 +10,7 @@ from deerflow.agents.middlewares.exploration_timeout_middleware import Explorati
 from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
 from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
 from deerflow.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
+from deerflow.agents.middlewares.system_position_middleware import SystemPositionMiddleware
 from deerflow.agents.middlewares.title_middleware import TitleMiddleware
 from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
 from deerflow.agents.middlewares.tool_error_handling_middleware import build_lead_runtime_middlewares
@@ -258,6 +259,11 @@ def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_nam
     # ExplorationTimeoutMiddleware — 限时探索：1min/5min 询问用户是否继续，10min 强制收尾
     # 必须在 ClarificationMiddleware 之前（后者需保持在链尾拦截 ask_clarification）
     middlewares.append(ExplorationTimeoutMiddleware())
+
+    # SystemPositionMiddleware — model call 出口把中途注入的 system 消息合并到首位，
+    # 兼容要求 system 前置的严格 OpenAI 兼容网关（vLLM chat template 等）。
+    # 放在链条最末（最内层）：规范化所有 middleware 处理后的最终请求消息。
+    middlewares.append(SystemPositionMiddleware())
 
     # ClarificationMiddleware should always be last
     middlewares.append(ClarificationMiddleware())

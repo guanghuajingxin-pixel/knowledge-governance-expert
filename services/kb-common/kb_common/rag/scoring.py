@@ -13,6 +13,15 @@ def queryer() -> FulltextQueryer:
     return FulltextQueryer()
 
 
+def warmup() -> None:
+    """预热检索内核，触发分词词典/同义词典等懒加载（实测首次 prepare_query 约 5s）。
+
+    仅构造 FulltextQueryer 不够（毫秒级），必须真正跑一次 prepare_query 才会
+    加载 RAGFlow 词典。服务启动时调用，把这笔一次性成本挪到启动阶段。
+    """
+    prepare_query('知识库检索预热')
+
+
 @lru_cache(maxsize=4096)
 def tokens(text: str) -> tuple[str, ...]:
     return tuple(rag_tokenizer.tokenize(text).split())

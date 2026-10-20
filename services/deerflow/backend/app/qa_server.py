@@ -49,6 +49,7 @@ SOUL_PATH = DATA_DIR / "SOUL.md"
 PERSONA_CUSTOM_PATH = DATA_DIR / "persona.custom.md"
 _DEFAULT_AGENT_NAME = "杰克百晓生"
 _BOOT_AGENT_NAME = ""   # 引导/热更新时从 kb-api 配置读取的智能体名
+_BOOT_MODEL = ""        # 引导/热更新时写入 config.yaml 的生效模型名
 SKILLS_DIR = BACKEND_DIR.parent / "skills"
 _MAX_PROMPT_CHARS = 20000
 
@@ -118,6 +119,7 @@ def _bootstrap_from_env() -> dict[str, Any] | None:
 
 def write_config(boot: dict[str, Any]) -> None:
     """根据引导配置生成 DeerFlow config.yaml。"""
+    global _BOOT_MODEL
     config = {
         "config_version": 3,
         "models": [
@@ -183,6 +185,7 @@ def write_config(boot: dict[str, Any]) -> None:
         "checkpointer": {"type": "sqlite", "connection_string": "checkpoints.db"},
     }
     CONFIG_PATH.write_text(yaml.safe_dump(config, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    _BOOT_MODEL = str(config["models"][0]["model"] or "")
     logger.info("config.yaml written: model=%s base_url=%s", config["models"][0]["model"], config["models"][0]["base_url"])
 
 
@@ -308,7 +311,8 @@ app = FastAPI(title="DeerFlow QA Sidecar", version="2.0")
 @app.get("/health")
 def health():
     ready = CONFIG_PATH.exists()
-    return {"status": "ok" if ready else "bootstrapping", "config_ready": ready}
+    return {"status": "ok" if ready else "bootstrapping", "config_ready": ready,
+            "model": _BOOT_MODEL}
 
 
 @app.post("/v1/reload")
