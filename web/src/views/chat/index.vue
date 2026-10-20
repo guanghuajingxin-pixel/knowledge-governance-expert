@@ -7,7 +7,7 @@ import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import { streamChat, cancelChat, type StreamEvent, type TokenUsage, type ChatResponse } from '@/api/chat'
 import { listKnowledgeLibraries, type KnowledgeLibrary } from '@/api/knowledge-library'
-import { listEnabledLlmModels } from '@/api/settings'
+import { listEnabledLlmModels, copyToClipboard } from '@/api/settings'
 import { getGreeting } from '@/api/agent'
 import { useUserStore } from '@/stores/user'
 import type { SearchResult } from '@/types/search'
@@ -869,8 +869,13 @@ function toggleRefs(i: number) {
   else expandedRefs.value.add(i)
 }
 
-function copyText(text: string) {
-  navigator.clipboard.writeText(text).then(() => ElMessage.success('已复制')).catch(() => ElMessage.error('复制失败'))
+async function copyText(text: string) {
+  try {
+    await copyToClipboard(text)
+    ElMessage.success('已复制')
+  } catch {
+    ElMessage.error('复制失败，请手动选择复制')
+  }
 }
 
 function editQuestion(text: string) {
